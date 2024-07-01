@@ -23,6 +23,14 @@ function list_all_children {
 	done
 }
 
+function crictl_rm_preserve_logs {
+	ARGS=
+	if check_crictl_version 1.30; then
+		ARGS=-k
+	fi
+	crictl rm $ARGS "$1"
+}
+
 function check_oci_annotation() {
 	# check for OCI annotation in container's config.json
 	local ctr_id="$1"
@@ -32,6 +40,26 @@ function check_oci_annotation() {
 	config=$(runtime state "$ctr_id" | jq -r .bundle)/config.json
 
 	[ "$(jq -r .annotations.\""$key"\" < "$config")" = "$value" ]
+}
+
+# Helper to create two read/write volumes within the test directory,
+# where the second volume, or a mount point, rather, will be nested
+# within the first one. The helper outputs the path to the test
+# volume (mount point) where it was created.
+# Note: There is no need to explicitly clean, or unmount if you wish,
+# the mounts points this helper creates, as these will be automatically
+# cleaned up as part of the test teardown() function run.
+function create_test_rro_mounts() {
+	# Parent of "--root", keep in sync with test/helpers.bash file.
+	directory="$TESTDIR"/test-volume
+
+	mkdir -p "$directory"
+	mount -t tmpfs none "$directory"
+
+	mkdir -p "$directory"/test-sub-volume
+	mount -t tmpfs none "$directory"/test-sub-volume
+
+	echo "$directory"
 }
 
 @test "ctr not found correct error message" {
@@ -186,7 +214,7 @@ function check_oci_annotation() {
 	ctr_id=$(crictl create "$pod_id" "$newconfig" "$TESTDATA"/sandbox_config.json)
 	crictl start "$ctr_id"
 	wait_until_exit "$ctr_id"
-	crictl rm "$ctr_id"
+	crictl_rm_preserve_logs "$ctr_id"
 
 	# Check that the output is what we expect.
 	logpath="$DEFAULT_LOG_PATH/$pod_id/$ctr_id.log"
@@ -267,7 +295,7 @@ function check_oci_annotation() {
 	ctr_id=$(crictl create "$pod_id" "$newconfig" "$TESTDATA"/sandbox_config.json)
 	crictl start "$ctr_id"
 	wait_until_exit "$ctr_id"
-	crictl rm "$ctr_id"
+	crictl_rm_preserve_logs "$ctr_id"
 
 	# Check that the output is what we expect.
 	logpath="$DEFAULT_LOG_PATH/$pod_id/$ctr_id.log"
@@ -289,7 +317,7 @@ function check_oci_annotation() {
 
 	crictl start "$ctr_id"
 	wait_until_exit "$ctr_id"
-	crictl rm "$ctr_id"
+	crictl_rm_preserve_logs "$ctr_id"
 
 	# Check that the output is what we expect.
 	logpath="$DEFAULT_LOG_PATH/$pod_id/$ctr_id.log"
@@ -312,7 +340,7 @@ function check_oci_annotation() {
 
 	crictl start "$ctr_id"
 	wait_until_exit "$ctr_id"
-	crictl rm "$ctr_id"
+	crictl_rm_preserve_logs "$ctr_id"
 
 	# Check that the output is what we expect.
 	logpath="$DEFAULT_LOG_PATH/$pod_id/$ctr_id.log"
@@ -332,7 +360,7 @@ function check_oci_annotation() {
 	ctr_id=$(crictl create "$pod_id" "$newconfig" "$TESTDATA"/sandbox_config.json)
 	crictl start "$ctr_id"
 	wait_until_exit "$ctr_id"
-	crictl rm "$ctr_id"
+	crictl_rm_preserve_logs "$ctr_id"
 
 	# Check that the output is what we expect.
 	logpath="$DEFAULT_LOG_PATH/$pod_id/$ctr_id.log"
@@ -535,6 +563,21 @@ function check_oci_annotation() {
 	ctr_id=$(crictl run "$TESTDATA"/container_sleep.json "$TESTDATA"/sandbox_config.json)
 
 	[[ $(crictl exec --sync "$ctr_id" /bin/sh -c "for i in $(seq 1 50000000); do echo -n 'a'; done" | wc -c) -le 16777216 ]]
+}
+
+@test "ctr exec{,sync} should be cancelled when container is stopped" {
+	start_crio
+	ctr_id=$(crictl run "$TESTDATA"/container_sleep.json "$TESTDATA"/sandbox_config.json)
+
+	crictl exec --sync "$ctr_id" /bin/bash -c 'while true; do echo XXXXXXXXXXXXXXXXXXXXXXXX; done' &
+	pid1=$!
+	crictl exec "$ctr_id" /bin/bash -c 'while true; do echo XXXXXXXXXXXXXXXXXXXXXXXX; done' || true &
+	pid2=$!
+
+	sleep 1s
+
+	crictl stop "$ctr_id"
+	wait "$pid1" "$pid2"
 }
 
 @test "ctr device add" {
@@ -886,6 +929,37 @@ function check_oci_annotation() {
 	crictl exec --sync "$ctr_id" grep Groups:.1000 /proc/1/status
 }
 
+@test "ctr has gid in supplemental groups with Merge policy" {
+	start_crio
+	jq '	  .linux.security_context.supplemental_groups_policy = "Merge"' \
+		"$TESTDATA"/sandbox_config.json > "$newconfig"
+
+	pod_id=$(crictl runp "$newconfig")
+	jq '	  .image.image = "quay.io/crio/fedora-crio-ci:latest"
+	    |     .linux.security_context.supplemental_groups = [10]' \
+		"$TESTDATA"/container_sleep.json > "$TESTDIR"/container_sleep_modified.json
+
+	ctr_id=$(crictl create "$pod_id" "$TESTDIR"/container_sleep_modified.json "$newconfig")
+
+	crictl exec --sync "$ctr_id" id | grep -q "10"
+}
+
+@test "ctr has only specified gid in supplemental groups with Strict policy" {
+	start_crio
+	jq '	  .linux.security_context.supplemental_groups_policy = "Strict"' \
+		"$TESTDATA"/sandbox_config.json > "$newconfig"
+
+	pod_id=$(crictl runp "$newconfig")
+	jq '	  .image.image = "quay.io/crio/fedora-crio-ci:latest"
+	    |     .linux.security_context.supplemental_groups = [10]' \
+		"$TESTDATA"/container_sleep.json > "$TESTDIR"/container_sleep_modified.json
+
+	ctr_id=$(crictl create "$pod_id" "$TESTDIR"/container_sleep_modified.json "$newconfig")
+
+	# Ensure 10 should not be present in supplemental groups.
+	crictl exec --sync "$ctr_id" id | grep -vq "10"
+}
+
 @test "ctr with low memory configured should not be created" {
 	start_crio
 	pod_id=$(crictl runp "$TESTDATA"/sandbox_config.json)
@@ -994,6 +1068,130 @@ function check_oci_annotation() {
 
 	ctr_id=$(crictl run "$TESTDIR/config" "$TESTDATA"/sandbox_config.json)
 	crictl exec --sync "$ctr_id" findmnt -no TARGET,PROPAGATION "$CTR_DIR" | grep -v private
+}
+
+@test "ctr that mounts container storage as read-only option but not recursively" {
+	# When SELinux is enabled and set to Enforcing, then the read-only
+	# mounts within a container will stop sub-mounts access in a read-write
+	# manner, and this test will then fail, thus it's best to disable it.
+	# Note: This is not a problem on a systems without SELinux.
+	if is_selinux_enforcing; then
+		skip "SELinux is set to Enforcing"
+	fi
+
+	# See https://www.shellcheck.net/wiki/SC2154 for more details.
+	declare stderr
+
+	PARENT_DIR="$(create_test_rro_mounts)"
+	CTR_DIR="/host"
+
+	jq --arg path "$PARENT_DIR" --arg ctr_dir "$CTR_DIR" \
+		'  .mounts = [ {
+			host_path: $path,
+			container_path: $ctr_dir,
+			readonly: true,
+			propagation: 0
+		} ]' \
+		"$TESTDATA"/container_sleep.json > "$TESTDIR"/config
+
+	start_crio
+
+	ctr_id=$(crictl run "$TESTDIR"/config "$TESTDATA"/sandbox_config.json)
+
+	run ! --separate-stderr crictl exec --sync "$ctr_id" touch /host/test
+	[[ "$stderr" == *"Read-only file system"* ]]
+
+	crictl exec --sync "$ctr_id" touch /host/test-sub-volume/test
+}
+
+@test "ctr that mounts container storage as recursively read-only" {
+	requires_kernel "5.12"
+
+	# Check for the minimum cri-tools version that supports RRO mounts.
+	requires_crictl "1.30"
+
+	# See https://www.shellcheck.net/wiki/SC2154 for more details.
+	declare stderr
+
+	PARENT_DIR="$(create_test_rro_mounts)"
+	CTR_DIR="/host"
+
+	jq --arg path "$PARENT_DIR" --arg ctr_dir "$CTR_DIR" \
+		'  .mounts = [ {
+			host_path: $path,
+			container_path: $ctr_dir,
+			readonly: true,
+			recursive_read_only: true,
+			propagation: 0
+		} ]' \
+		"$TESTDATA"/container_sleep.json > "$TESTDIR"/config
+
+	start_crio
+
+	ctr_id=$(crictl run "$TESTDIR"/config "$TESTDATA"/sandbox_config.json)
+
+	run ! --separate-stderr crictl exec --sync "$ctr_id" touch /host/test
+	[[ "$stderr" == *"Read-only file system"* ]]
+
+	run ! --separate-stderr crictl exec --sync "$ctr_id" touch /host/test-sub-volume/test
+	[[ "$stderr" == *"Read-only file system"* ]]
+}
+
+@test "ctr that fails to mount container storage as recursively read-only without readonly option" {
+	requires_kernel "5.12"
+
+	# Check for the minimum cri-tools version that supports RRO mounts.
+	requires_crictl "1.30"
+
+	# See https://www.shellcheck.net/wiki/SC2154 for more details.
+	declare stderr
+
+	# Parent of "--root", keep in sync with test/helpers.bash file.
+	PARENT_DIR="$TESTDIR"
+	CTR_DIR="/host"
+
+	jq --arg path "$PARENT_DIR" --arg ctr_dir "$CTR_DIR" \
+		'  .mounts = [ {
+			host_path: $path,
+			container_path: $ctr_dir,
+			readonly: false,
+			recursive_read_only: true,
+		} ]' \
+		"$TESTDATA"/container_sleep.json > "$TESTDIR"/config
+
+	start_crio
+
+	run ! --separate-stderr crictl run "$TESTDIR"/config "$TESTDATA"/sandbox_config.json
+	[[ "$stderr" == *"recursive read-only mount conflicts with read-write mount"* ]]
+}
+
+@test "ctr that fails to mount container storage as recursively read-only without private propagation" {
+	requires_kernel "5.12"
+
+	# Check for the minimum cri-tools version that supports RRO mounts.
+	requires_crictl "1.30"
+
+	# See https://www.shellcheck.net/wiki/SC2154 for more details.
+	declare stderr
+
+	# Parent of "--root", keep in sync with test/helpers.bash file.
+	PARENT_DIR="$TESTDIR"
+	CTR_DIR="/host"
+
+	jq --arg path "$PARENT_DIR" --arg ctr_dir "$CTR_DIR" \
+		'  .mounts = [ {
+			host_path: $path,
+			container_path: $ctr_dir,
+			readonly: true,
+			recursive_read_only: true,
+			propagation: 2
+		} ]' \
+		"$TESTDATA"/container_sleep.json > "$TESTDIR"/config
+
+	start_crio
+
+	run ! --separate-stderr crictl run "$TESTDIR"/config "$TESTDATA"/sandbox_config.json
+	[[ "$stderr" == *"recursive read-only mount requires private propagation"* ]]
 }
 
 @test "ctr has containerenv" {

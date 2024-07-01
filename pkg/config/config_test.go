@@ -26,7 +26,7 @@ var _ = t.Describe("Config", func() {
 
 	runtimeValidConfig := func() *config.Config {
 		sut.Runtimes["runc"] = &config.RuntimeHandler{
-			RuntimePath: validFilePath, RuntimeType: config.DefaultRuntimeType,
+			RuntimePath: validFilePath, RuntimeType: config.DefaultRuntimeType, ContainerMinMemory: "12MiB",
 		}
 		sut.PinnsPath = validFilePath
 		sut.NamespacesDir = os.TempDir()
@@ -294,6 +294,17 @@ var _ = t.Describe("Config", func() {
 
 			// Then
 			Expect(err).To(HaveOccurred())
+		})
+
+		It("should inherit default value if invalid runtime container minimum memory limit is set", func() {
+			// Given
+			sut.Runtimes["runc"].ContainerMinMemory = "123invalid"
+
+			// When
+			err := sut.RuntimeConfig.Validate(nil, false)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
 		})
 
 		It("should fail on wrong invalid device specification", func() {
@@ -837,9 +848,11 @@ var _ = t.Describe("Config", func() {
 			Expect(err).ToNot(HaveOccurred())
 		})
 
-		It("should create the  NetworkDir", func() {
+		It("should create the NetworkDir", func() {
 			// Given
-			tmpDir := path.Join(os.TempDir(), invalidPath)
+			tmpDir := t.MustTempDir("network")
+			Expect(os.RemoveAll(tmpDir)).ToNot(HaveOccurred())
+
 			sut.NetworkConfig.NetworkDir = tmpDir
 			sut.NetworkConfig.PluginDirs = []string{validDirPath}
 
@@ -848,7 +861,6 @@ var _ = t.Describe("Config", func() {
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
-			os.RemoveAll(tmpDir)
 		})
 
 		It("should fail on invalid NetworkDir", func() {
@@ -1407,6 +1419,117 @@ var _ = t.Describe("Config", func() {
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
+		})
+	})
+
+	t.Describe("RuntimeHandlerFeatures", func() {
+		It("should fail to load runtime features with nothing to load", func() {
+			// Given
+			handler := &config.RuntimeHandler{}
+
+			err := handler.LoadRuntimeFeatures([]byte(``))
+
+			// Then
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should fail to load runtime features with an empty document", func() {
+			// Given
+			handler := &config.RuntimeHandler{}
+
+			err := handler.LoadRuntimeFeatures([]byte(`{}`))
+
+			// Then
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should fail to load OCI runtime features when required attributes are missing", func() {
+			// Given
+			handler := &config.RuntimeHandler{}
+
+			err := handler.LoadRuntimeFeatures(
+				[]byte(`
+					{
+					  "ociVersionMin": "1.0.0",
+					  "mountOptions": ["ro"]
+					}
+				`),
+			)
+
+			// Then
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should fail to load OCI runtime features when malformed document is used", func() {
+			// Given
+			handler := &config.RuntimeHandler{}
+
+			err := handler.LoadRuntimeFeatures(
+				[]byte(`
+					{
+					  "ociVersionMin": "1.0.0",
+					  "ociVersionMax": "1.2.0",
+					  "mountOptions": ["ro",]
+					}
+				`),
+			)
+
+			// Then
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should succeed to load OCI runtime features with support for RRO mounts", func() {
+			// Given
+			handler := &config.RuntimeHandler{}
+
+			err := handler.LoadRuntimeFeatures(
+				[]byte(`
+					{
+					  "ociVersionMin": "1.0.0",
+					  "ociVersionMax": "1.2.0",
+					  "mountOptions": ["ro", "rro"]
+					}
+				`),
+			)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+
+			// When
+			ok := handler.RuntimeSupportsMountFlag("rro")
+
+			// Then
+			Expect(ok).To(BeTrue())
+		})
+
+		It("should succeed to load OCI runtime features with support for ID-mapping", func() {
+			// Given
+			handler := &config.RuntimeHandler{}
+
+			err := handler.LoadRuntimeFeatures(
+				[]byte(`
+					{
+					  "ociVersionMin": "1.0.0",
+					  "ociVersionMax": "1.2.0",
+					  "linux": {
+					    "mountExtensions": {
+					      "idmap": {
+					        "enabled": true
+					      }
+					    }
+					  }
+					}
+				`),
+			)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+
+			// When
+			ok := handler.RuntimeSupportsIDMap()
+
+			// Then
+			Expect(ok).To(BeTrue())
 		})
 	})
 })

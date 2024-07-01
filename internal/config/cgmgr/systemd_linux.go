@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/containers/podman/v4/pkg/rootless"
+	"github.com/containers/storage/pkg/unshare"
 	systemdDbus "github.com/coreos/go-systemd/v22/dbus"
 	"github.com/cri-o/cri-o/internal/config/node"
 	"github.com/cri-o/cri-o/internal/dbusmgr"
@@ -50,7 +50,7 @@ func NewSystemdManager() *SystemdManager {
 		systemdMgr.v1CtrCgMgr = make(map[string]cgroups.Manager)
 		systemdMgr.v1SbCgMgr = make(map[string]cgroups.Manager)
 	}
-	systemdMgr.dbusMgr = dbusmgr.NewDbusConnManager(rootless.IsRootless())
+	systemdMgr.dbusMgr = dbusmgr.NewDbusConnManager(unshare.IsRootless())
 
 	return &systemdMgr
 }
@@ -207,10 +207,10 @@ func (m *SystemdManager) MoveConmonToCgroup(cid, cgroupParent, conmonCgroup stri
 	return "", nil
 }
 
-// SandboxCgroupPath takes the sandbox parent, and sandbox ID. It
-// returns the cgroup parent, cgroup path, and error.
-// It also checks there is enough memory in the given cgroup
-func (m *SystemdManager) SandboxCgroupPath(sbParent, sbID string) (cgParent, cgPath string, _ error) {
+// SandboxCgroupPath takes the sandbox parent, sandbox ID, and container minimum memory.
+// It returns the cgroup parent, cgroup path, and error.
+// It also checks if enough memory is available in the given cgroup.
+func (m *SystemdManager) SandboxCgroupPath(sbParent, sbID string, containerMinMemory int64) (cgParent, cgPath string, _ error) {
 	if sbParent == "" {
 		return "", "", nil
 	}
@@ -220,7 +220,7 @@ func (m *SystemdManager) SandboxCgroupPath(sbParent, sbID string) (cgParent, cgP
 	}
 
 	cgParent = convertCgroupFsNameToSystemd(sbParent)
-	if err := verifyCgroupHasEnoughMemory(sbParent, m.memoryPath, m.memoryMaxFile); err != nil {
+	if err := verifyCgroupHasEnoughMemory(sbParent, m.memoryPath, m.memoryMaxFile, containerMinMemory); err != nil {
 		return "", "", err
 	}
 

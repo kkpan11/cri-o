@@ -230,3 +230,68 @@ EOF
 	#then
 	wait_for_log '"updating runtime configuration"'
 }
+
+@test "reload config should update 'pinned_images'" {
+	OPTION="pinned_images"
+	EXAMPLE_IMAGE=quay.io/crio/fedora-crio-ci:latest
+	# add pinned_images config
+	printf '[crio.image]\npinned_images = [""]\n' > "$CRIO_CONFIG_DIR"/00-default
+	printf '[crio.image]\npinned_images = ["%s"]\n' $EXAMPLE_IMAGE > "$CRIO_CONFIG_DIR"/01-overwrite
+	# image is not pinned
+	output=$(crictl images -o json | jq ".images[] | select(.repoTags[] == \"$EXAMPLE_IMAGE\") |.pinned")
+	[ "$output" == "false" ]
+	reload_crio
+	# image becomes pinned
+	expect_log_success $OPTION $EXAMPLE_IMAGE
+	wait_for_log "Configuration reload completed"
+	output=$(crictl images -o json | jq ".images[] | select(.repoTags[] == \"$EXAMPLE_IMAGE\") |.pinned")
+	[ "$output" == "true" ]
+}
+
+@test "reload config should update 'pinned_images' and only 'pause_image' is pinned" {
+	OPTION="pause_image"
+	printf '[crio.image]\npinned_images = [""]\n' > "$CRIO_CONFIG_DIR"/00-default
+	reload_crio
+	wait_for_log "Configuration reload completed"
+	output=$(crictl images -o json | jq '.images[] | select(.pinned == true) | .repoTags[]')
+	# only pause image is pinned
+	[[ "$output" == *"pause"* ]]
+}
+
+@test "reload config should update 'pause_image' and it becomes 'pinned_images'" {
+	OPTION="pause_image"
+	EXAMPLE_IMAGE=quay.io/crio/fedora-crio-ci:latest
+	printf '[crio.image]\npinned_images = [""]\npause_image = "%s"\n' $EXAMPLE_IMAGE > "$CRIO_CONFIG_DIR"/04-overwrite
+	reload_crio
+	expect_log_success $OPTION $EXAMPLE_IMAGE
+	wait_for_log "Configuration reload completed"
+	output=$(crictl images -o json | jq '.images[] | select(.pinned == true) | .repoTags[]')
+	# pause image is pinned
+	[[ "$output" == *"fedora-crio-ci"* ]]
+}
+
+@test "reload config should remove pinned images when an empty list is provided" {
+	EXAMPLE_IMAGE=quay.io/crio/fedora-crio-ci:latest
+
+	# Add a pinned image to the configuration
+	printf '[crio.image]\npinned_images = ["%s", ""]\n' $EXAMPLE_IMAGE > "$CRIO_CONFIG_DIR"/01-overwrite
+	reload_crio
+	wait_for_log 'Set config pinned_images to \\"quay.io/crio/fedora-crio-ci:latest\\"'
+	wait_for_log "Configuration reload completed"
+	wait_for_log 'pinned_images = \[\\"quay.io/crio/fedora-crio-ci:latest\\"\]'
+
+	# Verify that the image is pinned
+	output=$(crictl images -o json | jq ".images[] | select(.repoTags[] == \"$EXAMPLE_IMAGE\") |.pinned")
+	[ "$output" == "true" ]
+
+	# Remove the pinned image from the configuration
+	printf '[crio.image]\npinned_images = []\n' > "$CRIO_CONFIG_DIR"/01-overwrite
+	reload_crio
+	wait_for_log 'Set config pinned_images to \\"\[\]\\"'
+	wait_for_log "Configuration reload completed"
+	wait_for_log 'pinned_images = \[\]'
+
+	# Verify that the image is no longer pinned
+	output=$(crictl images -o json | jq ".images[] | select(.repoTags[] == \"$EXAMPLE_IMAGE\") |.pinned")
+	[ "$output" == "false" ]
+}

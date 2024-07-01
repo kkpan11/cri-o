@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/containers/storage/pkg/idtools"
+	"github.com/containers/storage/pkg/unshare"
 	"github.com/cri-o/cri-o/internal/oci"
 	"github.com/cri-o/cri-o/internal/storage"
 	. "github.com/onsi/ginkgo/v2"
@@ -291,7 +292,7 @@ var _ = t.Describe("Container", func() {
 		Expect(containerResources.Linux.MemoryLimitInBytes).To(Equal(memoryLimitInBytes))
 		Expect(containerResources.Linux.MemorySwapLimitInBytes).To(Equal(memorySwapLimitInBytes))
 		Expect(containerResources.Linux.Unified).To(Equal(unified))
-		for i := 0; i < len(containerResources.Linux.HugepageLimits); i++ {
+		for i := range len(containerResources.Linux.HugepageLimits) {
 			Expect(containerResources.Linux.HugepageLimits[i].PageSize).To(Equal(hugepageLimits[i].Pagesize))
 			Expect(containerResources.Linux.HugepageLimits[i].Limit).To(Equal(hugepageLimits[i].Limit))
 		}
@@ -475,6 +476,10 @@ var _ = t.Describe("Container", func() {
 			Expect(err).To(HaveOccurred())
 		})
 		It("should succeed if pid is running", func() {
+			if unshare.IsRootless() {
+				Skip("need to run as root")
+			}
+
 			// Given
 			state := &oci.ContainerState{}
 			state.Pid = alwaysRunningPid
@@ -514,6 +519,10 @@ var _ = t.Describe("Container", func() {
 			Expect(processState).To(BeEmpty())
 		})
 		It("should succeed if pid is running", func() {
+			if unshare.IsRootless() {
+				Skip("need to run as root")
+			}
+
 			// Given
 			state := &oci.ContainerState{}
 			state.Pid = alwaysRunningPid
@@ -611,6 +620,10 @@ var _ = t.Describe("Container", func() {
 			Expect(err).To(HaveOccurred())
 		})
 		It("should succeed", func() {
+			if unshare.IsRootless() {
+				Skip("need to run as root")
+			}
+
 			// Given
 			state := &oci.ContainerState{}
 			state.Pid = alwaysRunningPid

@@ -41,6 +41,14 @@ function setup_test() {
     CRIO_CNI_CONFIG="$TESTDIR/cni/net.d/"
     CRIO_LOG="$TESTDIR/crio.log"
 
+    # Override NRI socket to a testcase-specific location.
+    CRIO_NRI_CONFIG="$CRIO_CONFIG_DIR/10-crio-nri.conf"
+    NRI_SOCKET="$TESTDIR/nri.sock"
+    cat <<EOF >"$CRIO_NRI_CONFIG"
+[crio.nri]
+nri_listen = "$NRI_SOCKET"
+EOF
+
     # Copy all the CNI dependencies around to ensure encapsulated tests
     CRIO_CNI_PLUGIN="$TESTDIR/cni-bin"
     mkdir "$CRIO_CNI_PLUGIN"
@@ -169,8 +177,6 @@ function setup_crio() {
         --irqbalance-config-restore-file "$IRQBALANCE_CONFIG_RESTORE_FILE" \
         --signature-policy "$SIGNATURE_POLICY" \
         --signature-policy-dir "$SIGNATURE_POLICY_DIR" \
-        --registry "quay.io" \
-        --registry "docker.io" \
         -r "$TESTDIR/crio" \
         --runroot "$TESTDIR/crio-run" \
         --cni-default-network "$CNI_DEFAULT_NETWORK" \
@@ -256,6 +262,44 @@ function host_and_port_listens() {
     netstat -ln46 | grep -E -q "${host}:${port}\b"
 }
 
+function check_kernel_version() {
+    local version="$1"
+
+    required_major=${version%%.*}
+    required_minor=${version##*.}
+
+    [[ $(uname -r) =~ ([0-9]+)\.([0-9]+) ]]
+    major=${BASH_REMATCH[1]}
+    minor=${BASH_REMATCH[2]}
+
+    ((major > required_major)) || ((major == required_major && minor >= required_minor))
+}
+
+function check_crictl_version() {
+    local version="$1"
+
+    required_major=${version%%.*}
+    required_minor=${version##*.}
+
+    crictl_binary=${CRICTL_BINARY:-/usr/bin/crictl}
+
+    [[ $($crictl_binary --version) =~ ([0-9]+)\.([0-9]+) ]]
+    major=${BASH_REMATCH[1]}
+    minor=${BASH_REMATCH[2]}
+
+    ((major > required_major)) || ((major == required_major && minor >= required_minor))
+}
+
+function requires_kernel() {
+    check_kernel_version "$@" ||
+        skip "requires kernel version \"$1\" or newer"
+}
+
+function requires_crictl() {
+    check_crictl_version "$@" ||
+        skip "requires crictl version \"$1\" or newer"
+}
+
 function cleanup_ctrs() {
     crictl rm -a -f
     rm -f "$HOOKSCHECK"
@@ -295,14 +339,6 @@ function restart_crio() {
     fi
 }
 
-function cleanup_lvm() {
-    if [ -n "${LVM_DEVICE+x}" ]; then
-        lvm lvremove -y storage/thinpool
-        lvm vgremove -y storage
-        lvm pvremove -y "$LVM_DEVICE"
-    fi
-}
-
 function cleanup_testdir() {
     # shellcheck disable=SC2013
     # Note: By using 'sort -r' we're ensuring longer paths go first, which
@@ -339,7 +375,6 @@ function cleanup_test() {
         cleanup_ctrs
         cleanup_pods
         stop_crio
-        cleanup_lvm
         cleanup_testdir
     else
         echo >&3 "* Failed \"$BATS_TEST_DESCRIPTION\", TESTDIR=$TESTDIR, LVM_DEVICE=${LVM_DEVICE:-}"
@@ -356,6 +391,16 @@ function remove_apparmor_profile() {
 
 function is_apparmor_enabled() {
     grep -q Y "$APPARMOR_PARAMETERS_FILE_PATH" 2>/dev/null
+}
+
+function is_selinux_enabled() {
+    selinuxenabled 2>/dev/null || false
+}
+
+function is_selinux_enforcing() {
+    command -v getenforce 1>/dev/null || false
+
+    [[ $(getenforce) == "Enforcing" ]]
 }
 
 function prepare_network_conf() {

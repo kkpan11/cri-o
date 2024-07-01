@@ -10,7 +10,6 @@ import (
 
 	cnitypes "github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
-
 	"github.com/containers/storage"
 	"github.com/containers/storage/pkg/idtools"
 	"github.com/cri-o/cri-o/internal/config/node"
@@ -186,7 +185,7 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 	var sandboxIDMappings *idtools.IDMappings
 
 	// TODO: factor generating/updating the spec into something other projects can vendor
-	if err := sbox.InitInfraContainer(&s.config, &podContainer); err != nil {
+	if err := sbox.InitInfraContainer(&s.config, &podContainer, nil); err != nil {
 		return nil, err
 	}
 

@@ -21,7 +21,10 @@ import (
 )
 
 // Version is the version of the build.
-const Version = "1.30.0"
+const Version = "1.31.0"
+
+// ReleaseMinorVersions are the currently supported minor versions.
+var ReleaseMinorVersions = []string{"1.30", "1.29", "1.28"}
 
 // Variables injected during build-time
 var (
@@ -209,7 +212,7 @@ func (i *Info) String() string {
 
 	v := reflect.ValueOf(*i)
 	t := v.Type()
-	for i := 0; i < t.NumField(); i++ {
+	for i := range t.NumField() {
 		field := t.Field(i)
 		value := v.FieldByName(field.Name)
 

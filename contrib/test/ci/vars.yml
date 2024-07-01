@@ -14,7 +14,7 @@ use_conmonrs: '{{ USE_CONMONRS | default(False) | bool }}'
 evented_pleg_fg: '{{ EVENTED_PLEG | default(False) | bool }}'
 
 critest_mirror_repo: quay.io/crio
-cri_tools_git_version: v1.29.0
+cri_tools_git_version: v1.30.0
 golang_version: "1.22"
 
 # For results.yml Paths use rsync 'source' conventions
@@ -57,7 +57,9 @@ kata_skip_files:
   - "ctr_seccomp.bats"  # see https://github.com/kata-containers/tests/issues/4587
   - "ctr_userns.bats"
   - "drop_infra.bats"   # infra ctr is not dropped on purpose with kata
+  - "hooks.bats"        # hook test is being dropped while we wait for https://github.com/kata-containers/kata-containers/issues/9523
   - "infra_ctr_cpuset.bats"
+  - "imagefsinfo.bats"  # image and container filesystems is not in kata at the moment
   - "inspect.bats"
   - "metrics.bats"
   - "network_ping.bats"
@@ -72,6 +74,7 @@ kata_skip_files:
   - "userns_annotation.bats"
   - "version.bats"
   - "workloads.bats"
+  - "cri-metrics.bats"
 
 kata_int_test_env:
     CONTAINER_RUNTIMES: "containerd-shim-kata-v2:/opt/kata/bin/containerd-shim-kata-v2:/run/vc:vm:true:/opt/kata/share/defaults/kata-containers/configuration.toml"
@@ -103,6 +106,8 @@ kata_skip_config_tests:
 kata_skip_config_migrate_tests:
   - 'test "config migrate should succeed with default config"'
   - 'test "config migrate should succeed with 1.17 config"'
+kata_skip_reload_config:
+  - 'test "reload config should remove pinned images when an empty list is provided"'
 kata_skip_crio_wipe_tests:
   - 'test "clear neither when remove persist"'
   - "test \"don't clear containers on a forced restart of crio\""
@@ -130,6 +135,10 @@ kata_skip_ctr_tests:
   - 'test "ctr with default_env set in configuration"'
   - 'test "ctr with absent mount that should be rejected"'
   - 'test "ctr stop loop kill retry attempts"'
+  - 'test "ctr that mounts container storage as read-only option but not recursively"'
+  - 'test "ctr that mounts container storage as recursively read-only"'
+  - 'test "ctr that fails to mount container storage as recursively read-only without readonly option"'
+  - 'test "ctr that fails to mount container storage as recursively read-only without private propagation"'
 kata_skip_devices_tests:
   - 'test "additional devices permissions"'
   - 'test "annotation devices support"'
@@ -144,6 +153,11 @@ kata_skip_image_tests:
   - 'test "image pull and list by manifest list tag"'
   - 'test "image pull and list by manifest list and individual digest"'
   - 'test "image pull and list by individual and manifest list digest"'
+  - 'test "run container with memory_limit_in_bytes -1"'
+  - 'test "run container with memory_limit_in_bytes 12.5MiB"'
+  - 'test "run container with container_min_memory 17.5MiB"'
+  - 'test "run container with container_min_memory 5.5MiB"'
+  - 'test "run container with empty container_min_memory"'
 kata_skip_namespaces_tests:
   - 'test "pid namespace mode target test"'
 kata_skip_network_tests:
@@ -153,10 +167,12 @@ kata_skip_network_tests:
   - 'test "Clean up network if pod sandbox gets killed"'
 kata_skip_pod_tests:
   - 'test "pass pod sysctls to runtime"'
+  - 'test "pass pod sysctls to runtime when in userns"'
   - 'test "skip pod sysctls to runtime if host"'
   - 'test "restart crio and still get pod status"'
   - 'test "systemd cgroup_parent correctly set"'
   - 'test "kubernetes pod terminationGracePeriod passthru"'
+  - 'test "disable crypto.fips_enabled when FIPS_DISABLE is set"'
 kata_skip_seccomp_oci_artifacts_tests:
   - 'test "seccomp OCI artifact with pod annotation"'
   - 'test "seccomp OCI artifact with container annotation"'
@@ -167,3 +183,4 @@ kata_skip_seccomp_oci_artifacts_tests:
   - 'test "seccomp OCI artifact with missing artifact"'
 
 runc_git_version: main
+crun_git_version: main

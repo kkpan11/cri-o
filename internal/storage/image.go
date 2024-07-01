@@ -23,9 +23,9 @@ import (
 	"github.com/containers/image/v5/transports/alltransports"
 	"github.com/containers/image/v5/types"
 	encconfig "github.com/containers/ocicrypt/config"
-	"github.com/containers/podman/v4/pkg/rootless"
 	"github.com/containers/storage"
 	"github.com/containers/storage/pkg/reexec"
+
 	"github.com/cri-o/cri-o/internal/storage/references"
 	"github.com/cri-o/cri-o/pkg/config"
 	json "github.com/json-iterator/go"
@@ -151,6 +151,9 @@ type ImageServer interface {
 	// CandidatesForPotentiallyShortImageName resolves an image name into a set of fully-qualified image names (domain/repo/image:tag|@digest).
 	// It will only return an empty slice if err != nil.
 	CandidatesForPotentiallyShortImageName(systemContext *types.SystemContext, imageName string) ([]RegistryImageReference, error)
+
+	// UpdatePinnedImagesList updates pinned and pause images list in imageService.
+	UpdatePinnedImagesList(imageList []string)
 }
 
 func parseImageNames(image *storage.Image) (someName *RegistryImageReference, tags []reference.NamedTagged, digests []reference.Canonical, err error) {
@@ -462,7 +465,7 @@ func (svc *imageService) PrepareImage(inputSystemContext *types.SystemContext, i
 	return srcRef.NewImage(svc.ctx, systemContext)
 }
 
-// nolint: gochecknoinits
+// nolint
 func init() {
 	reexec.Register("crio-pull-image", pullImageChild)
 }
@@ -513,7 +516,6 @@ func pullImageChild() {
 	progress := make(chan types.ProgressProperties)
 	go func() {
 		for p := range progress {
-			p := p
 			output <- pullImageOutputItem{Progress: &p}
 		}
 	}()
@@ -595,7 +597,7 @@ func (svc *imageService) pullImageParent(ctx context.Context, imageName Registry
 	if err := json.NewEncoder(stdin).Encode(&stdinArguments); err != nil {
 		stdin.Close()
 		if waitErr := cmd.Wait(); waitErr != nil {
-			return nil, fmt.Errorf("%v: %w", waitErr, err)
+			return nil, fmt.Errorf("%w: %w", waitErr, err)
 		}
 		return nil, fmt.Errorf("json encode to pipe failed: %w", err)
 	}
@@ -835,7 +837,7 @@ func (svc *imageService) CandidatesForPotentiallyShortImageName(systemContext *t
 func GetImageService(ctx context.Context, store storage.Store, storageTransport StorageTransport, serverConfig *config.Config) (ImageServer, error) {
 	if store == nil {
 		var err error
-		storeOpts, err := storage.DefaultStoreOptions(rootless.IsRootless(), rootless.GetRootlessUID())
+		storeOpts, err := storage.DefaultStoreOptions()
 		if err != nil {
 			return nil, err
 		}
@@ -895,6 +897,11 @@ type nativeStorageTransport struct{}
 
 func (st nativeStorageTransport) ResolveReference(ref types.ImageReference) (types.ImageReference, *storage.Image, error) {
 	return istorage.ResolveReference(ref)
+}
+
+// UpdatePinnedImagesList updates pinned images list in imageService.
+func (svc *imageService) UpdatePinnedImagesList(pinnedImages []string) {
+	svc.regexForPinnedImages = CompileRegexpsForPinnedImages(pinnedImages)
 }
 
 // FilterPinnedImage checks if the given image needs to be pinned

@@ -1,11 +1,10 @@
 ---
-
 - name: clone crun source repo
   git:
     repo: "https://github.com/containers/crun.git"
     dest: "{{ ansible_env.GOPATH }}/src/github.com/containers/crun"
     force: "{{ force_clone | default(False) | bool}}"
-    version: "HEAD"
+    version: "{{ crun_git_version }}"
 
 - name: Install crun dependencies
   dnf:
@@ -57,7 +56,7 @@
     chdir: "{{ ansible_env.GOPATH }}/src/github.com/containers/crun"
 
 - name: Run configure
-  command: "{{ ansible_env.GOPATH }}/src/github.com/containers/crun/configure --enable-embedded-yajl --with-wasmedge"
+  command: "{{ ansible_env.GOPATH }}/src/github.com/containers/crun/configure --enable-embedded-yajl"
   args:
     chdir: "{{ ansible_env.GOPATH }}/src/github.com/containers/crun"
 

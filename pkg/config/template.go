@@ -536,6 +536,11 @@ func initCrioTemplateConfig(c *Config) ([]*templateConfigValue, error) {
 			isDefaultValue: simpleEqual(dc.BigFilesTemporaryDir, c.BigFilesTemporaryDir),
 		},
 		{
+			templateString: templateStringCrioImageAutoReloadRegistries,
+			group:          crioImageConfig,
+			isDefaultValue: simpleEqual(dc.AutoReloadRegistries, c.AutoReloadRegistries),
+		},
+		{
 			templateString: templateStringCrioNetworkCniDefaultNetwork,
 			group:          crioNetworkConfig,
 			isDefaultValue: simpleEqual(dc.CNIDefaultNetwork, c.CNIDefaultNetwork),
@@ -604,6 +609,16 @@ func initCrioTemplateConfig(c *Config) ([]*templateConfigValue, error) {
 			templateString: templateStringCrioStatsStatsCollectionPeriod,
 			group:          crioStatsConfig,
 			isDefaultValue: simpleEqual(dc.StatsCollectionPeriod, c.StatsCollectionPeriod),
+		},
+		{
+			templateString: templateStringCrioStatsCollectionPeriod,
+			group:          crioStatsConfig,
+			isDefaultValue: simpleEqual(dc.CollectionPeriod, c.CollectionPeriod),
+		},
+		{
+			templateString: templateStringCrioStatsIncludedPodMetrics,
+			group:          crioNetworkConfig,
+			isDefaultValue: stringSliceEqual(dc.IncludedPodMetrics, c.IncludedPodMetrics),
 		},
 		{
 			templateString: templateStringCrioNRIEnable,
@@ -1191,7 +1206,6 @@ const templateStringCrioRuntimeEnablePodEvents = `# Enable/disable the generatio
 `
 
 const templateStringCrioRuntimeDefaultRuntime = `# default_runtime is the _name_ of the OCI runtime to be used as the default.
-# default_runtime is the _name_ of the OCI runtime to be used as the default.
 # The name is matched against the runtimes map below.
 {{ $.Comment }}default_runtime = "{{ .DefaultRuntime }}"
 
@@ -1256,6 +1270,7 @@ const templateStringCrioRuntimeRuntimesRuntimeHandler = `# The "crio.runtime.run
 #     Note that the annotation works on containers as well as on images.
 #     For images, the plain annotation "seccomp-profile.kubernetes.cri-o.io"
 #     can be used without the required "/POD" suffix or a container name.
+#   "io.kubernetes.cri-o.DisableFIPS" for disabling FIPS mode in a Kubernetes pod within a FIPS-enabled cluster.
 # - monitor_path (optional, string): The path of the monitor binary. Replaces
 #   deprecated option "conmon".
 # - monitor_cgroup (optional, string): The cgroup the container monitor process will be put in.
@@ -1266,6 +1281,9 @@ const templateStringCrioRuntimeRuntimesRuntimeHandler = `# The "crio.runtime.run
 #   Replaces deprecated option "conmon_env".
 # - platform_runtime_paths (optional, map): A mapping of platforms to the corresponding
 #   runtime executable paths for the runtime handler.
+# - container_min_memory (optional, string): The minimum memory that must be set for a container.
+#   This value can be used to override the currently set global value for a specific runtime. If not set,
+#   a global default value of "12 MiB" will be used.
 #
 # Using the seccomp notifier feature:
 #
@@ -1300,6 +1318,7 @@ const templateStringCrioRuntimeRuntimesRuntimeHandler = `# The "crio.runtime.run
 {{ $.Comment }}runtime_type = "{{ $runtime_handler.RuntimeType }}"
 {{ $.Comment }}runtime_root = "{{ $runtime_handler.RuntimeRoot }}"
 {{ $.Comment }}runtime_config_path = "{{ $runtime_handler.RuntimeConfigPath }}"
+{{ $.Comment }}container_min_memory = "{{ $runtime_handler.ContainerMinMemory }}"
 {{ $.Comment }}monitor_path = "{{ $runtime_handler.MonitorPath }}"
 {{ $.Comment }}monitor_cgroup = "{{ $runtime_handler.MonitorCgroup }}"
 {{ $.Comment }}monitor_exec_cgroup = "{{ $runtime_handler.MonitorExecCgroup }}"
@@ -1380,10 +1399,7 @@ const templateStringCrioRuntimeTimezone = `# timezone To set the timezone for a 
 const templateStringCrioImage = `# The crio.image table contains settings pertaining to the management of OCI images.
 #
 # CRI-O reads its configured registries defaults from the system wide
-# containers-registries.conf(5) located in /etc/containers/registries.conf. If
-# you want to modify just CRI-O, you can change the registries configuration in
-# this file. Otherwise, leave insecure_registries and registries commented out to
-# use the system's defaults from /etc/containers/registries.conf.
+# containers-registries.conf(5) located in /etc/containers/registries.conf.
 [crio.image]
 
 `
@@ -1465,6 +1481,12 @@ const templateStringCrioImageImageVolumes = `# Controls how image volumes are ha
 
 const templateStringCrioImageBigFilesTemporaryDir = `# Temporary directory to use for storing big files
 {{ $.Comment }}big_files_temporary_dir = "{{ .BigFilesTemporaryDir }}"
+
+`
+
+const templateStringCrioImageAutoReloadRegistries = `# If true, CRI-O will automatically reload the mirror registry when
+# there is an update to the 'registries.conf.d' directory. Default value is set to 'false'.
+{{ $.Comment }}auto_reload_registries = {{ .AutoReloadRegistries }}
 
 `
 
@@ -1567,6 +1589,18 @@ const templateStringCrioStats = `# Necessary information pertaining to container
 const templateStringCrioStatsStatsCollectionPeriod = `# The number of seconds between collecting pod and container stats.
 # If set to 0, the stats are collected on-demand instead.
 {{ $.Comment }}stats_collection_period = {{ .StatsCollectionPeriod }}
+
+`
+
+const templateStringCrioStatsCollectionPeriod = `# The number of seconds between collecting pod/container stats and pod
+# sandbox metrics. If set to 0, the metrics/stats are collected on-demand instead.
+{{ $.Comment }}collection_period = {{ .CollectionPeriod }}
+
+`
+
+const templateStringCrioStatsIncludedPodMetrics = `# List of included pod metrics.
+{{ $.Comment }}included_pod_metrics = [
+{{ range $opt := .IncludedPodMetrics }}{{ $.Comment }}{{ printf "\t%q,\n" $opt }}{{ end }}{{ $.Comment }}]
 
 `
 

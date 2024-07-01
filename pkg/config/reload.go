@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/containers/image/v5/pkg/sysregistriesv2"
 	"github.com/cri-o/cri-o/internal/log"
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/sirupsen/logrus"
 	"tags.cncf.io/container-device-interface/pkg/cdi"
 )
@@ -20,7 +23,7 @@ func (c *Config) Reload() error {
 	// Reload the config
 	newConfig, err := DefaultConfig()
 	if err != nil {
-		return errors.New("unable to create default config")
+		return fmt.Errorf("unable to create default config: %w", err)
 	}
 
 	if _, err := os.Stat(c.singleConfigPath); !os.IsNotExist(err) {
@@ -71,7 +74,9 @@ func (c *Config) Reload() error {
 	if err := c.ReloadRuntimes(newConfig); err != nil {
 		return err
 	}
-	cdi.GetRegistry(cdi.WithSpecDirs(newConfig.CDISpecDirs...))
+	if err := cdi.Configure(cdi.WithSpecDirs(newConfig.CDISpecDirs...)); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -142,18 +147,34 @@ func (c *Config) ReloadPauseImage(newConfig *Config) error {
 	return nil
 }
 
-// ReloadPinnedImages updates the PinnedImages with the provided `newConfig`.
+// ReloadPinnedImages replace the PinnedImages
+// with the provided `newConfig.PinnedImages`.
+// The method skips empty items and prints a log message.
 func (c *Config) ReloadPinnedImages(newConfig *Config) {
-	updatedPinnedImages := make([]string, len(newConfig.PinnedImages))
-	for i, image := range newConfig.PinnedImages {
-		if i < len(c.PinnedImages) && image == c.PinnedImages[i] {
-			updatedPinnedImages[i] = c.PinnedImages[i]
-		} else {
-			updatedPinnedImages[i] = image
+	if len(newConfig.PinnedImages) == 0 {
+		c.PinnedImages = []string{}
+		logConfig("pinned_images", "[]")
+		return
+	}
+
+	if cmp.Equal(c.PinnedImages, newConfig.PinnedImages,
+		cmpopts.SortSlices(func(a, b string) bool {
+			return a < b
+		}),
+	) {
+		return
+	}
+
+	pinnedImages := []string{}
+	for _, img := range newConfig.PinnedImages {
+		if img != "" {
+			pinnedImages = append(pinnedImages, img)
 		}
 	}
-	logrus.Infof("Updated new pinned images: %+v", updatedPinnedImages)
-	c.PinnedImages = updatedPinnedImages
+
+	logConfig("pinned_images", strings.Join(pinnedImages, ","))
+
+	c.PinnedImages = pinnedImages
 }
 
 // ReloadRegistries reloads the registry configuration from the Configs

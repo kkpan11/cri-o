@@ -19,7 +19,6 @@ import (
 	conmonconfig "github.com/containers/conmon/runner/config"
 	"github.com/containers/image/v5/pkg/sysregistriesv2"
 	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v4/pkg/rootless"
 	"github.com/containers/storage"
 	"github.com/cri-o/cri-o/internal/config/apparmor"
 	"github.com/cri-o/cri-o/internal/config/blockio"
@@ -41,6 +40,7 @@ import (
 	"github.com/cri-o/cri-o/utils"
 	"github.com/cri-o/cri-o/utils/cmdrunner"
 	"github.com/cri-o/ocicni/pkg/ocicni"
+	"github.com/docker/go-units"
 	"github.com/opencontainers/runtime-spec/specs-go/features"
 	selinux "github.com/opencontainers/selinux/go-selinux"
 	"github.com/sirupsen/logrus"
@@ -51,6 +51,7 @@ import (
 // Defaults if none are specified
 const (
 	defaultGRPCMaxMsgSize      = 80 * 1024 * 1024
+	defaultContainerMinMemory  = 12 * 1024 * 1024 // 12 MiB
 	OCIBufSize                 = 8192
 	RuntimeTypeVM              = "vm"
 	RuntimeTypePod             = "pod"
@@ -188,6 +189,12 @@ func (c *RootConfig) GetStore() (storage.Store, error) {
 	})
 }
 
+// runtimeHandlerFeatures represents the supported features of the runtime.
+type runtimeHandlerFeatures struct {
+	RecursiveReadOnlyMounts bool `json:"-"` // Internal use only.
+	features.Features
+}
+
 // RuntimeHandler represents each item of the "crio.runtime.runtimes" TOML
 // config table.
 type RuntimeHandler struct {
@@ -213,10 +220,11 @@ type RuntimeHandler struct {
 	//   Note that the annotation works on containers as well as on images.
 	//   For images, the plain annotation `seccomp-profile.kubernetes.cri-o.io`
 	//   can be used without the required `/POD` suffix or a container name.
+	// "io.kubernetes.cri-o.DisableFIPS" for disabling FIPS mode for a pod within a FIPS-enabled Kubernetes cluster.
 	AllowedAnnotations []string `toml:"allowed_annotations,omitempty"`
 
 	// DisallowedAnnotations is the slice of experimental annotations that are not allowed for this handler.
-	DisallowedAnnotations []string
+	DisallowedAnnotations []string `toml:"-"`
 
 	// Fields prefixed by Monitor hold the configuration for the monitor for this runtime. At present, the following monitors are supported:
 	// oci supports conmon
@@ -236,9 +244,12 @@ type RuntimeHandler struct {
 	// require crio to do it.
 	RuntimePullImage bool `toml:"runtime_pull_image,omitempty"`
 
+	// ContainerMinMemory is the minimum memory that must be set for a container.
+	ContainerMinMemory string `toml:"container_min_memory,omitempty"`
+
 	// Output of the "features" subcommand.
 	// This is populated dynamically and not read from config.
-	features features.Features
+	features runtimeHandlerFeatures
 }
 
 // Multiple runtime Handlers in a map
@@ -531,10 +542,12 @@ type ImageConfig struct {
 	InsecureRegistries []string `toml:"insecure_registries"`
 	// ImageVolumes controls how volumes specified in image config are handled
 	ImageVolumes ImageVolumesType `toml:"image_volumes"`
-	// Registries holds a list of registries used to pull unqualified images
-	Registries []string `toml:"registries"`
 	// Temporary directory for big files
 	BigFilesTemporaryDir string `toml:"big_files_temporary_dir"`
+	// AutoReloadRegistries if set to true, will automatically
+	// reload the mirror registry when there is an update to the
+	// 'registries.conf.d' directory.
+	AutoReloadRegistries bool `toml:"auto_reload_registries"`
 }
 
 // NetworkConfig represents the "crio.network" TOML config table
@@ -629,11 +642,20 @@ type TracingConfig struct {
 	TracingSamplingRatePerMillion int `toml:"tracing_sampling_rate_per_million"`
 }
 
-// StatsConfig specifies all necessary configuration for reporting container and pod stats
+// StatsConfig specifies all necessary configuration for reporting container/pod stats
+// and pod sandbox metrics.
 type StatsConfig struct {
 	// StatsCollectionPeriod is the number of seconds between collecting pod and container stats.
 	// If set to 0, the stats are collected on-demand instead.
 	StatsCollectionPeriod int `toml:"stats_collection_period"`
+
+	// CollectionPeriod is the number of seconds between collecting pod/container stats
+	// and pod sandbox metrics. If set to 0, the metrics/stats are collected on-demand instead.
+	CollectionPeriod int `toml:"collection_period"`
+
+	// IncludedPodMetrics specifies the list of metrics to include when collecting pod metrics.
+	// If empty, all available metrics will be collected.
+	IncludedPodMetrics []string `toml:"included_pod_metrics"`
 }
 
 // tomlConfig is another way of looking at a Config, which is
@@ -738,13 +760,6 @@ func (c *Config) UpdateFromDropInFile(path string) error {
 		t.Crio.Storage = storageDriver
 	}
 
-	// Registries are deprecated in cri-o.conf and turned into a NOP.
-	// Users should use registries.conf instead, so let's log it.
-	if len(t.Crio.Image.Registries) > 0 {
-		t.Crio.Image.Registries = nil
-		logrus.Warnf("Support for the 'registries' option has been dropped but it is referenced in %q.  Please use containers-registries.conf(5) for configuring unqualified-search registries instead.", path)
-	}
-
 	t.toConfig(c)
 	return nil
 }
@@ -801,6 +816,16 @@ func (c *Config) ToFile(path string) error {
 	return os.WriteFile(path, b, 0o644)
 }
 
+// ToString encodes the config into a string value.
+func (c *Config) ToString() (string, error) {
+	configBytes, err := c.ToBytes()
+	if err != nil {
+		return "", err
+	}
+
+	return string(configBytes), nil
+}
+
 // ToBytes encodes the config into a byte slice. It errors if the encoding
 // fails, which should never happen at all because of general type safeness.
 func (c *Config) ToBytes() ([]byte, error) {
@@ -819,7 +844,7 @@ func (c *Config) ToBytes() ([]byte, error) {
 
 // DefaultConfig returns the default configuration for crio.
 func DefaultConfig() (*Config, error) {
-	storeOpts, err := storage.DefaultStoreOptions(rootless.IsRootless(), rootless.GetRootlessUID())
+	storeOpts, err := storage.DefaultStoreOptions()
 	if err != nil {
 		return nil, err
 	}
@@ -890,6 +915,7 @@ func DefaultConfig() (*Config, error) {
 			ulimitsConfig:               ulimits.New(),
 			HostNetworkDisableSELinux:   true,
 			DisableHostPortMapping:      false,
+			EnableCriuSupport:           true,
 		},
 		ImageConfig: ImageConfig{
 			DefaultTransport:   "docker://",
@@ -1144,7 +1170,9 @@ func (c *RuntimeConfig) Validate(systemContext *types.SystemContext, onExecution
 		}
 		c.HooksDir = hooksDirs
 
-		cdi.GetRegistry(cdi.WithSpecDirs(c.CDISpecDirs...))
+		if err := cdi.Configure(cdi.WithSpecDirs(c.CDISpecDirs...)); err != nil {
+			return err
+		}
 
 		// Validate the pinns path
 		if err := c.ValidatePinnsPath("pinns"); err != nil {
@@ -1159,11 +1187,12 @@ func (c *RuntimeConfig) Validate(systemContext *types.SystemContext, onExecution
 		if c.EnableCriuSupport {
 			if err := validateCriuInPath(); err != nil {
 				c.EnableCriuSupport = false
-				return errors.New("cannot enable checkpoint/restore support without the criu binary in $PATH")
+				logrus.Infof("Checkpoint/restore support disabled: CRIU binary not found int $PATH")
+			} else {
+				logrus.Infof("Checkpoint/restore support enabled")
 			}
-			logrus.Infof("Checkpoint/restore support enabled")
 		} else {
-			logrus.Infof("Checkpoint/restore support disabled")
+			logrus.Infof("Checkpoint/restore support disabled via configuration")
 		}
 
 		if err := c.seccompConfig.LoadProfile(c.SeccompProfile); err != nil {
@@ -1235,7 +1264,8 @@ func defaultRuntimeHandler() *RuntimeHandler {
 		MonitorEnv: []string{
 			"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		},
-		MonitorCgroup: defaultMonitorCgroup,
+		ContainerMinMemory: units.BytesSize(defaultContainerMinMemory),
+		MonitorCgroup:      defaultMonitorCgroup,
 	}
 }
 
@@ -1250,7 +1280,7 @@ func (c *RuntimeConfig) ValidateRuntimes() error {
 				return err
 			}
 
-			logrus.Warnf("'%s is being ignored due to: %q", name, err)
+			logrus.Warnf("Runtime handler %q is being ignored due to: %v", name, err)
 			failedValidation = append(failedValidation, name)
 		}
 	}
@@ -1264,18 +1294,59 @@ func (c *RuntimeConfig) ValidateRuntimes() error {
 }
 
 func (c *RuntimeConfig) initializeRuntimeFeatures() {
-	for _, handler := range c.Runtimes {
+	for name, handler := range c.Runtimes {
+		versionOutput, err := cmdrunner.CombinedOutput(handler.RuntimePath, "--version")
+		if err != nil {
+			logrus.Errorf("Unable to determine version of runtime handler %q: %v", name, err)
+			continue
+		}
+
+		versionString := strings.ReplaceAll(strings.TrimSpace(string(versionOutput)), "\n", ", ")
+		logrus.Infof("Using runtime handler %s", versionString)
+
+		memoryBytes, err := handler.SetContainerMinMemory()
+		if err != nil {
+			logrus.Errorf(
+				"Unable to set minimum container memory for runtime handler %q: %v; default value of %q will be used",
+				name, err, units.BytesSize(float64(memoryBytes)),
+			)
+		}
+		logrus.Debugf("Runtime handler %q container minimum memory set to %d bytes", name, memoryBytes)
+
 		// If this returns an error, we just ignore it and assume the features sub-command is
 		// not supported by the runtime.
-		output, err := cmdrunner.Command(handler.RuntimePath, "features").CombinedOutput()
+		output, err := cmdrunner.CombinedOutput(handler.RuntimePath, "features")
 		if err != nil {
 			logrus.Errorf("Getting %s OCI runtime features failed: %s: %v", handler.RuntimePath, output, err)
 			continue
 		}
-		// Ignore errors to Unmarshal too, we can't populate it.
-		if err := json.Unmarshal(output, &handler.features); err != nil {
-			logrus.Errorf("Unmarshalling OCI features failed: %s", err)
+
+		// Ignore error if we can't load runtime features.
+		if err := handler.LoadRuntimeFeatures(output); err != nil {
+			logrus.Errorf("Unable to load OCI features for runtime handler %q: %v", name, err)
+			continue
 		}
+
+		if handler.RuntimeSupportsIDMap() {
+			logrus.Debugf("Runtime handler %q supports User and Group ID-mappings", name)
+		}
+
+		// Recursive Read-only (RRO) mounts require runtime handler support,
+		// such as runc v1.1 or crun v1.4. For Linux, the minimum kernel
+		// version 5.12 or a kernel with the necessary changes backported
+		// is required.
+		rro := handler.RuntimeSupportsMountFlag("rro")
+		if rro {
+			logrus.Debugf("Runtime handler %q supports Recursive Read-only (RRO) mounts", name)
+
+			// A given runtime might support Recursive Read-only (RRO) mounts,
+			// but the current kernel might not.
+			if err := checkKernelRROMountSupport(); err != nil {
+				logrus.Warnf("Runtime handler %q supports Recursive Read-only (RRO) mounts, but kernel does not: %v", name, err)
+				rro = false
+			}
+		}
+		handler.features.RecursiveReadOnlyMounts = rro
 	}
 }
 
@@ -1525,8 +1596,7 @@ func (r *RuntimeHandler) ValidateRuntimePath(name string) error {
 		r.RuntimePath = executable
 		logrus.Debugf("Using runtime executable from $PATH %q", executable)
 	} else if _, err := os.Stat(r.RuntimePath); err != nil && os.IsNotExist(err) {
-		return fmt.Errorf("invalid runtime_path for runtime '%s': %q",
-			name, err)
+		return fmt.Errorf("invalid runtime_path for runtime '%s': %w", name, err)
 	}
 
 	ok := r.ValidateRuntimeVMBinaryPattern()
@@ -1559,8 +1629,7 @@ func (r *RuntimeHandler) ValidateRuntimeConfigPath(name string) error {
 		return errors.New("runtime_config_path can only be used with the 'vm' runtime type")
 	}
 	if _, err := os.Stat(r.RuntimeConfigPath); err != nil && os.IsNotExist(err) {
-		return fmt.Errorf("invalid runtime_config_path for runtime '%s': %q",
-			name, err)
+		return fmt.Errorf("invalid runtime_config_path for runtime '%s': %w", name, err)
 	}
 	return nil
 }
@@ -1577,6 +1646,47 @@ func (r *RuntimeHandler) ValidateRuntimeAllowedAnnotations() error {
 	return nil
 }
 
+// SetContainerMinMemory sets the minimum container memory for a given runtime.
+// assigns defaultContainerMinMemory if no container_min_memory provided.
+func (r *RuntimeHandler) SetContainerMinMemory() (int64, error) {
+	if r.ContainerMinMemory == "" {
+		r.ContainerMinMemory = units.BytesSize(defaultContainerMinMemory)
+	}
+
+	memoryBytes, err := units.RAMInBytes(r.ContainerMinMemory)
+	if err != nil {
+		err = fmt.Errorf("unable to set runtime memory to %q: %w", r.ContainerMinMemory, err)
+		// Fallback to default value if something is wrong with the configured value.
+		r.ContainerMinMemory = units.BytesSize(defaultContainerMinMemory)
+		return int64(defaultContainerMinMemory), err
+	}
+
+	return memoryBytes, nil
+}
+
+// LoadRuntimeFeatures loads features for a given runtime handler using the "features"
+// sub-command output, where said output contains a JSON document called "Features
+// Structure" that describes the runtime handler's supported features.
+func (r *RuntimeHandler) LoadRuntimeFeatures(input []byte) error {
+	if err := json.Unmarshal(input, &r.features); err != nil {
+		return fmt.Errorf("unable to unmarshal features structure: %w", err)
+	}
+
+	// All other properties of the Features Structure are optional and might be
+	// either absent, empty, or set to the null value, with the exception of
+	// OCIVersionMin and OCIVersionMax, which are required. Thus, the lack of
+	// them should indicate that the Features Structure document is potentially
+	// not valid.
+	//
+	// See the following for more details about the Features Structure:
+	//   https://github.com/opencontainers/runtime-spec/blob/main/features.md
+	if r.features.OCIVersionMin == "" || r.features.OCIVersionMax == "" {
+		return errors.New("runtime features structure is not valid")
+	}
+
+	return nil
+}
+
 // RuntimeSupportsIDMap returns whether this runtime supports the "runtime features"
 // command, and that the output of that command advertises IDMap mounts as an option
 func (r *RuntimeHandler) RuntimeSupportsIDMap() bool {
@@ -1587,6 +1697,11 @@ func (r *RuntimeHandler) RuntimeSupportsIDMap() bool {
 		return false
 	}
 	return true
+}
+
+// RuntimeSupportsRROMounts returns whether this runtime supports the Recursive Read-only mount as an option.
+func (r *RuntimeHandler) RuntimeSupportsRROMounts() bool {
+	return r.features.RecursiveReadOnlyMounts
 }
 
 // RuntimeSupportsMountFlag returns whether this runtime supports the specified mount option.

@@ -51,6 +51,7 @@ var _ = t.Describe("Oci", func() {
 
 			cfg, err := libconfig.DefaultConfig()
 			Expect(err).ToNot(HaveOccurred())
+			cfg.ContainerAttachSocketDir = t.MustTempDir("attach-socket")
 			r, err := oci.New(cfg)
 			Expect(err).ToNot(HaveOccurred())
 			runtime = oci.NewRuntimeOCI(r, &libconfig.RuntimeHandler{})
@@ -167,7 +168,7 @@ var _ = t.Describe("Oci", func() {
 			stoppedChan := stopTimeoutWithChannel(context.Background(), sut, longTimeout*10)
 
 			// When
-			for i := 0; i < 10; i++ {
+			for range 10 {
 				go sut.WaitOnStopTimeout(context.Background(), int64(rand.Intn(100)+20))
 				time.Sleep(time.Second)
 			}
@@ -219,7 +220,6 @@ var _ = t.Describe("Oci", func() {
 			},
 		}
 		for _, test := range tests {
-			test := test
 			It(test.title, func() {
 				fileName := t.MustTempFile("to-read")
 				Expect(os.WriteFile(fileName, test.contents, 0o644)).To(Succeed())

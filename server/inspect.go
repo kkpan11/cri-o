@@ -19,16 +19,16 @@ import (
 )
 
 func (s *Server) getIDMappingsInfo() types.IDMappings {
-	max := int64(int(^uint(0) >> 1))
-	if max > math.MaxUint32 {
-		max = math.MaxUint32
+	sizeMax := int64(int(^uint(0) >> 1))
+	if sizeMax > math.MaxUint32 {
+		sizeMax = math.MaxUint32
 	}
 
 	if s.defaultIDMappings == nil {
 		fullMapping := idtools.IDMap{
 			ContainerID: 0,
 			HostID:      0,
-			Size:        int(max),
+			Size:        int(sizeMax),
 		}
 		return types.IDMappings{
 			Uids: []idtools.IDMap{fullMapping},
@@ -160,12 +160,12 @@ func (s *Server) GetExtendInterfaceMux(enableProfile bool) *chi.Mux {
 		containerID := chi.URLParam(req, "id")
 		ci, err := s.getContainerInfo(ctx, containerID, s.GetContainer, s.getInfraContainer, s.getSandbox)
 		if err != nil {
-			switch err {
-			case errCtrNotFound:
+			switch {
+			case errors.Is(err, errCtrNotFound):
 				http.Error(w, "can't find the container with id "+containerID, http.StatusNotFound)
-			case errCtrStateNil:
+			case errors.Is(err, errCtrStateNil):
 				http.Error(w, "can't find container state for container with id "+containerID, http.StatusInternalServerError)
-			case errSandboxNotFound:
+			case errors.Is(err, errSandboxNotFound):
 				http.Error(w, "can't find the sandbox for container id "+containerID, http.StatusNotFound)
 			default:
 				http.Error(w, err.Error(), http.StatusInternalServerError)

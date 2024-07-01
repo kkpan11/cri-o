@@ -49,18 +49,16 @@ func TestPluginSynchronization(stdT *testing.T) {
 		},
 	)
 
-	var (
-		t = nriTest{
-			plugins: []*plugin{nil},
-		}
-		containerCount = 3
-		pods           []string
-		ctrs           []string
-	)
+	t := nriTest{
+		plugins: []*plugin{nil},
+	}
+	const containerCount = 3
+	pods := make([]string, 0, containerCount)
+	ctrs := make([]string, 0, containerCount)
 
 	t.Setup(stdT)
 
-	for i := 0; i < containerCount; i++ {
+	for range containerCount {
 		pod, ctr := t.runContainer()
 		pods = append(pods, pod)
 		ctrs = append(ctrs, ctr)
@@ -149,7 +147,7 @@ func TestMountInjection(stdT *testing.T) {
 		testFile    = "test.out"
 		injectMount = func(p *plugin, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 			if err := os.Chmod(testDir, 0o777); err != nil {
-				return nil, nil, fmt.Errorf("failed to change permissions: %v", err)
+				return nil, nil, fmt.Errorf("failed to change permissions: %w", err)
 			}
 			adjust := &api.ContainerAdjustment{}
 			adjust.AddMount(

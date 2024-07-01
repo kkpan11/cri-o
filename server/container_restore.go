@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 
@@ -21,6 +22,9 @@ import (
 // checkIfCheckpointOCIImage returns checks if the input refers to a checkpoint image.
 // It returns the StorageImageID of the image the input resolves to, nil otherwise.
 func (s *Server) checkIfCheckpointOCIImage(ctx context.Context, input string) (*storage.StorageImageID, error) {
+	if input == "" {
+		return nil, nil
+	}
 	if _, err := os.Stat(input); err == nil {
 		return nil, nil
 	}
@@ -53,19 +57,24 @@ func (s *Server) CRImportCheckpoint(
 ) (ctrID string, retErr error) {
 	var mountPoint string
 
-	input := createConfig.Image.Image
+	// Ensure that the image to restore the checkpoint from has been provided.
+	if createConfig.Image == nil || createConfig.Image.Image == "" {
+		return "", errors.New(`attribute "image" missing from container definition`)
+	}
+
+	inputImage := createConfig.Image.Image
 	createMounts := createConfig.Mounts
 	createAnnotations := createConfig.Annotations
 	createLabels := createConfig.Labels
 
-	restoreStorageImageID, err := s.checkIfCheckpointOCIImage(ctx, input)
+	restoreStorageImageID, err := s.checkIfCheckpointOCIImage(ctx, inputImage)
 	if err != nil {
 		return "", err
 	}
 
 	var restoreArchivePath string
 	if restoreStorageImageID != nil {
-		log.Debugf(ctx, "Restoring from oci image %s\n", input)
+		log.Debugf(ctx, "Restoring from oci image %s", inputImage)
 
 		// This is not out-of-process, but it is at least out of the CRI-O codebase; containers/storage uses raw strings.
 		mountPoint, err = s.ContainerServer.StorageImageServer().GetStore().MountImage(restoreStorageImageID.IDStringForOutOfProcessConsumptionOnly(), nil, "")
@@ -84,9 +93,9 @@ func (s *Server) CRImportCheckpoint(
 	} else {
 		// First get the container definition from the
 		// tarball to a temporary directory
-		archiveFile, err := os.Open(input)
+		archiveFile, err := os.Open(inputImage)
 		if err != nil {
-			return "", fmt.Errorf("failed to open checkpoint archive %s for import: %w", input, err)
+			return "", fmt.Errorf("failed to open checkpoint archive %s for import: %w", inputImage, err)
 		}
 		defer func(f *os.File) {
 			if err := f.Close(); err != nil {
@@ -94,7 +103,7 @@ func (s *Server) CRImportCheckpoint(
 			}
 		}(archiveFile)
 
-		restoreArchivePath = input
+		restoreArchivePath = inputImage
 		options := &archive.TarOptions{
 			// Here we only need the files config.dump and spec.dump
 			ExcludePatterns: []string{
@@ -210,7 +219,7 @@ func (s *Server) CRImportCheckpoint(
 
 	sb, err := s.getPodSandboxFromRequest(ctx, sbID)
 	if err != nil {
-		if err == sandbox.ErrIDEmpty {
+		if errors.Is(err, sandbox.ErrIDEmpty) {
 			return "", err
 		}
 		return "", fmt.Errorf("specified sandbox not found: %s: %w", sbID, err)
@@ -266,11 +275,14 @@ func (s *Server) CRImportCheckpoint(
 		Labels:      originalLabels,
 	}
 
-	if createConfig.Linux.Resources != nil {
-		containerConfig.Linux.Resources = createConfig.Linux.Resources
-	}
-	if createConfig.Linux.SecurityContext != nil {
-		containerConfig.Linux.SecurityContext = createConfig.Linux.SecurityContext
+	if createConfig.Linux != nil {
+		if createConfig.Linux.Resources != nil {
+			containerConfig.Linux.Resources = createConfig.Linux.Resources
+		}
+
+		if createConfig.Linux.SecurityContext != nil {
+			containerConfig.Linux.SecurityContext = createConfig.Linux.SecurityContext
+		}
 	}
 
 	if dumpSpec.Linux != nil {
@@ -319,6 +331,8 @@ func (s *Server) CRImportCheckpoint(
 			switch opt {
 			case "ro":
 				mount.Readonly = true
+			case "rro":
+				mount.RecursiveReadOnly = true
 			case "rprivate":
 				mount.Propagation = types.MountPropagation_PROPAGATION_PRIVATE
 			case "rshared":
@@ -326,6 +340,13 @@ func (s *Server) CRImportCheckpoint(
 			case "rslaved":
 				mount.Propagation = types.MountPropagation_PROPAGATION_HOST_TO_CONTAINER
 			}
+		}
+
+		// Recursive Read-only (RRO) support requires the mount to be
+		// read-only and the mount propagation set to private.
+		if mount.RecursiveReadOnly {
+			mount.Readonly = true
+			mount.Propagation = types.MountPropagation_PROPAGATION_PRIVATE
 		}
 
 		log.Debugf(ctx, "Adding mounts %#v", mount)
@@ -402,7 +423,7 @@ func (s *Server) CRImportCheckpoint(
 	newContainer.SetRestoreStorageImageID(restoreStorageImageID)
 	newContainer.SetCheckpointedAt(config.CheckpointedAt)
 
-	if ctx.Err() == context.Canceled || ctx.Err() == context.DeadlineExceeded {
+	if isContextError(ctx.Err()) {
 		log.Infof(ctx, "RestoreCtr: context was either canceled or the deadline was exceeded: %v", ctx.Err())
 		return "", ctx.Err()
 	}

@@ -11,9 +11,9 @@ import (
 
 	cnitypes "github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
-	"github.com/containers/podman/v4/pkg/rootless"
 	"github.com/containers/storage"
 	"github.com/containers/storage/pkg/idtools"
+	"github.com/containers/storage/pkg/unshare"
 	"github.com/cri-o/cri-o/internal/config/nsmgr"
 	ctrfactory "github.com/cri-o/cri-o/internal/factory/container"
 	sboxfactory "github.com/cri-o/cri-o/internal/factory/sandbox"
@@ -320,18 +320,25 @@ func (s *Server) getSandboxIDMappings(ctx context.Context, sb *libsandbox.Sandbo
 		return nil, errors.New("infra container not found")
 	}
 
-	uids, err := rootless.ReadMappingsProc(fmt.Sprintf("/proc/%d/uid_map", ic.State().Pid))
+	uids, gids, err := unshare.GetHostIDMappings(strconv.Itoa(ic.State().Pid))
 	if err != nil {
 		return nil, err
 	}
-	gids, err := rootless.ReadMappingsProc(fmt.Sprintf("/proc/%d/gid_map", ic.State().Pid))
-	if err != nil {
-		return nil, err
-	}
-
-	mappings := idtools.NewIDMappingsFromMaps(uids, gids)
+	mappings := convertToStorageIDMappings(uids, gids)
 	ic.SetIDMappings(mappings)
 	return mappings, nil
+}
+
+func convertToStorageIDMappings(uidMappings, gidMappings []spec.LinuxIDMapping) *idtools.IDMappings {
+	uids := make([]idtools.IDMap, len(uidMappings))
+	gids := make([]idtools.IDMap, len(gidMappings))
+	for i, v := range uidMappings {
+		uids[i] = idtools.IDMap{ContainerID: int(v.ContainerID), HostID: int(v.HostID), Size: int(v.Size)}
+	}
+	for i, v := range gidMappings {
+		gids[i] = idtools.IDMap{ContainerID: int(v.ContainerID), HostID: int(v.HostID), Size: int(v.Size)}
+	}
+	return idtools.NewIDMappingsFromMaps(uids, gids)
 }
 
 func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequest) (resp *types.RunPodSandboxResponse, retErr error) {
@@ -341,8 +348,6 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 	if err := sbox.SetConfig(req.Config); err != nil {
 		return nil, fmt.Errorf("setting sandbox config: %w", err)
 	}
-
-	pathsToChown := []string{}
 
 	kubeName := sbox.Config().Metadata.Name
 	kubePodUID := sbox.Config().Metadata.Uid
@@ -372,7 +377,7 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 	if _, err := s.ReservePodName(sbox.ID(), sbox.Name()); err != nil {
 		reservedID, getErr := s.PodIDForName(sbox.Name())
 		if getErr != nil {
-			return nil, fmt.Errorf("failed to get ID of pod with reserved name (%s), after failing to reserve name with %v: %w", sbox.Name(), getErr, getErr)
+			return nil, fmt.Errorf("failed to get ID of pod with reserved name (%s), after failing to reserve name with %w: %w", sbox.Name(), getErr, getErr)
 		}
 		// if we're able to find the sandbox, and it's created, this is actually a duplicate request
 		// Just return that sandbox
@@ -383,7 +388,7 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 		if resourceErr == nil {
 			return &types.RunPodSandboxResponse{PodSandboxId: cachedID}, nil
 		}
-		return nil, fmt.Errorf("%v: %w", resourceErr, err)
+		return nil, fmt.Errorf("%w: %w", resourceErr, err)
 	}
 	resourceCleaner.Add(ctx, "runSandbox: releasing pod sandbox name: "+sbox.Name(), func() error {
 		s.ReleasePodName(sbox.Name())
@@ -500,10 +505,9 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 	}
 
 	// TODO: factor generating/updating the spec into something other projects can vendor
-	if err := sbox.InitInfraContainer(&s.config, &podContainer); err != nil {
+	if err := sbox.InitInfraContainer(&s.config, &podContainer, sandboxIDMappings); err != nil {
 		return nil, err
 	}
-	pathsToChown = append(pathsToChown, sbox.ResolvPath())
 
 	// add metadata
 	metadata := sbox.Config().Metadata
@@ -571,7 +575,12 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 		if err != nil {
 			return nil, err
 		}
-		pathsToChown = append(pathsToChown, shmPath)
+		if sandboxIDMappings != nil {
+			rootPair := sandboxIDMappings.RootPair()
+			if err := os.Chown(shmPath, rootPair.UID, rootPair.GID); err != nil {
+				return nil, fmt.Errorf("cannot chown %s to %d:%d: %w", shmPath, rootPair.UID, rootPair.GID, err)
+			}
+		}
 		resourceCleaner.Add(ctx, "runSandbox: unmounting shmPath for sandbox "+sbox.ID(), func() error {
 			if err := unix.Unmount(shmPath, unix.MNT_DETACH); err != nil {
 				return fmt.Errorf("failed to unmount shm for sandbox: %w", err)
@@ -663,8 +672,11 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 		return nil, err
 	}
 	g.AddAnnotation(annotations.PortMappings, string(portMappingsJSON))
-
-	cgroupParent, cgroupPath, err := s.config.CgroupManager().SandboxCgroupPath(sbox.Config().Linux.CgroupParent, sbox.ID())
+	containerMinMemory, err := s.Runtime().GetContainerMinMemory(runtimeHandler)
+	if err != nil {
+		return nil, err
+	}
+	cgroupParent, cgroupPath, err := s.config.CgroupManager().SandboxCgroupPath(sbox.Config().Linux.CgroupParent, sbox.ID(), containerMinMemory)
 	if err != nil {
 		return nil, err
 	}
@@ -734,7 +746,7 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 	}
 
 	// Add default sysctls given in crio.conf
-	sysctls := s.configureGeneratorForSysctls(ctx, g, hostNetwork, hostIPC, req.Config.Linux.Sysctls)
+	sysctls := s.configureGeneratorForSysctls(ctx, g, hostNetwork, hostIPC, sandboxIDMappings, req.Config.Linux.Sysctls)
 
 	// set up namespaces
 	s.resourceStore.SetStageForResource(ctx, sbox.Name(), "sandbox namespace creation")
@@ -823,13 +835,18 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 	if err := label.Relabel(hostnamePath, mountLabel, false); err != nil && !errors.Is(err, unix.ENOTSUP) {
 		return nil, err
 	}
+	if sandboxIDMappings != nil {
+		rootPair := sandboxIDMappings.RootPair()
+		if err := os.Chown(hostnamePath, rootPair.UID, rootPair.GID); err != nil {
+			return nil, fmt.Errorf("cannot chown %s to %d:%d: %w", hostnamePath, rootPair.UID, rootPair.GID, err)
+		}
+	}
 	mnt = spec.Mount{
 		Type:        "bind",
 		Source:      hostnamePath,
 		Destination: "/etc/hostname",
 		Options:     []string{"ro", "bind", "nodev", "nosuid", "noexec"},
 	}
-	pathsToChown = append(pathsToChown, hostnamePath, mountPoint)
 	g.AddMount(mnt)
 	g.AddAnnotation(annotations.HostnamePath, hostnamePath)
 	sb.AddHostnamePath(hostnamePath)
@@ -865,12 +882,6 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 				Options:     []string{"rw", "rbind", "nodev", "nosuid", "noexec"},
 			}
 			g.AddMount(proc)
-		}
-		rootPair := sandboxIDMappings.RootPair()
-		for _, path := range pathsToChown {
-			if err := os.Chown(path, rootPair.UID, rootPair.GID); err != nil {
-				return nil, fmt.Errorf("cannot chown %s to %d:%d: %w", path, rootPair.UID, rootPair.GID, err)
-			}
 		}
 	}
 	g.SetRootPath(mountPoint)
@@ -965,18 +976,6 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 		return nil
 	})
 
-	if sandboxIDMappings != nil {
-		rootPair := sandboxIDMappings.RootPair()
-		for _, path := range pathsToChown {
-			if err := makeAccessible(path, rootPair.UID, rootPair.GID, true); err != nil {
-				return nil, fmt.Errorf("cannot chown %s to %d:%d: %w", path, rootPair.UID, rootPair.GID, err)
-			}
-		}
-		if err := makeMountsAccessible(rootPair.UID, rootPair.GID, g.Config.Mounts); err != nil {
-			return nil, err
-		}
-	}
-
 	s.resourceStore.SetStageForResource(ctx, sbox.Name(), "sandbox container runtime creation")
 	if err := s.createContainerPlatform(ctx, container, sb.CgroupParent(), sandboxIDMappings); err != nil {
 		return nil, err
@@ -1063,7 +1062,7 @@ func populateSandboxLabels(labels map[string]string, kubeName, kubePodUID, names
 	return labels
 }
 
-func (s *Server) configureGeneratorForSysctls(ctx context.Context, g *generate.Generator, hostNetwork, hostIPC bool, sysctls map[string]string) map[string]string {
+func (s *Server) configureGeneratorForSysctls(ctx context.Context, g *generate.Generator, hostNetwork, hostIPC bool, sandboxIDMappings *idtools.IDMappings, sysctls map[string]string) map[string]string {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
 	sysctlsToReturn := make(map[string]string)
@@ -1092,7 +1091,40 @@ func (s *Server) configureGeneratorForSysctls(ctx context.Context, g *generate.G
 		g.AddLinuxSysctl(key, value)
 		sysctlsToReturn[key] = value
 	}
-	return sysctlsToReturn
+	return configurePingGroupRangeGivenIDMappings(ctx, g, sandboxIDMappings, sysctlsToReturn)
+}
+
+func configurePingGroupRangeGivenIDMappings(ctx context.Context, g *generate.Generator, sandboxIDMappings *idtools.IDMappings, sysctls map[string]string) map[string]string {
+	// We have to manually fuss with this specific sysctl.
+	// It's commonly set to the max range by default "0 2147483647".
+	// However, a pod with GIDMappings may not actually have the upper range set,
+	// which means attempting to set this sysctl will fail with EINVAL
+	// Instead, update the max of the group range to be the largest group value in the IDMappings.
+	const (
+		pingGroupRangeKey        = "net.ipv4.ping_group_range"
+		pingGroupFullRangeBottom = "0"
+		pingGroupFullRangeTop    = "2147483647"
+	)
+	val, ok := sysctls[pingGroupRangeKey]
+	if !ok || sandboxIDMappings == nil {
+		return sysctls
+	}
+	// Only do this if the value is `0 2147483647`
+	currentRange := strings.Fields(val)
+	if len(currentRange) != 2 || currentRange[0] != pingGroupFullRangeBottom || currentRange[1] != pingGroupFullRangeTop {
+		return sysctls
+	}
+
+	var maxID int
+	for _, mapping := range sandboxIDMappings.GIDs() {
+		maxID = max(maxID, mapping.ContainerID+mapping.Size-1)
+	}
+	newRange := "0 " + strconv.Itoa(maxID)
+
+	log.Debugf(ctx, "Mutating %s sysctl to %s", pingGroupRangeKey, newRange)
+	g.AddLinuxSysctl(pingGroupRangeKey, newRange)
+	sysctls[pingGroupRangeKey] = newRange
+	return sysctls
 }
 
 // configureGeneratorForSandboxNamespaces set the linux namespaces for the generator, based on whether the pod is sharing namespaces with the host,

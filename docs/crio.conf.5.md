@@ -309,8 +309,8 @@ the container runtime configuration.
 **device_ownership_from_security_context**=false
   Changes the default behavior of setting container devices uid/gid from CRI's SecurityContext (RunAsUser/RunAsGroup) instead of taking host's uid/gid.
 
-**enable_criu_support**=false
-  Enable CRIU integration, requires that the criu binary is available in $PATH. (default: false)
+**enable_criu_support**=true
+  Enable CRIU integration, requires that the criu binary is available in $PATH. (default: true)
 
 **enable_pod_events**=false
 Enable CRI-O to generate the container pod-level events in order to optimize the performance of the Pod Lifecycle Event Generator (PLEG) module in Kubelet.
@@ -358,6 +358,9 @@ The "crio.runtime.runtimes" table defines a list of OCI compatible runtimes.  Th
     For images, the plain annotation `seccomp-profile.kubernetes.cri-o.io`
     can be used without the required `/POD` suffix or a container name.
 
+**container_min_memory**=""
+  The minimum memory that must be set for a container. This value can be used to override the currently set global value for a specific runtime. If not set, a global default value of "12 MiB" will be used.
+
 **platform_runtime_paths**={}
   A mapping of platforms to the corresponding runtime executable paths for the runtime handler.
 
@@ -388,6 +391,7 @@ A workload is chosen for a pod based on whether the workload's **activation_anno
     - a specific container by using: "seccomp-profile.kubernetes.cri-o.io/<CONTAINER_NAME>"
     - a whole pod by using: "seccomp-profile.kubernetes.cri-o.io/POD"
     Note that the annotation works on containers as well as on images.
+  "io.kubernetes.cri-o.DisableFIPS" for disabling FIPS mode for a pod within a FIPS-enabled Kubernetes cluster.
 
 #### Using the seccomp notifier feature:
 
@@ -429,7 +433,7 @@ Specifies the cpuset this pod has access to.
 ## CRIO.IMAGE TABLE
 The `crio.image` table contains settings pertaining to the management of OCI images.
 
-CRI-O reads its configured registries defaults from the system wide containers-registries.conf(5) located in /etc/containers/registries.conf. If you want to modify just CRI-O, you can change the registries configuration in this file. Otherwise, leave `insecure_registries` and `registries` commented out to use the system's defaults from /etc/containers/registries.conf.
+CRI-O reads its configured registries defaults from the system wide containers-registries.conf(5) located in /etc/containers/registries.conf.
 
 **default_transport**="docker://"
   Default transport for pulling images from a remote container storage.
@@ -463,14 +467,14 @@ CRI-O reads its configured registries defaults from the system wide containers-r
 **insecure_registries**=[]
   List of registries to skip TLS verification for pulling images.
 
-**registries**=["docker.io"]
-  List of registries to be used when pulling an unqualified image. Note support for this option has been dropped and it has no effect. Please refer to `containers-registries.conf(5)` for configuring unqualified-search registries.
-
 **big_files_temporary_dir**=""
   Path to the temporary directory to use for storing big files, used to store image blobs and data streams related to containers image management.
 
 **separate_pull_cgroup**=""
   [EXPERIMENTAL] If its value is set, then images are pulled into the specified cgroup.  If its value is set to "pod", then the pod's cgroup is used.  It is currently supported only with the systemd cgroup manager.
+
+**auto_reload_registries**=false
+ If true, CRI-O will automatically reload the mirror registry when there is an update to the 'registries.conf.d' directory. Default value is set to 'false'.
 
 ## CRIO.NETWORK TABLE
 The `crio.network` table containers settings pertaining to the management of CNI plugins.
@@ -524,11 +528,17 @@ The `crio.metrics` table containers settings pertaining to the Prometheus based 
 The `crio.stats` table specifies all necessary configuration for reporting container and pod stats.
 
 **stats_collection_period**=0
-  The number of seconds between collecting pod and container stats. If set to 0, the stats are collected on-demand instead.
+  The number of seconds between collecting pod and container stats. If set to 0, the stats are collected on-demand instead. **DEPRECATED:** This option will be removed in the future. Please use `collection_period` instead.
+
+**collection_period**=0
+  The number of seconds between collecting pod/container stats and pod sandbox metrics. If set to 0, the metrics/stats are collected on-demand instead.
+
+**included_pod_metrics**=[]
+  A list of pod metrics to include. Specify the names of the metrics to include in this list.
 
 ## CRIO.NRI TABLE
 The `crio.nri` table contains settings for controlling NRI (Node Resource Interface) support in CRI-O.
-**enable_nri**=false
+**enable_nri**=true
   Enable CRI-O NRI support.
 
 **nri_plugin_dir**="/opt/nri/plugins"

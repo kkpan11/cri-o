@@ -49,6 +49,8 @@ const (
 	certRefreshInterval            = time.Minute * 5
 	rootlessEnvName                = "_CRIO_ROOTLESS"
 	irqBalanceConfigRestoreDisable = "disable"
+	debounceDuration               = 200 * time.Millisecond
+	defaultRegistriesConfDDir      = "/etc/containers/registries.conf.d"
 )
 
 var errSandboxNotCreated = errors.New("sandbox not created")
@@ -226,7 +228,7 @@ func (s *Server) restore(ctx context.Context) []storage.StorageImageID {
 		}
 		log.Warnf(ctx, "Could not restore sandbox %s: %v", sbID, err)
 		for _, n := range names[sbID] {
-			if err := s.Store().DeleteContainer(n); err != nil && err != storageTypes.ErrNotAContainer {
+			if err := s.Store().DeleteContainer(n); err != nil && !errors.Is(err, storageTypes.ErrNotAContainer) {
 				log.Warnf(ctx, "Unable to delete container %s: %v", n, err)
 			}
 			// Release the infra container name and the pod name for future use
@@ -243,7 +245,7 @@ func (s *Server) restore(ctx context.Context) []storage.StorageImageID {
 				continue
 			}
 			for _, n := range names[k] {
-				if err := s.Store().DeleteContainer(n); err != nil && err != storageTypes.ErrNotAContainer {
+				if err := s.Store().DeleteContainer(n); err != nil && !errors.Is(err, storageTypes.ErrNotAContainer) {
 					log.Warnf(ctx, "Unable to delete container %s: %v", n, err)
 				}
 				// Release the container name for future use
@@ -264,13 +266,13 @@ func (s *Server) restore(ctx context.Context) []storage.StorageImageID {
 	// release the name associated with you.
 	for containerID := range podContainers {
 		err := s.LoadContainer(ctx, containerID)
-		if err == nil || err == lib.ErrIsNonCrioContainer {
+		if err == nil || errors.Is(err, lib.ErrIsNonCrioContainer) {
 			delete(containersAndTheirImages, containerID)
 			continue
 		}
 		log.Warnf(ctx, "Could not restore container %s: %v", containerID, err)
 		for _, n := range names[containerID] {
-			if err := s.Store().DeleteContainer(n); err != nil && err != storageTypes.ErrNotAContainer {
+			if err := s.Store().DeleteContainer(n); err != nil && !errors.Is(err, storageTypes.ErrNotAContainer) {
 				log.Warnf(ctx, "Unable to delete container %s: %v", n, err)
 			}
 			// Release the container name
@@ -281,7 +283,6 @@ func (s *Server) restore(ctx context.Context) []storage.StorageImageID {
 	// Cleanup the deletedPods in the networking plugin
 	wipeResourceCleaner := resourcestore.NewResourceCleaner()
 	for _, sb := range deletedPods {
-		sb := sb
 		cleanupFunc := func() error {
 			err := s.networkStop(context.Background(), sb)
 			if err == nil {
@@ -523,7 +524,7 @@ func New(
 	s.stream.streamServerCloseCh = make(chan struct{})
 	go func() {
 		defer close(s.stream.streamServerCloseCh)
-		if err := s.stream.streamServer.Start(true); err != nil && err != http.ErrServerClosed {
+		if err := s.stream.streamServer.Start(true); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf(ctx, "Failed to start streaming server: %v", err)
 		}
 	}()
@@ -531,7 +532,9 @@ func New(
 	log.Debugf(ctx, "Sandboxes: %v", s.ContainerServer.ListSandboxes())
 
 	s.startReloadWatcher(ctx)
-
+	if s.config.AutoReloadRegistries {
+		go s.startWatcherForMirrorRegistries(ctx, s.config.SystemContext.SystemRegistriesConfDirPath)
+	}
 	// Start the metrics server if configured to be enabled
 	if s.config.EnableMetrics {
 		if err := metrics.New(&s.config.MetricsConfig).Start(s.monitorsChan); err != nil {
@@ -548,7 +551,7 @@ func New(
 	// Set up our NRI adaptation.
 	api, err := nriIf.New(s.config.NRI.WithTracing(s.config.EnableTracing))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create NRI interface: %v", err)
+		return nil, fmt.Errorf("failed to create NRI interface: %w", err)
 	}
 
 	s.nri = &nriAPI{
@@ -576,6 +579,17 @@ func (s *Server) startReloadWatcher(ctx context.Context) {
 			if err := s.config.Reload(); err != nil {
 				logrus.Errorf("Unable to reload configuration: %v", err)
 				continue
+			}
+			// ImageServer compiles the list with regex for both
+			// pinned and sandbox/pause images, we need to update them
+			s.StorageImageServer().UpdatePinnedImagesList(append(s.config.PinnedImages, s.config.PauseImage))
+			logrus.Info("Configuration reload completed")
+			// Print the current configuration.
+			tomlConfig, err := s.config.ToString()
+			if err != nil {
+				logrus.Errorf("Unable to print current configuration: %v", err)
+			} else {
+				logrus.Infof("Current CRI-O configuration:\n%s", tomlConfig)
 			}
 		}
 	}()
@@ -766,12 +780,7 @@ func (s *Server) monitorExits(ctx context.Context, watcher *fsnotify.Watcher, do
 		case event := <-watcher.Events:
 			go s.handleExit(ctx, event)
 		case err := <-watcher.Errors:
-			log.Debugf(ctx, "Watch error: %v", err)
-			if s.config.EnablePodEvents {
-				close(s.ContainerEventsChan)
-			}
-			close(done)
-			return
+			log.Errorf(ctx, "Watch error: %v", err)
 		case <-s.monitorsChan:
 			log.Debugf(ctx, "Closing exit monitor...")
 			close(done)
@@ -942,4 +951,75 @@ func isNotFound(err error) bool {
 	}
 
 	return false
+}
+
+// startWatcherForMirrorRegistries sets up a file watcher to monitor changes
+// in the "registries.conf.d" directory (default: "/etc/containers/registries.conf.d").
+// It then delegates the monitoring task to watchAndReloadMirrorRegistriesConfiguration.
+func (s *Server) startWatcherForMirrorRegistries(ctx context.Context, registriesConfDDir string) {
+	if registriesConfDDir == "" {
+		log.Infof(ctx, "No registries.conf.d directory specified, defaulting to /etc/containers/registries.conf.d")
+		registriesConfDDir = defaultRegistriesConfDDir
+	}
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatalf(ctx, "Failed to create new watcher: %v", err)
+	}
+	defer watcher.Close()
+
+	log.Infof(ctx, "Registered reload watcher for mirror registries configuration")
+
+	if err := watcher.Add(registriesConfDDir); err != nil {
+		log.Errorf(ctx, "Failed to add watcher for path %q: %s", registriesConfDDir, err)
+		return
+	}
+
+	s.watchAndReloadMirrorRegistriesConfiguration(ctx, watcher)
+}
+
+func (s *Server) watchAndReloadMirrorRegistriesConfiguration(ctx context.Context, watcher *fsnotify.Watcher) {
+	var timer *time.Timer
+	reloadChannel := make(chan string, 1)
+	go func() {
+		// The for loop ensures that the channel is properly drained, even if
+		// no new events are received, thus preventing potential deadlocks.
+		// For each event name received, the goroutine checks if it's not
+		// an empty string and then reloads the registries.
+		for evenName := range reloadChannel {
+			log.Infof(ctx, "File %q changed, reloading registries configuration", evenName)
+			if err := s.config.ReloadRegistries(); err != nil {
+				log.Errorf(ctx, "Failed to reload registry configuration: %v", err)
+			}
+		}
+	}()
+
+	for {
+		select {
+		case event, ok := <-watcher.Events:
+			if !ok {
+				close(reloadChannel)
+				return
+			}
+			if !strings.HasSuffix(filepath.Base(event.Name), ".conf") {
+				continue
+			}
+			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Chmod) != 0 {
+				// Reset timer if exists, else create a new one.
+				if timer != nil {
+					timer.Reset(debounceDuration)
+				} else {
+					timer = time.AfterFunc(debounceDuration, func() {
+						reloadChannel <- event.Name
+					})
+				}
+			}
+
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				close(reloadChannel)
+				return
+			}
+			log.Errorf(ctx, "Watcher error: %v", err)
+		}
+	}
 }

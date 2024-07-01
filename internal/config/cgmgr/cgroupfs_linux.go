@@ -11,7 +11,7 @@ import (
 	"sync"
 
 	"github.com/containers/common/pkg/cgroups"
-	"github.com/containers/podman/v4/pkg/rootless"
+	"github.com/containers/storage/pkg/unshare"
 	"github.com/cri-o/cri-o/internal/config/node"
 	"github.com/cri-o/cri-o/utils"
 	libctrCg "github.com/opencontainers/runc/libcontainer/cgroups"
@@ -113,14 +113,15 @@ func (m *CgroupfsManager) RemoveContainerCgManager(containerID string) {
 	}
 }
 
-// SandboxCgroupPath takes the sandbox parent, and sandbox ID. It
-// returns the cgroup parent, cgroup path, and error.
-func (m *CgroupfsManager) SandboxCgroupPath(sbParent, sbID string) (cgParent, cgPath string, _ error) {
+// SandboxCgroupPath takes the sandbox parent, sandbox ID, and container minimum memory.
+// It returns the cgroup parent, cgroup path, and error.
+// It also checks if enough memory is available in the given cgroup.
+func (m *CgroupfsManager) SandboxCgroupPath(sbParent, sbID string, containerMinMemory int64) (cgParent, cgPath string, _ error) {
 	if strings.HasSuffix(path.Base(sbParent), ".slice") {
 		return "", "", fmt.Errorf("cri-o configured with cgroupfs cgroup manager, but received systemd slice as parent: %s", sbParent)
 	}
 
-	if err := verifyCgroupHasEnoughMemory(sbParent, m.memoryPath, m.memoryMaxFile); err != nil {
+	if err := verifyCgroupHasEnoughMemory(sbParent, m.memoryPath, m.memoryMaxFile, containerMinMemory); err != nil {
 		return "", "", err
 	}
 
@@ -227,7 +228,7 @@ func setWorkloadSettings(cgPath string, resources *rspec.LinuxResources) (err er
 			SkipDevices: true,
 			CpusetCpus:  resources.CPU.Cpus,
 		},
-		Rootless: rootless.IsRootless(),
+		Rootless: unshare.IsRootless(),
 	}
 	if resources.CPU.Shares != nil {
 		cg.Resources.CpuShares = *resources.CPU.Shares

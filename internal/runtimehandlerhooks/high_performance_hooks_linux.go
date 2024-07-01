@@ -397,7 +397,7 @@ func (h *HighPerformanceHooks) setCPULoadBalancingV2(c *oci.Container, podManage
 		})
 	}
 	if childState != nil {
-		managers = append(managers, childState)
+		managers[len(managers)-1] = childState
 	}
 
 	if len(managers) == 0 {
@@ -478,6 +478,10 @@ func (h *HighPerformanceHooks) addOrRemoveCpusetFromManager(mgr cgroups.Manager,
 		targetCpus = currentCpus.Union(cpus)
 	} else {
 		targetCpus = currentCpus.Difference(cpus)
+	}
+
+	if targetCpus.Equals(currentCpus) {
+		return nil
 	}
 
 	// if we're writing to cpuset.cpus.exclusive, libcontainer manager doesn't have a field to manage it,

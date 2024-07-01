@@ -229,11 +229,19 @@ func setupContainerUser(ctx context.Context, specgen *generate.Generator, rootfs
 	}
 
 	genPasswd := true
+	genGroup := true
 	for _, mount := range specgen.Config.Mounts {
-		if mount.Destination == "/etc" ||
-			mount.Destination == "/etc/" ||
-			mount.Destination == "/etc/passwd" {
+		switch mount.Destination {
+		case "/etc", "/etc/":
 			genPasswd = false
+			genGroup = false
+		case "/etc/passwd":
+			genPasswd = false
+		case "/etc/group":
+			genGroup = false
+		}
+
+		if !genPasswd && !genGroup {
 			break
 		}
 	}
@@ -257,6 +265,28 @@ func setupContainerUser(ctx context.Context, specgen *generate.Generator, rootfs
 			specgen.AddMount(mnt)
 		}
 	}
+	if genGroup {
+		if sc.RunAsGroup != nil {
+			gid = uint32(sc.RunAsGroup.Value)
+		}
+
+		// verify gid exists in containers /etc/group, else generate a group with the group entry
+		groupPath, err := utils.GenerateGroup(gid, rootfs, ctrRunDir)
+		if err != nil {
+			return err
+		}
+		if groupPath != "" {
+			if err := securityLabel(groupPath, mountLabel, false, false); err != nil {
+				return err
+			}
+			specgen.AddMount(rspec.Mount{
+				Type:        "bind",
+				Source:      groupPath,
+				Destination: "/etc/group",
+				Options:     []string{"rw", "bind", "nodev", "nosuid", "noexec"},
+			})
+		}
+	}
 
 	specgen.SetProcessUID(uid)
 	if sc.RunAsGroup != nil {
@@ -265,15 +295,28 @@ func setupContainerUser(ctx context.Context, specgen *generate.Generator, rootfs
 	specgen.SetProcessGID(gid)
 	specgen.AddProcessAdditionalGid(gid)
 
-	for _, group := range addGroups {
-		specgen.AddProcessAdditionalGid(group)
+	supplementalGroupsPolicy := sc.GetSupplementalGroupsPolicy()
+
+	switch supplementalGroupsPolicy {
+	case types.SupplementalGroupsPolicy_Merge:
+		// Add groups from /etc/passwd and SupplementalGroups defined
+		// in security context.
+		for _, group := range addGroups {
+			specgen.AddProcessAdditionalGid(group)
+		}
+		for _, group := range sc.SupplementalGroups {
+			specgen.AddProcessAdditionalGid(uint32(group))
+		}
+	case types.SupplementalGroupsPolicy_Strict:
+		// Don't merge group defined in /etc/passwd.
+		for _, group := range sc.SupplementalGroups {
+			specgen.AddProcessAdditionalGid(uint32(group))
+		}
+
+	default:
+		return fmt.Errorf("not implemented in this CRI-O release: SupplementalGroupsPolicy=%v", supplementalGroupsPolicy)
 	}
 
-	// Add groups from CRI
-	groups := sc.SupplementalGroups
-	for _, group := range groups {
-		specgen.AddProcessAdditionalGid(uint32(group))
-	}
 	return nil
 }
 
@@ -361,7 +404,7 @@ func (s *Server) CreateContainer(ctx context.Context, req *types.CreateContainer
 
 	sb, err := s.getPodSandboxFromRequest(ctx, req.PodSandboxId)
 	if err != nil {
-		if err == sandbox.ErrIDEmpty {
+		if errors.Is(err, sandbox.ErrIDEmpty) {
 			return nil, err
 		}
 		return nil, fmt.Errorf("specified sandbox not found: %s: %w", req.PodSandboxId, err)
@@ -401,7 +444,7 @@ func (s *Server) CreateContainer(ctx context.Context, req *types.CreateContainer
 	if _, err = s.ReserveContainerName(ctr.ID(), ctr.Name()); err != nil {
 		reservedID, getErr := s.ContainerIDForName(ctr.Name())
 		if getErr != nil {
-			return nil, fmt.Errorf("failed to get ID of container with reserved name (%s), after failing to reserve name with %v: %w", ctr.Name(), getErr, getErr)
+			return nil, fmt.Errorf("failed to get ID of container with reserved name (%s), after failing to reserve name with %w: %w", ctr.Name(), getErr, getErr)
 		}
 		// if we're able to find the container, and it's created, this is actually a duplicate request
 		// Just return that container
@@ -412,7 +455,7 @@ func (s *Server) CreateContainer(ctx context.Context, req *types.CreateContainer
 		if resourceErr == nil {
 			return &types.CreateContainerResponse{ContainerId: cachedID}, nil
 		}
-		return nil, fmt.Errorf("%v: %w", resourceErr, err)
+		return nil, fmt.Errorf("%w: %w", resourceErr, err)
 	}
 
 	s.resourceStore.SetStageForResource(ctx, ctr.Name(), "container creating")

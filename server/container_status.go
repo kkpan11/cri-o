@@ -37,27 +37,34 @@ func (s *Server) ContainerStatus(ctx context.Context, req *types.ContainerStatus
 	if imageName := c.ImageName(); imageName != nil {
 		imageNameInSpec = imageName.StringForOutOfProcessConsumptionOnly()
 	}
+	imageID := ""
+	if c.ImageID() != nil {
+		imageID = c.ImageID().IDStringForOutOfProcessConsumptionOnly()
+	}
 	resp := &types.ContainerStatusResponse{
 		Status: &types.ContainerStatus{
 			Id:          containerID,
 			Metadata:    c.Metadata(),
 			Labels:      c.Labels(),
 			Annotations: c.Annotations(),
+			ImageId:     imageID,
 			ImageRef:    imageRef,
 			Image: &types.ImageSpec{
 				Image: imageNameInSpec,
 			},
+			User: c.RuntimeUser(),
 		},
 	}
 
 	mounts := []*types.Mount{}
 	for _, cv := range c.Volumes() {
 		mounts = append(mounts, &types.Mount{
-			ContainerPath:  cv.ContainerPath,
-			HostPath:       cv.HostPath,
-			Readonly:       cv.Readonly,
-			Propagation:    cv.Propagation,
-			SelinuxRelabel: cv.SelinuxRelabel,
+			ContainerPath:     cv.ContainerPath,
+			HostPath:          cv.HostPath,
+			Readonly:          cv.Readonly,
+			RecursiveReadOnly: cv.RecursiveReadOnly,
+			Propagation:       cv.Propagation,
+			SelinuxRelabel:    cv.SelinuxRelabel,
 		})
 	}
 	resp.Status.Mounts = mounts

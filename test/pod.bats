@@ -157,6 +157,59 @@ function teardown() {
 	[[ "$output" == *"net.ipv4.ip_forward = 1"* ]]
 }
 
+@test "pass pod sysctls to runtime when in userns" {
+	if test -n "$CONTAINER_UID_MAPPINGS"; then
+		skip "userNS enabled"
+	fi
+	CONTAINER_DEFAULT_SYSCTLS="net.ipv4.ip_forward=1" start_crio
+
+	# TODO: kernel* ones fail with permission denied.
+	jq '	  .linux.sysctls = {
+			"net.ipv4.ip_local_port_range": "1024 65000",
+		} |
+		.linux.security_context.namespace_options.userns_options = {
+			"mode": 0,
+			"uids": [{
+				"host_id": 100000,
+				"container_id": 0,
+				"length": 65355
+			}],
+			"gids": [{
+				"host_id": 100000,
+				"container_id": 0,
+				"length": 65355
+			}]
+		}' "$TESTDATA"/sandbox_config.json > "$TESTDIR"/sandbox.json
+
+	pod_id=$(crictl runp "$TESTDIR"/sandbox.json)
+	ctr_id=$(crictl create "$pod_id" "$TESTDATA"/container_redis.json "$TESTDIR"/sandbox.json)
+	crictl start "$ctr_id"
+
+	output=$(crictl exec --sync "$ctr_id" sysctl net.ipv4.ip_local_port_range)
+	[[ "$output" == *"net.ipv4.ip_local_port_range = 1024	65000"* ]]
+
+	output=$(crictl exec --sync "$ctr_id" sysctl net.ipv4.ip_forward)
+	[[ "$output" == *"net.ipv4.ip_forward = 1"* ]]
+}
+
+@test "disable crypto.fips_enabled when FIPS_DISABLE is set" {
+	# Check if /proc/sys/crypto exists and skip the test if it does not.
+	if [ ! -d "/proc/sys/crypto" ]; then
+		skip "The directory /proc/sys/crypto does not exist on this host."
+	fi
+	create_runtime_with_allowed_annotation logs io.kubernetes.cri-o.DisableFIPS
+
+	start_crio
+
+	jq '   .labels["FIPS_DISABLE"] = "true"' \
+		"$TESTDATA"/sandbox_config.json > "$TESTDIR"/sboxconfig.json
+
+	ctr_id=$(crictl run "$TESTDATA"/container_sleep.json "$TESTDIR"/sboxconfig.json)
+
+	output=$(crictl exec --sync "$ctr_id" cat /proc/sys/crypto/fips_enabled)
+	[[ "$output" == "0" ]]
+}
+
 @test "fail to pass pod sysctls to runtime if invalid spaces" {
 	CONTAINER_DEFAULT_SYSCTLS="net.ipv4.ip_forward = 1" crio &
 	run ! wait_until_reachable
@@ -336,4 +389,33 @@ function teardown() {
 	ctr_id=$(crictl create "$pod_id" "$etc_perm_config" "$TESTDATA"/sandbox_config.json)
 	output=$(crictl exec --sync "$ctr_id" ls -ld /etc)
 	[[ "$output" == *"test test"* ]]
+}
+
+@test "verify RunAsGroup in container" {
+	start_crio
+
+	jq '
+    .linux.security_context.run_as_user = { value: 1000 }
+    | .linux.security_context.run_as_group = { value: 1001 }
+  ' "$TESTDATA"/sandbox_config.json > "$TESTDIR/modified_sandbox_config.json"
+
+	jq '
+    .linux.security_context.run_as_user = { value: 1000 }
+    | .linux.security_context.run_as_group = { value: 1002 }
+  ' "$TESTDATA"/container_sleep.json > "$TESTDIR/modified_container_sleep_config"
+
+	# Create a new pod using the modified sandbox configuration
+	pod_id=$(crictl runp "$TESTDIR/modified_sandbox_config.json")
+
+	# Create a new container within the pod using the modified container configuration
+	ctr_id=$(crictl create "$pod_id" "$TESTDIR/modified_container_sleep_config" "$TESTDIR/modified_sandbox_config.json")
+	crictl start "$ctr_id"
+
+	# Verify that the gid is present in the /etc/group file
+	exec_output=$(crictl exec "$ctr_id" cat /etc/group)
+	echo "$exec_output" | grep "x:1002" || fail "RunAsGroup ID 1002 not found in /etc/group"
+
+	# Clean up the pod and container
+	crictl stop "$ctr_id"
+	crictl stopp "$pod_id"
 }

@@ -13,12 +13,10 @@ import (
 
 	"github.com/containers/common/pkg/subscriptions"
 	"github.com/containers/common/pkg/timezone"
-	"github.com/containers/common/pkg/util"
-	"github.com/containers/podman/v4/pkg/rootless"
-
 	cstorage "github.com/containers/storage"
 	"github.com/containers/storage/pkg/idtools"
 	"github.com/containers/storage/pkg/mount"
+	"github.com/containers/storage/pkg/unshare"
 	"github.com/cri-o/cri-o/internal/config/cgmgr"
 	"github.com/cri-o/cri-o/internal/config/device"
 	"github.com/cri-o/cri-o/internal/config/node"
@@ -54,24 +52,16 @@ func (s *Server) createContainerPlatform(ctx context.Context, container *oci.Con
 	if idMappings != nil && !container.Spoofed() {
 		rootPair := idMappings.RootPair()
 		for _, path := range []string{container.BundlePath(), container.MountPoint()} {
-			if err := makeAccessible(path, rootPair.UID, rootPair.GID, false); err != nil {
+			if err := makeAccessible(path, rootPair.UID, rootPair.GID); err != nil {
 				return fmt.Errorf("cannot make %s accessible to %d:%d: %w", path, rootPair.UID, rootPair.GID, err)
 			}
-		}
-		if err := makeMountsAccessible(rootPair.UID, rootPair.GID, container.Spec().Mounts); err != nil {
-			return err
 		}
 	}
 	return s.Runtime().CreateContainer(ctx, container, cgroupParent, false)
 }
 
 // makeAccessible changes the path permission and each parent directory to have --x--x--x
-func makeAccessible(path string, uid, gid int, doChown bool) error {
-	if doChown {
-		if err := os.Chown(path, uid, gid); err != nil {
-			return fmt.Errorf("cannot chown %s to %d:%d: %w", path, uid, gid, err)
-		}
-	}
+func makeAccessible(path string, uid, gid int) error {
 	for ; path != "/"; path = filepath.Dir(path) {
 		var st unix.Stat_t
 		err := unix.Stat(path, &st)
@@ -87,18 +77,6 @@ func makeAccessible(path string, uid, gid int, doChown bool) error {
 		perm := os.FileMode(st.Mode) & os.ModePerm
 		if perm&0o111 != 0o111 {
 			if err := os.Chmod(path, perm|0o111); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// makeMountsAccessible makes sure all the mounts are accessible from the user namespace
-func makeMountsAccessible(uid, gid int, mounts []rspec.Mount) error {
-	for _, m := range mounts {
-		if m.Type == "bind" || util.StringInSlice("bind", m.Options) {
-			if err := makeAccessible(m.Source, uid, gid, false); err != nil {
 				return err
 			}
 		}
@@ -334,7 +312,8 @@ func (s *Server) createSandboxContainer(ctx context.Context, ctr ctrfactory.Cont
 
 	s.resourceStore.SetStageForResource(ctx, ctr.Name(), "container volume configuration")
 	idMapSupport := s.Runtime().RuntimeSupportsIDMap(sb.RuntimeHandler())
-	containerVolumes, ociMounts, err := addOCIBindMounts(ctx, ctr, mountLabel, s.config.RuntimeConfig.BindMountPrefix, s.config.AbsentMountSourcesToReject, maybeRelabel, skipRelabel, cgroup2RW, idMapSupport, s.Config().Root)
+	rroSupport := s.Runtime().RuntimeSupportsRROMounts(sb.RuntimeHandler())
+	containerVolumes, ociMounts, err := addOCIBindMounts(ctx, ctr, mountLabel, s.config.RuntimeConfig.BindMountPrefix, s.config.AbsentMountSourcesToReject, maybeRelabel, skipRelabel, cgroup2RW, idMapSupport, rroSupport, s.Config().Root)
 	if err != nil {
 		return nil, err
 	}
@@ -427,7 +406,11 @@ func (s *Server) createSandboxContainer(ctx context.Context, ctr ctrfactory.Cont
 
 			memoryLimit := resources.MemoryLimitInBytes
 			if memoryLimit != 0 {
-				if err := cgmgr.VerifyMemoryIsEnough(memoryLimit); err != nil {
+				containerMinMemory, err := s.Runtime().GetContainerMinMemory(sb.RuntimeHandler())
+				if err != nil {
+					return nil, err
+				}
+				if err := cgmgr.VerifyMemoryIsEnough(memoryLimit, containerMinMemory); err != nil {
 					return nil, err
 				}
 				specgen.SetLinuxResourcesMemoryLimit(memoryLimit)
@@ -742,17 +725,29 @@ func (s *Server) createSandboxContainer(ctx context.Context, ctr ctrfactory.Cont
 		return nil, err
 	}
 
+	rootUID, rootGID := 0, 0
+	if containerIDMappings != nil {
+		rootPair := containerIDMappings.RootPair()
+		rootUID, rootGID = rootPair.UID, rootPair.GID
+	}
+
 	// Add secrets from the default and override mounts.conf files
 	secretMounts := subscriptions.MountsWithUIDGID(
 		mountLabel,
 		containerInfo.RunDir,
 		s.config.DefaultMountsFile,
 		mountPoint,
-		0,
-		0,
-		rootless.IsRootless(),
+		rootUID,
+		rootGID,
+		unshare.IsRootless(),
 		ctr.DisableFips(),
 	)
+
+	if ctr.DisableFips() && sb.Annotations()[crioann.DisableFIPSAnnotation] == "true" {
+		if err := disableFipsForContainer(ctr, containerInfo.RunDir); err != nil {
+			return nil, fmt.Errorf("failed to disable FIPS for container %s: %w", containerID, err)
+		}
+	}
 
 	mounts := []rspec.Mount{}
 	mounts = append(mounts, ociMounts...)
@@ -820,7 +815,6 @@ func (s *Server) createSandboxContainer(ctx context.Context, ctr ctrfactory.Cont
 	ociContainer.AddManagedPIDNamespace(ctr.PidNamespace())
 
 	ociContainer.SetIDMappings(containerIDMappings)
-	var rootPair idtools.IDPair
 	if containerIDMappings != nil {
 		s.finalizeUserMapping(sb, specgen, containerIDMappings)
 
@@ -831,15 +825,9 @@ func (s *Server) createSandboxContainer(ctx context.Context, ctr ctrfactory.Cont
 			specgen.AddLinuxGIDMapping(uint32(gidmap.HostID), uint32(gidmap.ContainerID), uint32(gidmap.Size))
 		}
 
-		rootPair = containerIDMappings.RootPair()
-
-		pathsToChown := []string{mountPoint, containerInfo.RunDir}
-		for _, m := range secretMounts {
-			pathsToChown = append(pathsToChown, m.Source)
-		}
-		for _, path := range pathsToChown {
-			if err := makeAccessible(path, rootPair.UID, rootPair.GID, true); err != nil {
-				return nil, fmt.Errorf("cannot chown %s to %d:%d: %w", path, rootPair.UID, rootPair.GID, err)
+		for _, path := range []string{mountPoint, containerInfo.RunDir} {
+			if err := makeAccessible(path, rootUID, rootGID); err != nil {
+				return nil, fmt.Errorf("cannot make %s accessible to %d:%d: %w", path, rootUID, rootGID, err)
 			}
 		}
 	} else if err := specgen.RemoveLinuxNamespace(string(rspec.UserNamespace)); err != nil {
@@ -858,25 +846,51 @@ func (s *Server) createSandboxContainer(ctx context.Context, ctr ctrfactory.Cont
 		specgen.Config.Process.User.Umask = &umask
 	}
 
-	if containerIDMappings == nil {
-		rootPair = idtools.IDPair{UID: 0, GID: 0}
+	etcPath := filepath.Join(mountPoint, "/etc")
+
+	// Warn users if the container /etc directory path points to a location
+	// that is not a regular directory. This could indicate that something
+	// might be afoot.
+	etc, err := os.Lstat(etcPath)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	if err == nil && !etc.IsDir() {
+		log.Warnf(ctx, "Detected /etc path for container %s is not a directory", ctr.ID())
 	}
 
-	etc := filepath.Join(mountPoint, "/etc")
-	// create the `/etc` folder only when it doesn't exist
-	if _, err := os.Stat(etc); err != nil && os.IsNotExist(err) {
-		if err := idtools.MkdirAllAndChown(etc, 0o755, rootPair); err != nil {
-			return nil, fmt.Errorf("error creating mtab directory: %w", err)
+	// The /etc directory can be subjected to various attempts on the path (directory)
+	// traversal attacks. As such, we need to ensure that its path will be relative to
+	// the base (or root, if you wish) of the container to mitigate a container escape.
+	etcPath, err = securejoin.SecureJoin(mountPoint, "/etc")
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve container /etc directory path: %w", err)
+	}
+
+	// Create the /etc directory only when it doesn't exist.
+	if _, err := os.Stat(etcPath); err != nil && os.IsNotExist(err) {
+		rootPair := idtools.IDPair{UID: 0, GID: 0}
+		if containerIDMappings != nil {
+			rootPair = containerIDMappings.RootPair()
+		}
+		if err := idtools.MkdirAllAndChown(etcPath, 0o755, rootPair); err != nil {
+			return nil, fmt.Errorf("failed to create container /etc directory: %w", err)
 		}
 	}
-	// add symlink /etc/mtab to /proc/mounts allow looking for mountfiles there in the container
-	// compatible with Docker
-	if err := os.Symlink("/proc/mounts", filepath.Join(etc, "mtab")); err != nil && !os.IsExist(err) {
+
+	// Add a symbolic link from /proc/mounts to /etc/mtab to keep compatibility with legacy
+	// Linux distributions and Docker.
+	//
+	// We cannot use SecureJoin here, as the /etc/mtab can already be symlinked from somewhere
+	// else in some cases, and doing so would resolve an existing mtab path to the symbolic
+	// link target location, for example, the /etc/proc/self/mounts, which breaks container
+	// creation.
+	if err := os.Symlink("/proc/mounts", filepath.Join(etcPath, "mtab")); err != nil && !os.IsExist(err) {
 		return nil, err
 	}
 
 	// Configure timezone for the container if it is set.
-	if err := configureTimezone(s.Runtime().Timezone(), ociContainer.BundlePath(), mountPoint, mountLabel, etc, ociContainer.ID(), options, ctr); err != nil {
+	if err := configureTimezone(s.Runtime().Timezone(), ociContainer.BundlePath(), mountPoint, mountLabel, etcPath, ociContainer.ID(), options, ctr); err != nil {
 		return nil, fmt.Errorf("failed to configure timezone for container %s: %w", ociContainer.ID(), err)
 	}
 
@@ -932,6 +946,25 @@ func (s *Server) createSandboxContainer(ctx context.Context, ctr ctrfactory.Cont
 	}
 
 	return ociContainer, nil
+}
+
+func disableFipsForContainer(ctr ctrfactory.Container, containerDir string) error {
+	// Create a unique filename for the FIPS setting file.
+	fileName := filepath.Join(containerDir, "sysctl-fips")
+	content := []byte("0\n")
+
+	// Write the value '0' to disable FIPS directly to the file.
+	if err := os.WriteFile(fileName, content, 0o444); err != nil {
+		return fmt.Errorf("failed to write to file: %w", err)
+	}
+	ctr.SpecAddMount(rspec.Mount{
+		Destination: "/proc/sys/crypto/fips_enabled",
+		Source:      fileName,
+		Type:        "bind",
+		Options:     []string{"noexec", "nosuid", "nodev", "ro", "bind"},
+	})
+
+	return nil
 }
 
 func configureTimezone(tz, containerRunDir, mountPoint, mountLabel, etcPath, containerID string, options []string, ctr ctrfactory.Container) error {
@@ -992,7 +1025,7 @@ func clearReadOnly(m *rspec.Mount) {
 	m.Options = append(m.Options, "rw")
 }
 
-func addOCIBindMounts(ctx context.Context, ctr ctrfactory.Container, mountLabel, bindMountPrefix string, absentMountSourcesToReject []string, maybeRelabel, skipRelabel, cgroup2RW, idMapSupport bool, storageRoot string) ([]oci.ContainerVolume, []rspec.Mount, error) {
+func addOCIBindMounts(ctx context.Context, ctr ctrfactory.Container, mountLabel, bindMountPrefix string, absentMountSourcesToReject []string, maybeRelabel, skipRelabel, cgroup2RW, idMapSupport, rroSupport bool, storageRoot string) ([]oci.ContainerVolume, []rspec.Mount, error) {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
 
@@ -1078,16 +1111,12 @@ func addOCIBindMounts(ctx context.Context, ctr ctrfactory.Container, mountLabel,
 				// create the missing bind mount source for restore and return an
 				// error to the user.
 				if err = os.MkdirAll(src, 0o755); err != nil {
-					return nil, nil, fmt.Errorf("failed to mkdir %s: %s", src, err)
+					return nil, nil, fmt.Errorf("failed to mkdir %s: %w", src, err)
 				}
 			}
 		}
 
-		options := []string{"rw"}
-		if m.Readonly {
-			options = []string{"ro"}
-		}
-		options = append(options, "rbind")
+		options := []string{"rbind"}
 
 		// mount propagation
 		switch m.Propagation {
@@ -1119,6 +1148,34 @@ func addOCIBindMounts(ctx context.Context, ctr ctrfactory.Container, mountLabel,
 			options = append(options, "rprivate")
 		}
 
+		// Recursive Read-only (RRO) support requires the mount to be
+		// read-only and the mount propagation set to private.
+		switch {
+		case m.RecursiveReadOnly && m.Readonly:
+			if !rroSupport {
+				return nil, nil, fmt.Errorf(
+					"recursive read-only mount support is not available for hostPath %q",
+					m.HostPath,
+				)
+			}
+			if m.Propagation != types.MountPropagation_PROPAGATION_PRIVATE {
+				return nil, nil, fmt.Errorf(
+					"recursive read-only mount requires private propagation for hostPath %q, got: %s",
+					m.HostPath, m.Propagation,
+				)
+			}
+			options = append(options, "rro")
+		case m.RecursiveReadOnly:
+			return nil, nil, fmt.Errorf(
+				"recursive read-only mount conflicts with read-write mount for hostPath %q",
+				m.HostPath,
+			)
+		case m.Readonly:
+			options = append(options, "ro")
+		default:
+			options = append(options, "rw")
+		}
+
 		if m.SelinuxRelabel {
 			if skipRelabel {
 				log.Debugf(ctx, "Skipping relabel for %s because of super privileged container (type: spc_t)", src)
@@ -1130,11 +1187,12 @@ func addOCIBindMounts(ctx context.Context, ctr ctrfactory.Container, mountLabel,
 		}
 
 		volumes = append(volumes, oci.ContainerVolume{
-			ContainerPath:  dest,
-			HostPath:       src,
-			Readonly:       m.Readonly,
-			Propagation:    m.Propagation,
-			SelinuxRelabel: m.SelinuxRelabel,
+			ContainerPath:     dest,
+			HostPath:          src,
+			Readonly:          m.Readonly,
+			RecursiveReadOnly: m.RecursiveReadOnly,
+			Propagation:       m.Propagation,
+			SelinuxRelabel:    m.SelinuxRelabel,
 		})
 
 		uidMappings := getOCIMappings(m.UidMappings)

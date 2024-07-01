@@ -45,10 +45,11 @@ func ConnectRuntime() (*runtime, error) {
 	defer cancel()
 	dialOpts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
-		grpc.FailOnNonTempDialError(true),
+		grpc.WithBlock(),                  //nolint:staticcheck // use it until an appropriate alternative is present
+		grpc.FailOnNonTempDialError(true), //nolint:staticcheck // use it until an appropriate alternative is present
 	}
 
+	//nolint:staticcheck // use it until an appropriate alternative is present
 	cc, err := grpc.DialContext(ctx, *crioSocket, dialOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("runtime connection failed: %w", err)
@@ -255,7 +256,7 @@ func (r *runtime) StopPod(pod string) error {
 		PodSandboxId: id,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to stop pod %s: %v", pod, err)
+		return fmt.Errorf("failed to stop pod %s: %w", pod, err)
 	}
 
 	return nil
@@ -274,7 +275,7 @@ func (r *runtime) RemovePod(pod string) error {
 		PodSandboxId: id,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to remove pod %s: %v", pod, err)
+		return fmt.Errorf("failed to remove pod %s: %w", pod, err)
 	}
 
 	r.Lock()
@@ -467,7 +468,7 @@ func (r *runtime) StartContainer(container string) error {
 		ContainerId: id,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to start container %s: %v", container, err)
+		return fmt.Errorf("failed to start container %s: %w", container, err)
 	}
 
 	return nil
@@ -486,7 +487,7 @@ func (r *runtime) StopContainer(container string) error {
 		ContainerId: id,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to stop container %s: %v", container, err)
+		return fmt.Errorf("failed to stop container %s: %w", container, err)
 	}
 
 	return nil
@@ -505,7 +506,7 @@ func (r *runtime) RemoveContainer(container string) error {
 		ContainerId: id,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to remove container %s: %v", container, err)
+		return fmt.Errorf("failed to remove container %s: %w", container, err)
 	}
 
 	r.Lock()

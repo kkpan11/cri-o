@@ -108,7 +108,6 @@ Fedora, RHEL 7, CentOS and related distributions:
 ```shell
 yum install -y \
   containers-common \
-  device-mapper-devel \
   git \
   glib2-devel \
   glibc-devel \
@@ -129,6 +128,12 @@ yum install -y \
 - `CentOS 8` (or higher): `pkgconfig` package is replaced by `pkgconf-pkg-config`
 - By default btrfs is not enabled. To add the btrfs support, install the
   following package: `btrfs-progs-devel`
+- `CentOS 8`: `gpgme-devel` can be
+  installed with the powertools repo.
+  (`yum install -y gpgme-devel --enablerepo=powertools`)
+- `CentOS 9`: `gpgme-devel` can be
+  installed with the CodeReadyBuilder (crb) repo.
+  (`yum install -y gpgme-devel --enablerepo=crb`)
 - It is possible the distribution packaged version of runc is out of date.
 - If you'd like to get the latest and greatest runc, consider using
   the one found in [devel:kubic:libcontainers:stable](https://build.opensuse.org/project/show/devel:kubic:libcontainers:stable)
@@ -159,7 +164,6 @@ Install dependencies:
 ```shell
 yum install -y \
   containers-common \
-  device-mapper-devel \
   git \
   make \
   glib2-devel \
@@ -204,7 +208,6 @@ apt install -y  \
   containers-common \
   git \
   libassuan-dev \
-  libdevmapper-dev \
   libglib2.0-dev \
   libc6-dev \
   libgpgme11-dev \
@@ -230,7 +233,6 @@ apt-get update -qq && apt-get install -y \
   containers-common \
   git \
   libassuan-dev \
-  libdevmapper-dev \
   libglib2.0-dev \
   libc6-dev \
   libgpgme-dev \
@@ -333,8 +335,6 @@ which uses the following buildtags.
 | -------------------------------- | ----------------------------------------------- | ------------ |
 | exclude_graphdriver_btrfs        | exclude btrfs as a storage option               |              |
 | btrfs_noversion                  | for building btrfs version < 3.16.1             | btrfs        |
-| exclude_graphdriver_devicemapper | exclude devicemapper as a storage option        |              |
-| libdm_no_deferred_remove         | don't compile deferred remove with devicemapper | devicemapper |
 | exclude_graphdriver_overlay      | exclude overlay as a storage option             |              |
 | ostree                           | build storage using ostree                      | ostree       |
 <!-- markdownlint-enable MD013 -->
@@ -350,7 +350,6 @@ binaries are integration tested as well and support the following features:
 
 - apparmor
 - btrfs
-- device mapper
 - gpgme
 - seccomp
 - selinux

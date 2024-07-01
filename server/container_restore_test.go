@@ -8,6 +8,7 @@ import (
 
 	criu "github.com/checkpoint-restore/go-criu/v7/utils"
 	"github.com/containers/storage/pkg/archive"
+	"github.com/containers/storage/pkg/unshare"
 	"github.com/cri-o/cri-o/internal/mockutils"
 	"github.com/cri-o/cri-o/internal/oci"
 	"github.com/cri-o/cri-o/internal/storage"
@@ -444,8 +445,11 @@ var _ = t.Describe("ContainerRestore", func() {
 			{`{"rootfsImageRef": "8a788232037eaf17794408ff3df6b922a1aedf9ef8de36afdae3ed0b0381907b"}`, true},
 		}
 		for _, image := range images {
-			loopImage := image
 			It(fmt.Sprintf("should succeed (%s)", image.config), func() {
+				if unshare.IsRootless() {
+					Skip("should run as root")
+				}
+
 				// Given
 				addContainerAndSandbox()
 				testContainer.SetStateAndSpoofPid(&oci.ContainerState{
@@ -470,7 +474,7 @@ var _ = t.Describe("ContainerRestore", func() {
 				)
 				Expect(err).ToNot(HaveOccurred())
 				defer os.RemoveAll("spec.dump")
-				err = os.WriteFile("config.dump", []byte(loopImage.config), 0o644)
+				err = os.WriteFile("config.dump", []byte(image.config), 0o644)
 				Expect(err).ToNot(HaveOccurred())
 				defer os.RemoveAll("config.dump")
 				outFile, err := os.Create("archive.tar")
@@ -509,7 +513,7 @@ var _ = t.Describe("ContainerRestore", func() {
 				imageID, err := storage.ParseStorageImageIDFromOutOfProcessData("8a788232037eaf17794408ff3df6b922a1aedf9ef8de36afdae3ed0b0381907b")
 				Expect(err).ToNot(HaveOccurred())
 				var imageLookup mockutils.MockSequence
-				if loopImage.byID {
+				if image.byID {
 					imageLookup = mockutils.InOrder(
 						imageServerMock.EXPECT().HeuristicallyTryResolvingStringAsIDPrefix(imageID.IDStringForOutOfProcessConsumptionOnly()).
 							Return(&imageID),

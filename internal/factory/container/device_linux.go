@@ -89,10 +89,6 @@ func (c *container) specAddContainerConfigDevices(enableDeviceOwnershipFromSecur
 	sp := c.Spec().Config
 
 	for _, device := range c.Config().Devices {
-		// pin the device to avoid using `device` within the range scope as
-		// wrong function literal
-		device := device
-
 		// If we are privileged, we have access to devices on the host.
 		// If the requested container path already exists on the host, the container won't see the expected host path.
 		// Therefore, we must error out if the container path already exists
@@ -134,7 +130,7 @@ func (c *container) specAddContainerConfigDevices(enableDeviceOwnershipFromSecur
 		}
 		// if the device is not a device node
 		// try to see if it's a directory holding many devices
-		if err == devices.ErrNotADevice {
+		if errors.Is(err, devices.ErrNotADevice) {
 			// check if it is a directory
 			if e := utils.IsDirectory(path); e == nil {
 				// mount the internal devices recursively
@@ -226,9 +222,8 @@ func (c *container) specInjectCDIDevices() error {
 		return nil
 	}
 
-	registry := cdi.GetRegistry()
-	if err := registry.Refresh(); err != nil {
-		// We don't consider registry refresh failure a fatal error.
+	if err := cdi.Refresh(); err != nil {
+		// We don't consider a refresh failure a fatal error.
 		// For instance, a dynamically generated invalid CDI Spec file for
 		// any particular vendor shouldn't prevent injection of devices of
 		// different vendors. CDI itself knows better and it will fail the
@@ -237,7 +232,7 @@ func (c *container) specInjectCDIDevices() error {
 		log.Warnf(context.TODO(), "CDI registry has errors: %v", err)
 	}
 
-	if _, err := registry.InjectDevices(c.Spec().Config, requested...); err != nil {
+	if _, err := cdi.InjectDevices(c.Spec().Config, requested...); err != nil {
 		return fmt.Errorf("CDI device injection failed: %w", err)
 	}
 

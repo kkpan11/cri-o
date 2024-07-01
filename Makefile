@@ -1,21 +1,8 @@
 GO ?= go
 
-export GOPROXY=https://proxy.golang.org
-export GOSUMDB=https://sum.golang.org
-
 TRIMPATH ?= -trimpath
 GO_ARCH=$(shell $(GO) env GOARCH)
-GO_MAJOR_VERSION = $(shell $(GO) version | cut -c 14- | cut -d' ' -f1 | cut -d'.' -f1)
-GO_MINOR_VERSION = $(shell $(GO) version | cut -c 14- | cut -d' ' -f1 | cut -d'.' -f2)
-GO_GT_1_17 := $(shell [ $(GO_MAJOR_VERSION) -ge 1 -a $(GO_MINOR_VERSION) -ge 17 ] && echo true)
-GO_FLAGS ?=
-ifeq ($(GO_GT_1_17),true)
-ifeq ($(GO_ARCH),386)
-GO_FLAGS += -buildvcs=false
-endif
-endif
-
-GO_BUILD ?= $(GO) build $(GO_FLAGS) $(TRIMPATH)
+GO_BUILD ?= $(GO) build $(TRIMPATH)
 GO_RUN ?= $(GO) run
 NIX_IMAGE ?= nixos/nix:2.3.16
 
@@ -32,12 +19,13 @@ BUILDTAGS ?= containers_image_ostree_stub \
 			 $(shell hack/apparmor_tag.sh) \
 			 $(shell hack/btrfs_installed_tag.sh) \
 			 $(shell hack/btrfs_tag.sh) \
-			 $(shell hack/libdm_installed.sh) \
-			 $(shell hack/libdm_no_deferred_remove_tag.sh) \
 			 $(shell hack/openpgp_tag.sh) \
 			 $(shell hack/seccomp_tag.sh) \
 			 $(shell hack/selinux_tag.sh) \
 			 $(shell hack/libsubid_tag.sh)
+# Device mapper is deprecated; keep this tag until the dm code
+# is removed from the c/storage vendored here.
+BUILDTAGS += exclude_graphdriver_devicemapper
 CRICTL_CONFIG_DIR=${DESTDIR}/etc
 CONTAINER_RUNTIME ?= podman
 BUILD_PATH := $(shell pwd)/build
@@ -60,19 +48,19 @@ GINKGO := ${BUILD_BIN_PATH}/ginkgo
 MOCKGEN := ${BUILD_BIN_PATH}/mockgen
 MOCKGEN_VERSION := 1.6.0
 GOLANGCI_LINT := ${BUILD_BIN_PATH}/golangci-lint
-GOLANGCI_LINT_VERSION := v1.56.2
+GOLANGCI_LINT_VERSION := v1.58.0
 GO_MOD_OUTDATED := ${BUILD_BIN_PATH}/go-mod-outdated
 GO_MOD_OUTDATED_VERSION := 0.9.0
 GOSEC := ${BUILD_BIN_PATH}/gosec
-GOSEC_VERSION := 2.18.2
+GOSEC_VERSION := 2.19.0
 RELEASE_NOTES := ${BUILD_BIN_PATH}/release-notes
 ZEITGEIST := ${BUILD_BIN_PATH}/zeitgeist
-ZEITGEIST_VERSION := v0.4.4
-RELEASE_NOTES_VERSION := v0.16.5
+ZEITGEIST_VERSION := v0.5.3
+RELEASE_NOTES_VERSION := v0.17.0
 SHFMT := ${BUILD_BIN_PATH}/shfmt
-SHFMT_VERSION := v3.7.0
+SHFMT_VERSION := v3.8.0
 SHELLCHECK := ${BUILD_BIN_PATH}/shellcheck
-SHELLCHECK_VERSION := v0.9.0
+SHELLCHECK_VERSION := v0.10.0
 BATS_FILES := $(wildcard test/*.bats)
 
 ifeq ($(shell bash -c '[[ `command -v git` && `git rev-parse --git-dir 2>/dev/null` ]] && echo true'), true)
@@ -170,19 +158,19 @@ bin/pinns:
 	$(MAKE) -C pinns
 
 test/copyimg/copyimg: $(GO_FILES)
-	$(GO_BUILD) $(GCFLAGS) $(GO_LDFLAGS) -tags "$(BUILDTAGS)" -o $@ $(PROJECT)/test/copyimg
+	$(GO_BUILD) $(GCFLAGS) $(GO_LDFLAGS) -tags "$(BUILDTAGS)" -o $@ ./test/copyimg
 
 test/checkseccomp/checkseccomp: $(GO_FILES)
-	$(GO_BUILD) $(GCFLAGS) $(GO_LDFLAGS) -tags "$(BUILDTAGS)" -o $@ $(PROJECT)/test/checkseccomp
+	$(GO_BUILD) $(GCFLAGS) $(GO_LDFLAGS) -tags "$(BUILDTAGS)" -o $@ ./test/checkseccomp
 
 test/checkcriu/checkcriu: $(GO_FILES)
-	$(GO_BUILD) $(GCFLAGS) $(GO_LDFLAGS) -tags "$(BUILDTAGS)" -o $@ $(PROJECT)/test/checkcriu
+	$(GO_BUILD) $(GCFLAGS) $(GO_LDFLAGS) -tags "$(BUILDTAGS)" -o $@ ./test/checkcriu
 
 test/nri/nri.test: $(wildcard test/nri/*.go)
-	$(GO) test --tags "test $(BUILDTAGS)" -c $(PROJECT)/test/nri -o $@
+	$(GO) test --tags "test $(BUILDTAGS)" -c ./test/nri -o $@
 
 bin/crio: $(GO_FILES)
-	$(GO_BUILD) $(GCFLAGS) $(GO_LDFLAGS) -tags "$(BUILDTAGS)" -o $@ $(PROJECT)/cmd/crio
+	$(GO_BUILD) $(GCFLAGS) $(GO_LDFLAGS) -tags "$(BUILDTAGS)" -o $@ ./cmd/crio
 
 build-static:
 	$(CONTAINER_RUNTIME) run --network=host --rm --privileged -ti -v /:/mnt \
@@ -199,8 +187,8 @@ crio.conf: bin/crio
 release:
 	${GO_RUN} ./scripts/release
 
-patch-release:
-	${GO_RUN} ./scripts/patch-release
+tag-reconciler:
+	${GO_RUN} ./scripts/tag-reconciler
 
 release-notes: ${RELEASE_NOTES}
 	${GO_RUN} ./scripts/release-notes \
@@ -235,7 +223,7 @@ bin/crio.cross.%:  .explicit_phony
 	TARGET="$*"; \
 	GOOS="$${TARGET%%.*}" \
 	GOARCH="$${TARGET##*.}" \
-	$(GO_BUILD) $(GO_LDFLAGS) -tags "containers_image_openpgp btrfs_noversion" -o "$@" $(PROJECT)/cmd/crio
+	$(GO_BUILD) $(GO_LDFLAGS) -tags "containers_image_openpgp btrfs_noversion exclude_graphdriver_devicemapper" -o "$@" ./cmd/crio
 
 nixpkgs:
 	@nix run -f channel:nixpkgs-unstable nix-prefetch-git -- \
@@ -289,7 +277,7 @@ $(GOLANGCI_LINT):
 
 $(SHELLCHECK): $(BUILD_BIN_PATH)
 	URL=https://github.com/koalaman/shellcheck/releases/download/$(SHELLCHECK_VERSION)/shellcheck-$(SHELLCHECK_VERSION).linux.x86_64.tar.xz \
-	SHA256SUM=7087178d54de6652b404c306233264463cb9e7a9afeb259bb663cc4dbfd64149 && \
+	SHA256SUM=f35ae15a4677945428bdfe61ccc297490d89dd1e544cc06317102637638c6deb && \
 	curl -sSfL $$URL | tar xfJ - -C ${BUILD_BIN_PATH} --strip 1 shellcheck-$(SHELLCHECK_VERSION)/shellcheck && \
 	sha256sum ${SHELLCHECK} | grep -q $$SHA256SUM
 
@@ -397,10 +385,6 @@ mock-ociartifact-types: ${MOCKGEN}
 		-package ociartifactmock \
 		-destination ${MOCK_PATH}/ociartifact/ociartifact.go \
 		github.com/cri-o/cri-o/internal/config/ociartifact Impl
-
-codecov: SHELL := $(shell which bash)
-codecov:
-	bash <(curl -s https://codecov.io/bash) -f ${COVERAGE_PATH}/coverprofile
 
 localintegration: clean binaries test-binaries
 	./test/test_runner.sh ${TESTFLAGS}
@@ -512,7 +496,7 @@ bin/metrics-exporter:
 	$(GO_BUILD) -o $@ \
 		-ldflags '-linkmode external -extldflags "-static -lm"' \
 		-tags netgo \
-		$(PROJECT)/contrib/metrics-exporter
+		./contrib/metrics-exporter
 
 metrics-exporter: bin/metrics-exporter
 	$(CONTAINER_RUNTIME) build . \
@@ -552,6 +536,6 @@ metrics-exporter: bin/metrics-exporter
 	bin/metrics-exporter \
 	metrics-exporter \
 	release \
-	patch-release \
+	tag-reconciler \
 	check-log-lines \
 	verify-dependencies

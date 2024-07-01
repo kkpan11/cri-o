@@ -4,16 +4,17 @@ on:
   schedule:
     - cron: '0 0 * * 0'  # At 00:00 on Sunday
 env:
-  NIX_VERSION: '2.19.2'
+  NIX_VERSION: '2.22.1'
 jobs:
   update-nixpkgs:
     permissions:
       contents: write
       pull-requests: write
+    if: github.ref == 'refs/heads/main' && github.repository == 'cri-o/cri-o'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v26
+      - uses: actions/checkout@0ad4b8fadaa221de15dcec353f45205ec38ea70b # v4.1.4
+      - uses: cachix/install-nix-action@ba0dd844c9180cbf77aa72a116d6fbc515d0e87b # v27
         with:
           install_url: https://releases.nixos.org/nix/nix-${{ env.NIX_VERSION }}/install
       - run: make nixpkgs
@@ -24,7 +25,7 @@ jobs:
             echo "create_pr=true" >> "$GITHUB_OUTPUT"
           fi
       - name: Create PR if required
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6.1.0
         if: ${{ steps.create_pr.outputs.create_pr == 'true' }}
         with:
           commit-message: Update nixpkgs

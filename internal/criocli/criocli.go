@@ -8,6 +8,7 @@ import (
 
 	libconfig "github.com/cri-o/cri-o/pkg/config"
 	"github.com/cri-o/cri-o/server/otel-collector/collectors"
+	"github.com/docker/go-units"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 )
@@ -97,9 +98,6 @@ func mergeConfig(config *libconfig.Config, ctx *cli.Context) error {
 	if ctx.IsSet("insecure-registry") {
 		config.InsecureRegistries = StringSliceTrySplit(ctx, "insecure-registry")
 	}
-	if ctx.IsSet("registry") {
-		config.Registries = StringSliceTrySplit(ctx, "registry")
-	}
 	if ctx.IsSet("default-transport") {
 		config.DefaultTransport = ctx.String("default-transport")
 	}
@@ -128,8 +126,19 @@ func mergeConfig(config *libconfig.Config, ctx *cli.Context) error {
 			runtimeType := libconfig.DefaultRuntimeType
 			privilegedWithoutHostDevices := false
 			runtimeConfigPath := ""
+			var (
+				containerMinMemory string
+				err                error
+			)
 
 			switch len(fields) {
+			case 7:
+				containerMinMemory = fields[6]
+				_, err = units.RAMInBytes(containerMinMemory)
+				if err != nil {
+					return fmt.Errorf("invalid value %q for --runtimes:container_min_memory: %w", containerMinMemory, err)
+				}
+				fallthrough
 			case 6:
 				runtimeConfigPath = fields[5]
 				fallthrough
@@ -148,9 +157,10 @@ func mergeConfig(config *libconfig.Config, ctx *cli.Context) error {
 					RuntimeType:                  runtimeType,
 					PrivilegedWithoutHostDevices: privilegedWithoutHostDevices,
 					RuntimeConfigPath:            runtimeConfigPath,
+					ContainerMinMemory:           containerMinMemory,
 				}
 			default:
-				return fmt.Errorf("wrong format for --runtimes: %q", r)
+				return fmt.Errorf("invalid format for --runtimes: %q", r)
 			}
 		}
 	}
@@ -388,6 +398,9 @@ func mergeConfig(config *libconfig.Config, ctx *cli.Context) error {
 	if ctx.IsSet("big-files-temporary-dir") {
 		config.BigFilesTemporaryDir = ctx.String("big-files-temporary-dir")
 	}
+	if ctx.IsSet("auto-reload-registries") {
+		config.AutoReloadRegistries = ctx.Bool("auto-reload-registries")
+	}
 	if ctx.IsSet("separate-pull-cgroup") {
 		config.SeparatePullCgroup = ctx.String("separate-pull-cgroup")
 	}
@@ -399,6 +412,12 @@ func mergeConfig(config *libconfig.Config, ctx *cli.Context) error {
 	}
 	if ctx.IsSet("stats-collection-period") {
 		config.StatsCollectionPeriod = ctx.Int("stats-collection-period")
+	}
+	if ctx.IsSet("collection-period") {
+		config.CollectionPeriod = ctx.Int("collection-period")
+	}
+	if ctx.IsSet("included-pod-metrics") {
+		config.IncludedPodMetrics = StringSliceTrySplit(ctx, "included-pod-metrics")
 	}
 	if ctx.IsSet("enable-pod-events") {
 		config.EnablePodEvents = ctx.Bool("enable-pod-events")
@@ -613,12 +632,6 @@ func getCrioFlags(defConf *libconfig.Config) []cli.Flag {
        '--insecure-registry'.`,
 			EnvVars: []string{"CONTAINER_INSECURE_REGISTRY"},
 		},
-		&cli.StringSliceFlag{
-			Name:    "registry",
-			Value:   cli.NewStringSlice(defConf.Registries...),
-			Usage:   "Registry to be prepended when pulling unqualified images. Can be specified multiple times.",
-			EnvVars: []string{"CONTAINER_REGISTRY"},
-		},
 		&cli.StringFlag{
 			Name:    "default-transport",
 			Usage:   "A prefix to prepend to image names that cannot be pulled as-is.",
@@ -638,7 +651,7 @@ func getCrioFlags(defConf *libconfig.Config) []cli.Flag {
 		},
 		&cli.StringSliceFlag{
 			Name:    "runtimes",
-			Usage:   "OCI runtimes, format is 'runtime_name:runtime_path:runtime_root:runtime_type:privileged_without_host_devices:runtime_config_path'.",
+			Usage:   "OCI runtimes, format is 'runtime_name:runtime_path:runtime_root:runtime_type:privileged_without_host_devices:runtime_config_path:container_min_memory'.",
 			EnvVars: []string{"CONTAINER_RUNTIMES"},
 		},
 		&cli.StringFlag{
@@ -910,6 +923,12 @@ func getCrioFlags(defConf *libconfig.Config) []cli.Flag {
 			Value:   defConf.BigFilesTemporaryDir,
 		},
 		&cli.BoolFlag{
+			Name:    "auto-reload-registries",
+			Usage:   "If true, CRI-O will automatically reload the mirror registry when there is an update to the 'registries.conf.d' directory. Default value is set to 'false'.",
+			EnvVars: []string{"AUTO_RELOAD_REGISTRIES"},
+			Value:   defConf.AutoReloadRegistries,
+		},
+		&cli.BoolFlag{
 			Name:    "read-only",
 			Usage:   "Setup all unprivileged containers to run as read-only. Automatically mounts the containers' tmpfs on '/run', '/tmp' and '/var/tmp'.",
 			EnvVars: []string{"CONTAINER_READ_ONLY"},
@@ -1140,8 +1159,20 @@ func getCrioFlags(defConf *libconfig.Config) []cli.Flag {
 		&cli.IntFlag{
 			Name:    "stats-collection-period",
 			Value:   defConf.StatsCollectionPeriod,
-			Usage:   "The number of seconds between collecting pod and container stats. If set to 0, the stats are collected on-demand instead.",
+			Usage:   "The number of seconds between collecting pod and container stats. If set to 0, the stats are collected on-demand instead. DEPRECATED: This option will be removed in the future.",
 			EnvVars: []string{"CONTAINER_STATS_COLLECTION_PERIOD"},
+		},
+		&cli.IntFlag{
+			Name:    "collection-period",
+			Value:   defConf.CollectionPeriod,
+			Usage:   "The number of seconds between collecting pod/container stats and pod sandbox metrics. If set to 0, the metrics/stats are collected on-demand instead.",
+			EnvVars: []string{"COLLECTION_PERIOD"},
+		},
+		&cli.StringSliceFlag{
+			Name:    "included-pod-metrics",
+			Usage:   "A list of pod metrics to include. Specify the names of the metrics to include in this list.",
+			EnvVars: []string{"CONTAINER_INCLUDED_POD_METRCIS"},
+			Value:   cli.NewStringSlice(defConf.IncludedPodMetrics...),
 		},
 		&cli.BoolFlag{
 			Name:    "enable-criu-support",

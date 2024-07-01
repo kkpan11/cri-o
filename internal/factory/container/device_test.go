@@ -54,7 +54,6 @@ var _ = t.Describe("Container", func() {
 		}
 
 		for _, test := range tests {
-			test := test
 			It(test.testDescription, func() {
 				// Given
 				config := &types.ContainerConfig{
@@ -147,7 +146,6 @@ var _ = t.Describe("Container", func() {
 		}
 
 		for _, test := range tests {
-			test := test
 			It(test.testDescription, func() {
 				// Given
 				config := &types.ContainerConfig{
@@ -204,7 +202,10 @@ var _ = t.Describe("Container", func() {
 				}
 			}
 
-			return cdi.GetRegistry(cdi.WithSpecDirs(dir)).Refresh()
+			if err := cdi.Configure(cdi.WithSpecDirs(dir)); err != nil {
+				return err
+			}
+			return cdi.Refresh()
 		}
 
 		type testdata struct {
@@ -399,7 +400,6 @@ containerEdits:
 		}
 
 		for _, test := range tests {
-			test := test
 			It(test.testDescription, func() {
 				// Given
 				config := &types.ContainerConfig{

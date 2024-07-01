@@ -21,6 +21,8 @@
 
 - name: clone build and install crun
   include_tasks: "build/crun.yml"
+  vars:
+    force_clone: true
 
 - name: install Kata Containers
   include_tasks: "build/kata.yml"
@@ -68,13 +70,6 @@
     content: |
       [crio]
       storage_driver = "overlay"
-
-- name: add quay.io and docker.io as default registries
-  copy:
-    dest: /etc/crio/crio.conf.d/01-registries.conf
-    content: |
-      [crio.image]
-      registries = [ "quay.io", "docker.io" ]
 
 - name: build parallel
   include_tasks: "build/parallel.yml"

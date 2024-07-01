@@ -8,13 +8,17 @@ dependencies:
       match: GO_VERSION
     - path: .github/workflows/test.yml
       match: GO_VERSION
-    - path: .github/workflows/cron.yml
+    - path: .github/workflows/release-branch-forward.yml
+      match: GO_VERSION
+    - path: .github/workflows/patch-release.yml
+      match: GO_VERSION
+    - path: .github/workflows/tag-reconciler.yml
       match: GO_VERSION
     - path: contrib/test/ci/vars.yml
       match: golang_version
 
   - name: golangci-lint
-    version: v1.56.2
+    version: v1.58.0
     refPaths:
     - path: .github/workflows/verify.yml
       match: GOLANGCI_LINT_VERSION
@@ -22,13 +26,13 @@ dependencies:
       match: GOLANGCI_LINT_VERSION
 
   - name: shellcheck
-    version: v0.9.0
+    version: v0.10.0
     refPaths:
     - path: Makefile
       match: SHELLCHECK_VERSION
 
   - name: cni-plugins
-    version: v1.4.1
+    version: v1.5.1
     refPaths:
     - path: scripts/versions
       match: cni-plugins
@@ -36,22 +40,14 @@ dependencies:
       match: version
 
   - name: conmon
-    version: v2.1.10
+    version: v2.1.12
     refPaths:
     - path: scripts/versions
       match: conmon
 
-  - name: conmon-rs
-    version: v0.6.1
-    refPaths:
-    - path: scripts/versions
-      match: conmon-rs
-
   - name: cri-tools
-    version: v1.29.0
+    version: v1.30.0
     refPaths:
-    - path: scripts/versions
-      match: cri-tools
     - path: contrib/test/ci/vars.yml
       match: cri_tools_git_version
 
@@ -62,7 +58,7 @@ dependencies:
       match: buildah
 
   - name: runc
-    version: v1.1.12
+    version: main
     refPaths:
     - path: scripts/versions
       match: runc
@@ -76,13 +72,13 @@ dependencies:
       match: version
 
   - name: zeitgeist
-    version: 0.4.4
+    version: 0.5.3
     refPaths:
       - path: Makefile
         match: ZEITGEIST_VERSION
 
   - name: nix
-    version: 2.19.2
+    version: 2.22.1
     refPaths:
       - path: .github/workflows/test.yml
         match: NIX_VERSION
@@ -90,13 +86,13 @@ dependencies:
         match: NIX_VERSION
 
   - name: release-notes
-    version: 0.16.5
+    version: 0.17.0
     refPaths:
       - path: Makefile
         match: RELEASE_NOTES_VERSION
 
   - name: shfmt
-    version: 3.7.0
+    version: 3.8.0
     refPaths:
       - path: Makefile
         match: SHFMT_VERSION
@@ -114,7 +110,7 @@ dependencies:
         match: GO_MOD_OUTDATED_VERSION
 
   - name: gosec
-    version: 2.18.2
+    version: 2.19.0
     refPaths:
       - path: Makefile
         match: GOSEC_VERSION
