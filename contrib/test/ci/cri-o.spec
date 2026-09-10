@@ -11,13 +11,7 @@
 %global debug_package %{nil}
 %endif
 
-%if ! 0%{?centos} && 0%{?rhel}
-# Golang minor version
-%global gominver 19
-%define gobuild(o:) scl enable go-toolset-1.%{gominver} -- go build -buildmode pie -compiler gc -tags="rpm_crashtraceback no_openssl ${BUILDTAGS:-}" -ldflags "${LDFLAGS:-} -B 0x$(head -c20 /dev/urandom|od -An -tx1|tr -d ' \\n') -extldflags '%__global_ldflags'" -a -v -x %{?**};
-%else
 %define gobuild(o:) go build -buildmode pie -compiler gc -tags="rpm_crashtraceback no_openssl ${BUILDTAGS:-}" -ldflags "${LDFLAGS:-} -B 0x$(head -c20 /dev/urandom|od -An -tx1|tr -d ' \\n') -extldflags '%__global_ldflags'" -a -v -x %{?**};
-%endif
 
 %global provider github
 %global provider_tld com
@@ -27,23 +21,20 @@
 %global provider_prefix %{provider}.%{provider_tld}/%{project}/%{repo}
 %global import_path %{provider_prefix}
 %global git0 https://%{import_path}
-#%%global commit0 ee2e7485ffe9c6d8932ec6acb0adcb7a0a55c253
+# Requires a git checkout; this spec is only used in CI (see line 1).
+%global shortcommit0 %(git rev-parse --short HEAD)
 
 %global service_name crio
 
 Name: %{repo}
-Version: 1.26.0
-Release: 1.ci%{?dist}
+Version: 1.37.0
+Release: 1.ci.git%{shortcommit0}%{?dist}
 Summary: Kubernetes Container Runtime Interface for OCI-based containers
 License: ASL 2.0
 URL: %{git0}
 Source0: %{name}-test.tar.gz
-%if ! 0%{?centos} && 0%{?rhel}
-BuildRequires: go-toolset-1.%{gominver}
-%else
 # Assume pre-installed golang (which is the case in our CI)
 BuildRequires: make
-%endif
 BuildRequires: git
 BuildRequires: glib2-devel
 BuildRequires: glibc-static
@@ -54,11 +45,11 @@ BuildRequires: libseccomp-devel
 BuildRequires: pkgconfig(systemd)
 Requires(pre): container-selinux
 Requires: containers-common >= 1:0.1.24-3
-Requires: runc > 1.0.0-57
+Requires: crun >= 1.27
 Obsoletes: ocid <= 0.3
 Provides: ocid = %{version}-%{release}
 Provides: %{service_name} = %{version}-%{release}
-Requires: containernetworking-plugins >= 0.7.5-1
+Recommends: containernetworking-plugins >= 0.7.5-1
 Requires: conmon
 
 %description
@@ -72,7 +63,6 @@ sed -i 's/install.config: crio.conf/install.config:/' Makefile
 sed -i 's/install.bin: binaries/install.bin:/' Makefile
 sed -i 's/\.gopathok//' Makefile
 sed -i 's/go test/$(GO) test/' Makefile
-sed -i 's/%{version}/%{version}-%{release}/' internal/version/version.go
 sed -i 's/\/local//' contrib/systemd/%{service_name}.service
 
 %build
@@ -84,8 +74,9 @@ popd
 
 ln -s vendor src
 export GOPATH=$(pwd)/_output:$(pwd)
-export BUILDTAGS="selinux seccomp exclude_graphdriver_devicemapper exclude_graphdriver_btrfs containers_image_ostree_stub containers_image_openpgp"
-make bin/crio bin/pinns
+export BUILDTAGS="selinux seccomp exclude_graphdriver_btrfs containers_image_ostree_stub containers_image_openpgp"
+# Inject the full RPM NVR at link time instead of sed-patching version.go.
+make EXTRA_LDFLAGS="-X github.com/cri-o/cri-o/internal/version.Version=%{version}-%{release}" bin/crio bin/pinns
 
 # build docs
 make GO_MD2MAN=go-md2man docs
@@ -96,7 +87,7 @@ make GO_MD2MAN=go-md2man docs
       --cgroup-manager "systemd" \
       --storage-driver "overlay" \
       --conmon "%{_bindir}/conmon" \
-      --cni-plugin-dir "%{_libexecdir}/cni" \
+      --cni-plugin-dir "/var/lib/cni/bin" \
       --storage-opt "overlay.override_kernel_check=1" \
       config > ./%{service_name}.conf
 

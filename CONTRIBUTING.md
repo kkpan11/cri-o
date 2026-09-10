@@ -5,17 +5,15 @@ that we follow.
 
 ## Topics
 
-<!-- TOC start -->
+<!-- toc -->
 
-- [Contributing to CRI-O](#contributing-to-cri-o)
-  - [Topics](#topics)
-  - [Reporting Issues](#reporting-issues)
-  - [Submitting Pull Requests](#submitting-pull-requests)
-    - [Dependency management](#dependency-management)
-    - [Sign your PRs](#sign-your-prs)
-  - [Communications](#communications)
+- [Reporting Issues](#reporting-issues)
+- [Submitting Pull Requests](#submitting-pull-requests)
+  - [Dependency management](#dependency-management)
+  - [Sign your PRs](#sign-your-prs)
+- [Communications](#communications)
 
-<!-- TOC end -->
+<!-- /toc -->
 
 ## Reporting Issues
 
@@ -76,7 +74,8 @@ PRs that fix issues should include a reference like `Closes #XXXX` in the
 commit message so that github will automatically close the referenced issue
 when the PR is merged.
 
-Most PRs will be reviewed by two [approvers][prow-approvers] (listed [here](OWNERS)).
+Most PRs will be reviewed by two [approvers][prow-approvers]
+(listed in the [OWNERS](OWNERS) file).
 Some maintainers add themselves to [`CODEOWNERS`](.github/CODEOWNERS)
 to manage their [review notifications][code-owners],
 but those entries have no governance significance.

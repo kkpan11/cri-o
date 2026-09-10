@@ -1,32 +1,41 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	metadata "github.com/checkpoint-restore/checkpointctl/lib"
-	"github.com/containers/storage/pkg/archive"
+	spec "github.com/opencontainers/runtime-spec/specs-go"
+	"go.podman.io/storage/pkg/archive"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+	kubetypes "k8s.io/kubelet/pkg/types"
+
+	"github.com/cri-o/cri-o/internal/annotations"
 	"github.com/cri-o/cri-o/internal/factory/container"
 	"github.com/cri-o/cri-o/internal/lib/sandbox"
 	"github.com/cri-o/cri-o/internal/log"
 	"github.com/cri-o/cri-o/internal/storage"
-	"github.com/cri-o/cri-o/pkg/annotations"
-	spec "github.com/opencontainers/runtime-spec/specs-go"
-	"golang.org/x/net/context"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
-	kubetypes "k8s.io/kubelet/pkg/types"
 )
 
 // checkIfCheckpointOCIImage returns checks if the input refers to a checkpoint image.
 // It returns the StorageImageID of the image the input resolves to, nil otherwise.
-func (s *Server) checkIfCheckpointOCIImage(ctx context.Context, input string) (*storage.StorageImageID, error) {
+func (s *Server) checkIfCheckpointOCIImage(
+	ctx context.Context,
+	input string,
+) (*storage.StorageImageID, error) {
+	if input == "" {
+		return nil, nil
+	}
+
 	if _, err := os.Stat(input); err == nil {
 		return nil, nil
 	}
-	status, err := s.storageImageStatus(ctx, types.ImageSpec{
-		Image: input,
-	})
+
+	status, err := s.storageImageStatus(ctx, &types.ImageSpec{Image: input})
 	if err != nil {
 		return nil, err
 	}
@@ -45,30 +54,60 @@ func (s *Server) checkIfCheckpointOCIImage(ctx context.Context, input string) (*
 	return &status.ID, nil
 }
 
-// taken from Podman
+// taken from Podman.
 func (s *Server) CRImportCheckpoint(
 	ctx context.Context,
 	createConfig *types.ContainerConfig,
-	sbID, sandboxUID string,
+	sb *sandbox.Sandbox, sandboxUID string,
 ) (ctrID string, retErr error) {
 	var mountPoint string
 
-	input := createConfig.Image.Image
-	createMounts := createConfig.Mounts
-	createAnnotations := createConfig.Annotations
-	createLabels := createConfig.Labels
+	// Ensure that the image to restore the checkpoint from has been provided.
+	if createConfig.GetImage() == nil || createConfig.GetImage().GetImage() == "" {
+		return "", errors.New(`attribute "image" missing from container definition`)
+	}
 
-	restoreStorageImageID, err := s.checkIfCheckpointOCIImage(ctx, input)
+	if createConfig.GetMetadata() == nil || createConfig.GetMetadata().GetName() == "" {
+		return "", errors.New(`attribute "metadata" missing from container definition`)
+	}
+
+	inputImage := createConfig.GetImage().GetImage()
+	createMounts := createConfig.GetMounts()
+	createAnnotations := createConfig.GetAnnotations()
+	createLabels := createConfig.GetLabels()
+
+	restoreStorageImageID, err := s.checkIfCheckpointOCIImage(ctx, inputImage)
 	if err != nil {
 		return "", err
 	}
 
 	var restoreArchivePath string
+
 	if restoreStorageImageID != nil {
-		log.Debugf(ctx, "Restoring from oci image %s\n", input)
+		systemCtx, err := s.contextForNamespace(sb.Metadata().GetNamespace())
+		if err != nil {
+			return "", fmt.Errorf("get context for namespace: %w", err)
+		}
+		// WARNING: This hard-codes an assumption that SignaturePolicyPath set specifically for the namespace is never less restrictive
+		// than the default system-wide policy, i.e. that if an image is successfully pulled, it always conforms to the system-wide policy.
+		if systemCtx.SignaturePolicyPath != "" {
+			return "", fmt.Errorf(
+				"namespaced signature policy %s defined for pods in namespace %s; signature validation is not supported for container restore",
+				systemCtx.SignaturePolicyPath,
+				sb.Metadata().GetNamespace(),
+			)
+		}
+
+		log.Debugf(ctx, "Restoring from oci image %s", inputImage)
+
+		imageServer, err := s.StorageImageServer(sb)
+		if err != nil {
+			return "", err
+		}
 
 		// This is not out-of-process, but it is at least out of the CRI-O codebase; containers/storage uses raw strings.
-		mountPoint, err = s.ContainerServer.StorageImageServer().GetStore().MountImage(restoreStorageImageID.IDStringForOutOfProcessConsumptionOnly(), nil, "")
+		mountPoint, err = imageServer.GetStore().
+			MountImage(restoreStorageImageID.IDStringForOutOfProcessConsumptionOnly(), nil, "")
 		if err != nil {
 			return "", err
 		}
@@ -77,16 +116,26 @@ func (s *Server) CRImportCheckpoint(
 
 		defer func() {
 			// This is not out-of-process, but it is at least out of the CRI-O codebase; containers/storage uses raw strings.
-			if _, err := s.ContainerServer.StorageImageServer().GetStore().UnmountImage(restoreStorageImageID.IDStringForOutOfProcessConsumptionOnly(), true); err != nil {
-				log.Errorf(ctx, "Could not unmount checkpoint image %s: %q", restoreStorageImageID, err)
+			if _, err := imageServer.GetStore().
+				UnmountImage(restoreStorageImageID.IDStringForOutOfProcessConsumptionOnly(), true); err != nil {
+				log.Errorf(
+					ctx,
+					"Could not unmount checkpoint image %s: %q",
+					restoreStorageImageID,
+					err,
+				)
 			}
 		}()
 	} else {
 		// First get the container definition from the
 		// tarball to a temporary directory
-		archiveFile, err := os.Open(input)
+		archiveFile, err := os.Open(inputImage)
 		if err != nil {
-			return "", fmt.Errorf("failed to open checkpoint archive %s for import: %w", input, err)
+			return "", fmt.Errorf(
+				"failed to open checkpoint archive %s for import: %w",
+				inputImage,
+				err,
+			)
 		}
 		defer func(f *os.File) {
 			if err := f.Close(); err != nil {
@@ -94,7 +143,7 @@ func (s *Server) CRImportCheckpoint(
 			}
 		}(archiveFile)
 
-		restoreArchivePath = input
+		restoreArchivePath = inputImage
 		options := &archive.TarOptions{
 			// Here we only need the files config.dump and spec.dump
 			ExcludePatterns: []string{
@@ -106,19 +155,23 @@ func (s *Server) CRImportCheckpoint(
 				metadata.CheckpointDirectory,
 			},
 		}
+
 		mountPoint, err = os.MkdirTemp("", "checkpoint")
 		if err != nil {
 			return "", err
 		}
+
 		defer func() {
 			if err := os.RemoveAll(mountPoint); err != nil {
 				log.Errorf(ctx, "Could not recursively remove %s: %q", mountPoint, err)
 			}
 		}()
+
 		err = archive.Untar(archiveFile, mountPoint, options)
 		if err != nil {
 			return "", fmt.Errorf("unpacking of checkpoint archive %s failed: %w", mountPoint, err)
 		}
+
 		log.Debugf(ctx, "Unpacked checkpoint in %s", mountPoint)
 	}
 
@@ -134,91 +187,36 @@ func (s *Server) CRImportCheckpoint(
 		return "", fmt.Errorf("failed to read %q: %w", metadata.ConfigDumpFile, err)
 	}
 
-	if sbID == "" {
-		// restore into previous sandbox
-		sbID = dumpSpec.Annotations[annotations.SandboxID]
-		ctrID = config.ID
-	} else {
-		ctrID = ""
-	}
-
-	ctrMetadata := types.ContainerMetadata{}
 	originalAnnotations := make(map[string]string)
-	originalLabels := make(map[string]string)
 
-	if dumpSpec.Annotations[annotations.ContainerManager] == "libpod" {
-		// This is an import from Podman
-		ctrMetadata.Name = config.Name
-		ctrMetadata.Attempt = 0
-	} else {
-		if err := json.Unmarshal([]byte(dumpSpec.Annotations[annotations.Metadata]), &ctrMetadata); err != nil {
-			return "", fmt.Errorf("failed to read %q: %w", annotations.Metadata, err)
-		}
-		if createConfig.Metadata != nil && createConfig.Metadata.Name != "" {
-			ctrMetadata.Name = createConfig.Metadata.Name
-		}
-		if err := json.Unmarshal([]byte(dumpSpec.Annotations[annotations.Annotations]), &originalAnnotations); err != nil {
-			return "", fmt.Errorf("failed to read %q: %w", annotations.Annotations, err)
-		}
+	if err := json.Unmarshal(
+		[]byte(dumpSpec.Annotations[annotations.Annotations]),
+		&originalAnnotations,
+	); err != nil {
+		return "", fmt.Errorf("failed to read %q: %w", annotations.Annotations, err)
+	}
 
-		if err := json.Unmarshal([]byte(dumpSpec.Annotations[annotations.Labels]), &originalLabels); err != nil {
-			return "", fmt.Errorf("failed to read %q: %w", annotations.Labels, err)
-		}
-		if sandboxUID != "" {
-			if _, ok := originalLabels[kubetypes.KubernetesPodUIDLabel]; ok {
-				originalLabels[kubetypes.KubernetesPodUIDLabel] = sandboxUID
-			}
-			if _, ok := originalAnnotations[kubetypes.KubernetesPodUIDLabel]; ok {
-				originalAnnotations[kubetypes.KubernetesPodUIDLabel] = sandboxUID
-			}
-		}
-
-		if createLabels != nil {
-			fixupLabels := []string{
-				// Update the container name. It has already been update in metadata.Name.
-				// It also needs to be updated in the container labels.
-				kubetypes.KubernetesContainerNameLabel,
-				// Update pod name in the labels.
-				kubetypes.KubernetesPodNameLabel,
-				// Also update namespace.
-				kubetypes.KubernetesPodNamespaceLabel,
-			}
-
-			for _, annotation := range fixupLabels {
-				_, ok1 := createLabels[annotation]
-				_, ok2 := originalLabels[annotation]
-
-				// If the value is not set in the original container or
-				// if it is not set in the new container, just skip
-				// the step of updating metadata.
-				if ok1 && ok2 {
-					originalLabels[annotation] = createLabels[annotation]
-				}
-			}
-		}
-
-		if createAnnotations != nil {
-			// The hash also needs to be update or Kubernetes thinks the container needs to be restarted
-			_, ok1 := createAnnotations["io.kubernetes.container.hash"]
-			_, ok2 := originalAnnotations["io.kubernetes.container.hash"]
-
-			if ok1 && ok2 {
-				originalAnnotations["io.kubernetes.container.hash"] = createAnnotations["io.kubernetes.container.hash"]
-			}
+	if sandboxUID != "" {
+		if _, ok := originalAnnotations[kubetypes.KubernetesPodUIDLabel]; ok {
+			originalAnnotations[kubetypes.KubernetesPodUIDLabel] = sandboxUID
 		}
 	}
 
-	sb, err := s.getPodSandboxFromRequest(ctx, sbID)
-	if err != nil {
-		if err == sandbox.ErrIDEmpty {
-			return "", err
+	if createAnnotations != nil {
+		// The hash also needs to be update or Kubernetes thinks the container needs to be restarted
+		_, ok1 := createAnnotations["io.kubernetes.container.hash"]
+		_, ok2 := originalAnnotations["io.kubernetes.container.hash"]
+
+		if ok1 && ok2 {
+			originalAnnotations["io.kubernetes.container.hash"] = createAnnotations["io.kubernetes.container.hash"]
 		}
-		return "", fmt.Errorf("specified sandbox not found: %s: %w", sbID, err)
 	}
 
 	stopMutex := sb.StopMutex()
+
 	stopMutex.RLock()
 	defer stopMutex.RUnlock()
+
 	if sb.Stopped() {
 		return "", fmt.Errorf("CreateContainer failed as the sandbox was stopped: %s", sb.ID())
 	}
@@ -241,6 +239,7 @@ func (s *Server) CRImportCheckpoint(
 	// If the container in the registry was updated (new latest tag)
 	// all of a sudden the wrong base image would be downloaded.
 	rootFSImage := config.RootfsImageName
+
 	if config.RootfsImageRef != "" {
 		id, err := storage.ParseStorageImageIDFromOutOfProcessData(config.RootfsImageRef)
 		if err != nil {
@@ -250,10 +249,11 @@ func (s *Server) CRImportCheckpoint(
 		// a cross-process API, and this value is correct in that API.
 		rootFSImage = id.IDStringForOutOfProcessConsumptionOnly()
 	}
+
 	containerConfig := &types.ContainerConfig{
 		Metadata: &types.ContainerMetadata{
-			Name:    ctrMetadata.Name,
-			Attempt: ctrMetadata.Attempt,
+			Name:    createConfig.GetMetadata().GetName(),
+			Attempt: createConfig.GetMetadata().GetAttempt(),
 		},
 		Image: &types.ImageSpec{
 			Image: rootFSImage,
@@ -263,14 +263,19 @@ func (s *Server) CRImportCheckpoint(
 			SecurityContext: &types.LinuxContainerSecurityContext{},
 		},
 		Annotations: originalAnnotations,
-		Labels:      originalLabels,
+		// The labels are nod changed or adapted. They are just taken from the CRI
+		// request without any modification (in contrast to the annotations).
+		Labels: createLabels,
 	}
 
-	if createConfig.Linux.Resources != nil {
-		containerConfig.Linux.Resources = createConfig.Linux.Resources
-	}
-	if createConfig.Linux.SecurityContext != nil {
-		containerConfig.Linux.SecurityContext = createConfig.Linux.SecurityContext
+	if createConfig.GetLinux() != nil {
+		if createConfig.GetLinux().GetResources() != nil {
+			containerConfig.Linux.Resources = createConfig.GetLinux().GetResources()
+		}
+
+		if createConfig.GetLinux().GetSecurityContext() != nil {
+			containerConfig.Linux.SecurityContext = createConfig.GetLinux().GetSecurityContext()
+		}
 	}
 
 	if dumpSpec.Linux != nil {
@@ -293,9 +298,18 @@ func (s *Server) CRImportCheckpoint(
 		"/dev/shm":           true,
 		"/etc/resolv.conf":   true,
 		"/etc/hostname":      true,
+		"/etc/passwd":        true,
+		"/etc/group":         true,
 		"/run/secrets":       true,
 		"/run/.containerenv": true,
 	}
+
+	// It is necessary to ensure that all bind mounts in the checkpoint archive are defined
+	// in the create container requested coming in via the CRI. If this check would not
+	// be here it would be possible to create a checkpoint archive that mounts some random
+	// file/directory on the host with the user knowing as it will happen without specifying
+	// it in the container definition.
+	missingMount := []string{}
 
 	for _, m := range dumpSpec.Mounts {
 		// Following mounts are ignored as they might point to the
@@ -304,39 +318,53 @@ func (s *Server) CRImportCheckpoint(
 		if ignoreMounts[m.Destination] {
 			continue
 		}
+
 		mount := &types.Mount{
 			ContainerPath: m.Destination,
-			HostPath:      m.Source,
 		}
+
+		bindMountFound := false
 
 		for _, createMount := range createMounts {
-			if createMount.ContainerPath == m.Destination {
-				mount.HostPath = createMount.HostPath
+			if createMount.GetContainerPath() != m.Destination {
+				continue
 			}
+
+			bindMountFound = true
+			mount.HostPath = createMount.GetHostPath()
+			mount.Readonly = createMount.GetReadonly()
+			mount.RecursiveReadOnly = createMount.GetRecursiveReadOnly()
+			mount.Propagation = createMount.GetPropagation()
+
+			break
 		}
 
-		for _, opt := range m.Options {
-			switch opt {
-			case "ro":
-				mount.Readonly = true
-			case "rprivate":
-				mount.Propagation = types.MountPropagation_PROPAGATION_PRIVATE
-			case "rshared":
-				mount.Propagation = types.MountPropagation_PROPAGATION_BIDIRECTIONAL
-			case "rslaved":
-				mount.Propagation = types.MountPropagation_PROPAGATION_HOST_TO_CONTAINER
-			}
+		if !bindMountFound {
+			missingMount = append(missingMount, m.Destination)
+			// If one mount is missing we can skip over any further code as we have
+			// to abort the restore process anyway. Not using break to get all missing
+			// mountpoints in one error message.
+			continue
 		}
 
 		log.Debugf(ctx, "Adding mounts %#v", mount)
 		containerConfig.Mounts = append(containerConfig.Mounts, mount)
 	}
+
+	if len(missingMount) > 0 {
+		return "", fmt.Errorf(
+			"restoring %q expects following bind mounts defined (%s)",
+			inputImage,
+			strings.Join(missingMount, ","),
+		)
+	}
+
 	sandboxConfig := &types.PodSandboxConfig{
 		Metadata: &types.PodSandboxMetadata{
-			Name:      sb.Metadata().Name,
-			Uid:       sb.Metadata().Uid,
-			Namespace: sb.Metadata().Namespace,
-			Attempt:   sb.Metadata().Attempt,
+			Name:      sb.Metadata().GetName(),
+			Uid:       sb.Metadata().GetUid(),
+			Namespace: sb.Metadata().GetNamespace(),
+			Attempt:   sb.Metadata().GetAttempt(),
 		},
 		Linux: &types.LinuxPodSandboxConfig{},
 	}
@@ -345,12 +373,15 @@ func (s *Server) CRImportCheckpoint(
 		return "", fmt.Errorf("setting container config: %w", err)
 	}
 
-	if err := ctr.SetNameAndID(ctrID); err != nil {
+	if err := ctr.SetNameAndID(""); err != nil {
 		return "", fmt.Errorf("setting container name and ID: %w", err)
 	}
 
 	if _, err = s.ReserveContainerName(ctr.ID(), ctr.Name()); err != nil {
-		return "", fmt.Errorf("kubelet may be retrying requests that are timing out in CRI-O due to system load: %w", err)
+		return "", fmt.Errorf(
+			"kubelet may be retrying requests that are timing out in CRI-O due to system load: %w",
+			err,
+		)
 	}
 
 	defer func() {
@@ -359,16 +390,23 @@ func (s *Server) CRImportCheckpoint(
 			s.ReleaseContainerName(ctx, ctr.Name())
 		}
 	}()
+
 	ctr.SetRestore(true)
 
 	newContainer, err := s.createSandboxContainer(ctx, ctr, sb)
 	if err != nil {
 		return "", err
 	}
+
 	defer func() {
 		if retErr != nil {
 			log.Infof(ctx, "RestoreCtr: deleting container %s from storage", ctr.ID())
-			err2 := s.StorageRuntimeServer().DeleteContainer(ctx, ctr.ID())
+
+			runtimeSvc, err2 := s.StorageRuntimeServer(sb)
+			if err2 == nil {
+				err2 = runtimeSvc.DeleteContainer(ctx, ctr.ID())
+			}
+
 			if err2 != nil {
 				log.Warnf(ctx, "Failed to cleanup container directory: %v", err2)
 			}
@@ -384,13 +422,15 @@ func (s *Server) CRImportCheckpoint(
 		}
 	}()
 
-	if err := s.CtrIDIndex().Add(ctr.ID()); err != nil {
+	if err := s.ContainerServer.CtrIDIndex().Add(ctr.ID()); err != nil {
 		return "", err
 	}
+
 	defer func() {
 		if retErr != nil {
 			log.Infof(ctx, "RestoreCtr: deleting container ID %s from idIndex", ctr.ID())
-			if err := s.CtrIDIndex().Delete(ctr.ID()); err != nil {
+
+			if err := s.ContainerServer.CtrIDIndex().Delete(ctr.ID()); err != nil {
 				log.Warnf(ctx, "Couldn't delete ctr id %s from idIndex", ctr.ID())
 			}
 		}
@@ -402,9 +442,15 @@ func (s *Server) CRImportCheckpoint(
 	newContainer.SetRestoreStorageImageID(restoreStorageImageID)
 	newContainer.SetCheckpointedAt(config.CheckpointedAt)
 
-	if ctx.Err() == context.Canceled || ctx.Err() == context.DeadlineExceeded {
-		log.Infof(ctx, "RestoreCtr: context was either canceled or the deadline was exceeded: %v", ctx.Err())
+	if isContextError(ctx.Err()) {
+		log.Infof(
+			ctx,
+			"RestoreCtr: context was either canceled or the deadline was exceeded: %v",
+			ctx.Err(),
+		)
+
 		return "", ctx.Err()
 	}
+
 	return ctr.ID(), nil
 }

@@ -1,5 +1,4 @@
-//go:build linux && cgo
-// +build linux,cgo
+//go:build seccomp && linux && cgo
 
 package seccomp
 
@@ -15,13 +14,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/containers/common/pkg/seccomp"
-	"github.com/cri-o/cri-o/internal/log"
-	"github.com/cri-o/cri-o/pkg/annotations"
+	"go.podman.io/common/pkg/seccomp"
 	json "github.com/json-iterator/go"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	libseccomp "github.com/seccomp/libseccomp-golang"
 	"golang.org/x/sys/unix"
+
+	"github.com/cri-o/cri-o/internal/log"
+	v2 "github.com/cri-o/cri-o/pkg/annotations/v2"
 )
 
 // Notifier wraps a seccomp notifier instance for a container.
@@ -57,14 +57,13 @@ func (n *Notifier) AddSyscall(syscall string) {
 // their name.
 func (n *Notifier) UsedSyscalls() string {
 	res := []string{}
-	n.syscalls.Range(func(syscall, count any) bool {
+	for syscall, count := range n.syscalls.Range {
 		s, syscallOk := syscall.(string)
 		c, countOk := count.(*uint64)
 		if syscallOk && countOk {
 			res = append(res, fmt.Sprintf("%s (%dx)", s, *c))
 		}
-		return true
-	})
+	}
 	sort.Strings(res)
 	return strings.Join(res, ", ")
 }
@@ -88,17 +87,17 @@ type Notification struct {
 }
 
 // Ctx returns the context of the notification.
-func (n *Notification) Ctx() context.Context {
+func (n Notification) Ctx() context.Context {
 	return n.ctx
 }
 
 // ContainerID returns the container identifier for the notification.
-func (n *Notification) ContainerID() string {
+func (n Notification) ContainerID() string {
 	return n.containerID
 }
 
 // Syscall returns the syscall name for the notification.
-func (n *Notification) Syscall() string {
+func (n Notification) Syscall() string {
 	return n.syscall
 }
 
@@ -114,7 +113,7 @@ func (c *Config) injectNotifier(
 	if containerID == "" || sandboxAnnotations == nil || msgChan == nil {
 		return nil, nil
 	}
-	if _, ok := sandboxAnnotations[annotations.SeccompNotifierActionAnnotation]; !ok {
+	if _, ok := v2.GetAnnotationValue(sandboxAnnotations, v2.SeccompNotifierAction); !ok {
 		return nil, nil
 	}
 
@@ -144,6 +143,7 @@ func (c *Config) injectNotifier(
 	for i, syscall := range profile.Syscalls {
 		if isActionToOverride(syscall.Action) {
 			profile.Syscalls[i].Action = specs.ActNotify
+			profile.Syscalls[i].ErrnoRet = nil
 		}
 	}
 
@@ -168,6 +168,15 @@ func NewNotifier(
 	listener, err := net.Listen("unix", listenerPath)
 	if err != nil {
 		return nil, fmt.Errorf("listen for seccomp socket: %w", err)
+	}
+
+	action, ok := v2.GetAnnotationValue(annotationMap, v2.SeccompNotifierAction)
+	if !ok {
+		if err := listener.Close(); err != nil {
+			log.Errorf(ctx, "Unable to close seccomp listener: %v", err)
+		}
+
+		return nil, fmt.Errorf("%s annotation not set on container", v2.SeccompNotifierAction)
 	}
 
 	go func() {
@@ -208,18 +217,23 @@ func NewNotifier(
 		}
 	}()
 
-	action, ok := annotationMap[annotations.SeccompNotifierActionAnnotation]
-	if !ok {
-		return nil, fmt.Errorf("%s annotation not set on container", annotations.SeccompNotifierActionAnnotation)
-	}
-
 	return &Notifier{
 		listener:       listener,
 		syscalls:       sync.Map{},
 		timer:          nil,
 		timeLock:       sync.Mutex{},
-		stopContainers: action == annotations.SeccompNotifierActionStop,
+		stopContainers: action == v2.SeccompNotifierActionStop,
 	}, nil
+}
+
+// receiveErrorBackoff throttles the notifier polling loop after a transient
+// receive error to avoid a hot spin on repeated failures.
+const receiveErrorBackoff = 100 * time.Millisecond
+
+type notifierHandler struct {
+	notifReceive func(libseccomp.ScmpFd) (*libseccomp.ScmpNotifReq, error)
+	notifIDValid func(libseccomp.ScmpFd, uint64) error
+	notifRespond func(libseccomp.ScmpFd, *libseccomp.ScmpNotifResp) error
 }
 
 func handler(
@@ -228,11 +242,30 @@ func handler(
 	msgChan chan Notification,
 	fd libseccomp.ScmpFd,
 ) {
+	notifierHandler{
+		notifReceive: libseccomp.NotifReceive,
+		notifIDValid: libseccomp.NotifIDValid,
+		notifRespond: libseccomp.NotifRespond,
+	}.handle(ctx, containerID, msgChan, fd)
+}
+
+func (h notifierHandler) handle(
+	ctx context.Context,
+	containerID string,
+	msgChan chan Notification,
+	fd libseccomp.ScmpFd,
+) {
 	defer unix.Close(int(fd))
 	for {
-		req, err := libseccomp.NotifReceive(fd)
+		req, err := h.notifReceive(fd)
 		if err != nil {
+			if errors.Is(err, unix.EBADF) || errors.Is(err, unix.ECANCELED) || errors.Is(err, unix.ENOENT) {
+				log.Infof(ctx, "Stopping notifier for container %s", containerID)
+				return
+			}
 			log.Errorf(ctx, "Unable to receive notification: %v", err)
+			time.Sleep(receiveErrorBackoff)
+
 			continue
 		}
 
@@ -257,18 +290,15 @@ func handler(
 		}
 
 		// TOCTOU check
-		if err := libseccomp.NotifIDValid(fd, req.ID); err != nil {
+		if err := h.notifIDValid(fd, req.ID); err != nil {
 			log.Errorf(ctx, "TOCTOU check failed: req.ID is no longer valid: %v", err)
 			continue
 		}
 
-		if err = libseccomp.NotifRespond(fd, resp); err != nil {
+		if err = h.notifRespond(fd, resp); err != nil {
 			log.Errorf(ctx, "Unable to send notification response: %v", err)
 			continue
 		}
-
-		// We only catch the first syscall
-		break
 	}
 }
 

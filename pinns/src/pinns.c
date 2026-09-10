@@ -66,6 +66,7 @@ int main(int argc, char **argv) {
       {"uid-mapping", optional_argument, NULL, UID_MAPPING},
       {"gid-mapping", optional_argument, NULL, GID_MAPPING},
       {"sysctl", optional_argument, NULL, 's'},
+      {NULL, 0, NULL, 0},
   };
 
   sysctls = calloc(argc/2, sizeof(char *));
@@ -166,6 +167,10 @@ int main(int argc, char **argv) {
     if (unshare(unshare_flags) < 0) {
       pexit("Failed to unshare namespaces");
     }
+
+    if (sysctls_count != 0 && configure_sysctls(sysctls, sysctls_count) < 0) {
+      pexit("Failed to configure sysctls after unshare");
+    }
   } else {
     /* if we create a user or mount namespace, we need a new process. */
     if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, p))
@@ -203,6 +208,10 @@ int main(int argc, char **argv) {
       /* Now create all the other namespaces that are owned by the correct user.  */
       if (unshare(unshare_flags & ~CLONE_NEWUSER) < 0)
         pexit("Failed to unshare namespaces");
+
+      if (sysctls_count != 0 && configure_sysctls(sysctls, sysctls_count) < 0) {
+        pexit("Failed to configure sysctls after unshare");
+      }
 
       /* Notify that the namespaces are created.  */
       if (TEMP_FAILURE_RETRY(write(p[1], "0", 1)) < 0)
@@ -243,10 +252,6 @@ int main(int argc, char **argv) {
       pexit("Failed to read from the sync pipe");
 
     close(p[0]);
-  }
-
-  if (sysctls_count != 0 && configure_sysctls(sysctls, sysctls_count) < 0) {
-    pexit("Failed to configure sysctls after unshare");
   }
 
   if (bind_user) {

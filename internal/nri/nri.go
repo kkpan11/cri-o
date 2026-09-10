@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"sync"
 
-	config "github.com/cri-o/cri-o/internal/config/nri"
-	"github.com/cri-o/cri-o/internal/log"
+	nri "github.com/containerd/nri/pkg/adaptation"
 	"github.com/sirupsen/logrus"
 
-	nri "github.com/containerd/nri/pkg/adaptation"
+	config "github.com/cri-o/cri-o/internal/config/nri"
+	"github.com/cri-o/cri-o/internal/log"
 	"github.com/cri-o/cri-o/internal/version"
 )
 
@@ -39,6 +39,9 @@ type API interface {
 	// RunPodSandbox relays pod creation events to NRI.
 	RunPodSandbox(context.Context, PodSandbox) error
 
+	// UpdatePodSandbox relays the corresponding request to the plugins.
+	UpdatePodSandbox(context.Context, PodSandbox, *nri.LinuxResources, *nri.LinuxResources) error
+
 	// StopPodSandbox relays pod shutdown events to NRI.
 	StopPodSandbox(context.Context, PodSandbox) error
 
@@ -58,7 +61,12 @@ type API interface {
 	PostStartContainer(context.Context, PodSandbox, Container) error
 
 	// UpdateContainer relays container update requests to NRI.
-	UpdateContainer(context.Context, PodSandbox, Container, *nri.LinuxResources) (*nri.LinuxResources, error)
+	UpdateContainer(
+		context.Context,
+		PodSandbox,
+		Container,
+		*nri.LinuxResources,
+	) (*nri.LinuxResources, error)
 
 	// PostUpdateContainer relays successful container update events to NRI.
 	PostUpdateContainer(context.Context, PodSandbox, Container) error
@@ -81,6 +89,7 @@ const (
 
 type local struct {
 	sync.Mutex
+
 	cfg *config.Config
 	nri *nri.Adaptation
 
@@ -99,12 +108,13 @@ func New(cfg *config.Config) (*local, error) {
 
 	if !cfg.Enabled {
 		logrus.Info("NRI interface is disabled in the configuration.")
+
 		return l, nil
 	}
 
 	vInfo, err := version.Get(false)
 	if err != nil {
-		return nil, fmt.Errorf("failed to determine version: %v", err)
+		return nil, fmt.Errorf("failed to determine version: %w", err)
 	}
 
 	var (
@@ -168,6 +178,30 @@ func (l *local) RunPodSandbox(ctx context.Context, pod PodSandbox) error {
 	return err
 }
 
+func (l *local) UpdatePodSandbox(
+	ctx context.Context,
+	pod PodSandbox,
+	overhead, resources *nri.LinuxResources,
+) error {
+	if !l.IsEnabled() {
+		return nil
+	}
+
+	l.Lock()
+	defer l.Unlock()
+
+	podNri := podSandboxToNRI(pod)
+	request := &nri.UpdatePodSandboxRequest{
+		Pod:                    podNri,
+		OverheadLinuxResources: overhead,
+		LinuxResources:         resources,
+	}
+
+	_, err := l.nri.UpdatePodSandbox(ctx, request)
+
+	return err
+}
+
 func (l *local) StopPodSandbox(ctx context.Context, pod PodSandbox) error {
 	if !l.IsEnabled() {
 		return nil
@@ -202,7 +236,11 @@ func (l *local) RemovePodSandbox(ctx context.Context, pod PodSandbox) error {
 	return err
 }
 
-func (l *local) CreateContainer(ctx context.Context, pod PodSandbox, ctr Container) (*nri.ContainerAdjustment, error) {
+func (l *local) CreateContainer(
+	ctx context.Context,
+	pod PodSandbox,
+	ctr Container,
+) (*nri.ContainerAdjustment, error) {
 	if !l.IsEnabled() {
 		return nil, nil
 	}
@@ -216,16 +254,17 @@ func (l *local) CreateContainer(ctx context.Context, pod PodSandbox, ctr Contain
 	}
 
 	response, err := l.nri.CreateContainer(ctx, request)
-	l.setState(request.Container.Id, Created)
+	l.setState(request.GetContainer().GetId(), Created)
+
 	if err != nil {
 		return nil, err
 	}
 
-	if _, err := l.applyUpdates(ctx, response.Update); err != nil {
+	if _, err := l.applyUpdates(ctx, response.GetUpdate()); err != nil {
 		return nil, err
 	}
 
-	return response.Adjust, nil
+	return response.GetAdjust(), nil
 }
 
 func (l *local) PostCreateContainer(ctx context.Context, pod PodSandbox, ctr Container) error {
@@ -261,7 +300,7 @@ func (l *local) StartContainer(ctx context.Context, pod PodSandbox, ctr Containe
 
 	err := l.nri.StartContainer(ctx, request)
 
-	l.setState(request.Container.Id, Running)
+	l.setState(request.GetContainer().GetId(), Running)
 
 	return err
 }
@@ -284,7 +323,12 @@ func (l *local) PostStartContainer(ctx context.Context, pod PodSandbox, ctr Cont
 	return err
 }
 
-func (l *local) UpdateContainer(ctx context.Context, pod PodSandbox, ctr Container, req *nri.LinuxResources) (*nri.LinuxResources, error) {
+func (l *local) UpdateContainer(
+	ctx context.Context,
+	pod PodSandbox,
+	ctr Container,
+	req *nri.LinuxResources,
+) (*nri.LinuxResources, error) {
 	if !l.IsEnabled() {
 		return nil, nil
 	}
@@ -303,24 +347,24 @@ func (l *local) UpdateContainer(ctx context.Context, pod PodSandbox, ctr Contain
 		return nil, err
 	}
 
-	_, err = l.evictContainers(ctx, response.Evict)
+	_, err = l.evictContainers(ctx, response.GetEvict())
 	if err != nil {
 		return nil, err
 	}
 
-	cnt := len(response.Update)
+	cnt := len(response.GetUpdate())
 	if cnt == 0 {
 		return nil, nil
 	}
 
 	if cnt > 1 {
-		_, err = l.applyUpdates(ctx, response.Update[0:cnt-1])
+		_, err = l.applyUpdates(ctx, response.GetUpdate()[0:cnt-1])
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	return response.Update[cnt-1].GetLinux().GetResources(), nil
+	return response.GetUpdate()[cnt-1].GetLinux().GetResources(), nil
 }
 
 func (l *local) PostUpdateContainer(ctx context.Context, pod PodSandbox, ctr Container) error {
@@ -363,12 +407,13 @@ func (l *local) stopContainer(ctx context.Context, pod PodSandbox, ctr Container
 	}
 
 	response, err := l.nri.StopContainer(ctx, request)
-	l.setState(request.Container.Id, Stopped)
+	l.setState(request.GetContainer().GetId(), Stopped)
+
 	if err != nil {
 		return err
 	}
 
-	_, err = l.applyUpdates(ctx, response.Update)
+	_, err = l.applyUpdates(ctx, response.GetUpdate())
 
 	return err
 }
@@ -395,7 +440,7 @@ func (l *local) RemoveContainer(ctx context.Context, pod PodSandbox, ctr Contain
 	}
 
 	err := l.nri.RemoveContainer(ctx, request)
-	l.setState(request.Container.Id, Removed)
+	l.setState(request.GetContainer().GetId(), Removed)
 
 	return err
 }
@@ -410,7 +455,7 @@ func (l *local) syncPlugin(ctx context.Context, syncFn nri.SyncCB) error {
 
 	log.Infof(ctx, "Synchronizing NRI (plugin) with current runtime state")
 
-	pods := podSandboxesToNRI(domains.listPodSandboxes())
+	pods := podSandboxesToNRI(domains.listPodSandboxes(ctx))
 	containers := containersToNRI(domains.listContainers())
 
 	for _, ctr := range containers {
@@ -439,29 +484,42 @@ func (l *local) syncPlugin(ctx context.Context, syncFn nri.SyncCB) error {
 	return nil
 }
 
-func (l *local) updateFromPlugin(ctx context.Context, req []*nri.ContainerUpdate) ([]*nri.ContainerUpdate, error) {
+func (l *local) updateFromPlugin(
+	ctx context.Context,
+	req []*nri.ContainerUpdate,
+) ([]*nri.ContainerUpdate, error) {
 	l.Lock()
 	defer l.Unlock()
 
 	log.Infof(ctx, "Unsolicited container update from NRI")
 
 	failed, err := l.applyUpdates(ctx, req)
+
 	return failed, err
 }
 
-func (l *local) applyUpdates(ctx context.Context, updates []*nri.ContainerUpdate) ([]*nri.ContainerUpdate, error) {
+func (l *local) applyUpdates(
+	ctx context.Context,
+	updates []*nri.ContainerUpdate,
+) ([]*nri.ContainerUpdate, error) {
 	failed, err := domains.updateContainers(ctx, updates)
+
 	return failed, err
 }
 
-func (l *local) evictContainers(ctx context.Context, evict []*nri.ContainerEviction) ([]*nri.ContainerEviction, error) {
+func (l *local) evictContainers(
+	ctx context.Context,
+	evict []*nri.ContainerEviction,
+) ([]*nri.ContainerEviction, error) {
 	failed, err := domains.evictContainers(ctx, evict)
+
 	return failed, err
 }
 
 func (l *local) setState(id string, state State) {
 	if state != Removed {
 		l.state[id] = state
+
 		return
 	}
 
@@ -473,6 +531,7 @@ func (l *local) needsStopping(id string) bool {
 	if s == Created || s == Running {
 		return true
 	}
+
 	return false
 }
 
@@ -481,6 +540,7 @@ func (l *local) needsRemoval(id string) bool {
 	if s == Created || s == Running || s == Stopped {
 		return true
 	}
+
 	return false
 }
 

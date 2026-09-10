@@ -4,6 +4,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -21,6 +23,7 @@ const (
 
 type runtime struct {
 	sync.Mutex
+
 	cc         *grpc.ClientConn
 	runtime    cri.RuntimeServiceClient
 	image      cri.ImageServiceClient
@@ -31,7 +34,8 @@ type runtime struct {
 }
 
 type imageRefs struct {
-	busybox string
+	busybox     string
+	busyboxName string
 }
 
 var (
@@ -43,13 +47,19 @@ var (
 func ConnectRuntime() (*runtime, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 	defer cancel()
+
 	dialOpts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
-		grpc.FailOnNonTempDialError(true),
+		grpc.WithBlock(), //nolint:staticcheck // deprecated but needed for blocking dial
+		grpc.FailOnNonTempDialError( //nolint:staticcheck // deprecated but needed for error handling
+			true,
+		),
 	}
 
-	cc, err := grpc.DialContext(ctx, *crioSocket, dialOpts...)
+	cc, err := grpc.DialContext( //nolint:staticcheck // deprecated but needed for context-based dial
+		ctx,
+		*crioSocket,
+		dialOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("runtime connection failed: %w", err)
 	}
@@ -71,14 +81,18 @@ func (r *runtime) PullImages() error {
 
 	imgRefs := &imageRefs{}
 
-	for name, setRef := range map[string]func(string){
-		ciImage: func(ref string) { imgRefs.busybox = ref },
+	for name, setRef := range map[string]func(string, string){
+		ciImage: func(ref, name string) {
+			imgRefs.busybox = ref
+			imgRefs.busyboxName = name
+		},
 	} {
 		ref, err := r.PullImage(name)
 		if err != nil {
 			return err
 		}
-		setRef(ref)
+
+		setRef(ref, name)
 	}
 
 	r.images = imgRefs
@@ -90,6 +104,7 @@ func (r *runtime) Disconnect() {
 	if r == nil || r.cc == nil {
 		return
 	}
+
 	r.cc.Close()
 	r.runtime = nil
 	r.image = nil
@@ -110,11 +125,9 @@ func (r *runtime) PullImage(image string) (string, error) {
 		return "", fmt.Errorf("failed to list images: %w", err)
 	}
 
-	for _, img := range listReply.Images {
-		for _, tag := range img.RepoTags {
-			if tag == image {
-				return img.Id, nil
-			}
+	for _, img := range listReply.GetImages() {
+		if slices.Contains(img.GetRepoTags(), image) {
+			return img.GetId(), nil
 		}
 	}
 
@@ -128,7 +141,7 @@ func (r *runtime) PullImage(image string) (string, error) {
 		return "", fmt.Errorf("failed to pull image %s: %w", image, err)
 	}
 
-	return reply.ImageRef, nil
+	return reply.GetImageRef(), nil
 }
 
 func (r *runtime) ListPods(namespace string) (ready, other []string, err error) {
@@ -140,10 +153,11 @@ func (r *runtime) ListPods(namespace string) (ready, other []string, err error) 
 		return nil, nil, err
 	}
 
-	for _, pod := range reply.Items {
+	for _, pod := range reply.GetItems() {
 		if pod.GetMetadata().GetNamespace() != namespace {
 			continue
 		}
+
 		if pod.GetState() == cri.PodSandboxState_SANDBOX_READY {
 			ready = append(ready, pod.GetId())
 		} else {
@@ -158,18 +172,16 @@ type PodOption func(*cri.PodSandboxConfig) error
 
 func WithPodAnnotations(annotations map[string]string) PodOption {
 	return func(cfg *cri.PodSandboxConfig) error {
-		for k, v := range annotations {
-			cfg.Annotations[k] = v
-		}
+		maps.Copy(cfg.GetAnnotations(), annotations)
+
 		return nil
 	}
 }
 
 func WithPodLabels(labels map[string]string) PodOption {
 	return func(cfg *cri.PodSandboxConfig) error {
-		for k, v := range labels {
-			cfg.Labels[k] = v
-		}
+		maps.Copy(cfg.GetLabels(), labels)
+
 		return nil
 	}
 }
@@ -234,12 +246,34 @@ func (r *runtime) CreatePod(namespace, name, uid string, options ...PodOption) (
 
 	r.Lock()
 	defer r.Unlock()
-	id := reply.PodSandboxId
+
+	id := reply.GetPodSandboxId()
 	r.podConfigs[id] = config
 	r.pods[uid] = id
 	r.pods[id] = id
 
-	return reply.PodSandboxId, nil
+	return reply.GetPodSandboxId(), nil
+}
+
+func (r *runtime) UpdatePod(pod string, overhead, resources *cri.LinuxContainerResources) error {
+	id, ok := r.pods[pod]
+	if !ok {
+		id = pod
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+
+	_, err := r.runtime.UpdatePodSandboxResources(ctx, &cri.UpdatePodSandboxResourcesRequest{
+		PodSandboxId: id,
+		Overhead:     overhead,
+		Resources:    resources,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to update pod %s: %w", pod, err)
+	}
+
+	return nil
 }
 
 func (r *runtime) StopPod(pod string) error {
@@ -255,7 +289,7 @@ func (r *runtime) StopPod(pod string) error {
 		PodSandboxId: id,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to stop pod %s: %v", pod, err)
+		return fmt.Errorf("failed to stop pod %s: %w", pod, err)
 	}
 
 	return nil
@@ -274,18 +308,21 @@ func (r *runtime) RemovePod(pod string) error {
 		PodSandboxId: id,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to remove pod %s: %v", pod, err)
+		return fmt.Errorf("failed to remove pod %s: %w", pod, err)
 	}
 
 	r.Lock()
 	defer r.Unlock()
+
 	delete(r.pods, pod)
 	delete(r.pods, id)
 
 	return nil
 }
 
-func (r *runtime) ListContainers(namespace string) (running, other, readyPods, otherPods []string, err error) {
+func (r *runtime) ListContainers(
+	namespace string,
+) (running, other, readyPods, otherPods []string, err error) {
 	readyPods, otherPods, err = r.ListPods(namespace)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -295,6 +332,7 @@ func (r *runtime) ListContainers(namespace string) (running, other, readyPods, o
 	for _, pod := range readyPods {
 		pods[pod] = struct{}{}
 	}
+
 	for _, pod := range otherPods {
 		pods[pod] = struct{}{}
 	}
@@ -307,11 +345,12 @@ func (r *runtime) ListContainers(namespace string) (running, other, readyPods, o
 		return nil, nil, nil, nil, err
 	}
 
-	for _, ctr := range reply.Containers {
+	for _, ctr := range reply.GetContainers() {
 		pod := ctr.GetPodSandboxId()
 		if _, ok := pods[pod]; !ok {
 			continue
 		}
+
 		if ctr.GetState() == cri.ContainerState_CONTAINER_RUNNING {
 			running = append(running, ctr.GetId())
 		} else {
@@ -327,8 +366,10 @@ type ContainerOption func(*cri.ContainerConfig) error
 func WithImage(image string) ContainerOption {
 	return func(cfg *cri.ContainerConfig) error {
 		cfg.Image = &cri.ImageSpec{
-			Image: image,
+			Image:              image,
+			UserSpecifiedImage: image,
 		}
+
 		return nil
 	}
 }
@@ -336,6 +377,7 @@ func WithImage(image string) ContainerOption {
 func WithCommand(cmd ...string) ContainerOption {
 	return func(cfg *cri.ContainerConfig) error {
 		cfg.Command = cmd
+
 		return nil
 	}
 }
@@ -343,6 +385,7 @@ func WithCommand(cmd ...string) ContainerOption {
 func WithShellScript(cmd string) ContainerOption {
 	return func(cfg *cri.ContainerConfig) error {
 		cfg.Command = []string{"sh", "-c", cmd}
+
 		return nil
 	}
 }
@@ -350,6 +393,7 @@ func WithShellScript(cmd string) ContainerOption {
 func WithArgs(args ...string) ContainerOption {
 	return func(cfg *cri.ContainerConfig) error {
 		cfg.Args = args
+
 		return nil
 	}
 }
@@ -357,24 +401,23 @@ func WithArgs(args ...string) ContainerOption {
 func WithEnv(envs []*cri.KeyValue) ContainerOption {
 	return func(cfg *cri.ContainerConfig) error {
 		cfg.Envs = envs
+
 		return nil
 	}
 }
 
 func WithAnnotations(annotations map[string]string) ContainerOption {
 	return func(cfg *cri.ContainerConfig) error {
-		for k, v := range annotations {
-			cfg.Annotations[k] = v
-		}
+		maps.Copy(cfg.GetAnnotations(), annotations)
+
 		return nil
 	}
 }
 
 func WithLabels(labels map[string]string) ContainerOption {
 	return func(cfg *cri.ContainerConfig) error {
-		for k, v := range labels {
-			cfg.Labels[k] = v
-		}
+		maps.Copy(cfg.GetLabels(), labels)
+
 		return nil
 	}
 }
@@ -382,6 +425,7 @@ func WithLabels(labels map[string]string) ContainerOption {
 func WithResources(r *cri.LinuxContainerResources) ContainerOption {
 	return func(cfg *cri.ContainerConfig) error {
 		cfg.Linux.Resources = r
+
 		return nil
 	}
 }
@@ -389,11 +433,15 @@ func WithResources(r *cri.LinuxContainerResources) ContainerOption {
 func WithSecurityContext(c *cri.LinuxContainerSecurityContext) ContainerOption {
 	return func(cfg *cri.ContainerConfig) error {
 		cfg.Linux.SecurityContext = c
+
 		return nil
 	}
 }
 
-func (r *runtime) CreateContainer(pod, name, uid string, options ...ContainerOption) (string, error) {
+func (r *runtime) CreateContainer(
+	pod, name, uid string,
+	options ...ContainerOption,
+) (string, error) {
 	podConfig, ok := r.podConfigs[pod]
 	if !ok {
 		return "", fmt.Errorf("failed to create container %s:%s=%s, no pod config found",
@@ -406,13 +454,14 @@ func (r *runtime) CreateContainer(pod, name, uid string, options ...ContainerOpt
 			Attempt: 1,
 		},
 		Image: &cri.ImageSpec{
-			Image: r.images.busybox,
+			Image:              r.images.busybox,
+			UserSpecifiedImage: r.images.busyboxName,
 		},
 		Command: []string{
 			"sh",
 			"-c",
 			fmt.Sprintf("echo %s/%s/%s $(sleep 3600)",
-				podConfig.Metadata.Namespace, podConfig.Metadata.Name, name),
+				podConfig.GetMetadata().GetNamespace(), podConfig.GetMetadata().GetName(), name),
 		},
 		WorkingDir:  "/",
 		Labels:      make(map[string]string),
@@ -447,7 +496,8 @@ func (r *runtime) CreateContainer(pod, name, uid string, options ...ContainerOpt
 
 	r.Lock()
 	defer r.Unlock()
-	id := reply.ContainerId
+
+	id := reply.GetContainerId()
 	r.containers[uid] = id
 	r.containers[id] = id
 
@@ -467,7 +517,7 @@ func (r *runtime) StartContainer(container string) error {
 		ContainerId: id,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to start container %s: %v", container, err)
+		return fmt.Errorf("failed to start container %s: %w", container, err)
 	}
 
 	return nil
@@ -486,7 +536,7 @@ func (r *runtime) StopContainer(container string) error {
 		ContainerId: id,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to stop container %s: %v", container, err)
+		return fmt.Errorf("failed to stop container %s: %w", container, err)
 	}
 
 	return nil
@@ -505,11 +555,12 @@ func (r *runtime) RemoveContainer(container string) error {
 		ContainerId: id,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to remove container %s: %v", container, err)
+		return fmt.Errorf("failed to remove container %s: %w", container, err)
 	}
 
 	r.Lock()
 	defer r.Unlock()
+
 	delete(r.containers, container)
 	delete(r.containers, id)
 
@@ -527,5 +578,5 @@ func (r *runtime) ExecSync(ctr string, cmd []string) (stdout, stderr []byte, ec 
 		return nil, nil, -1, fmt.Errorf("failed to exec command in container %s: %w", ctr, err)
 	}
 
-	return reply.Stdout, reply.Stderr, reply.ExitCode, nil
+	return reply.GetStdout(), reply.GetStderr(), reply.GetExitCode(), nil
 }

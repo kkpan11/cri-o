@@ -6,20 +6,22 @@ import (
 	"io"
 	"os"
 
-	criu "github.com/checkpoint-restore/go-criu/v7/utils"
-	"github.com/containers/storage/pkg/archive"
-	"github.com/cri-o/cri-o/internal/mockutils"
-	"github.com/cri-o/cri-o/internal/oci"
-	"github.com/cri-o/cri-o/internal/storage"
-	"github.com/cri-o/cri-o/internal/storage/references"
-	crioann "github.com/cri-o/cri-o/pkg/annotations"
-	"github.com/golang/mock/gomock"
+	criu "github.com/checkpoint-restore/go-criu/v8/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"go.podman.io/storage/pkg/archive"
+	"go.podman.io/storage/pkg/unshare"
+	"go.uber.org/mock/gomock"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 	kubetypes "k8s.io/kubelet/pkg/types"
+
+	crioann "github.com/cri-o/cri-o/internal/annotations"
+	"github.com/cri-o/cri-o/internal/mockutils"
+	"github.com/cri-o/cri-o/internal/oci"
+	"github.com/cri-o/cri-o/internal/storage"
+	"github.com/cri-o/cri-o/internal/storage/references"
 )
 
 var _ = t.Describe("ContainerRestore", func() {
@@ -28,15 +30,17 @@ var _ = t.Describe("ContainerRestore", func() {
 		if err := criu.CheckForCriu(criu.PodCriuVersion); err != nil {
 			Skip("Check CRIU: " + err.Error())
 		}
+
 		beforeEach()
 		createDummyConfig()
-		mockRuncInLibConfig()
+		mockRuntimeInLibConfig()
 		serverConfig.SetCheckpointRestore(true)
 		setupSUT()
 	})
 
 	AfterEach(func() {
 		afterEach()
+		os.RemoveAll("archive.tar")
 		os.RemoveAll("config.dump")
 		os.RemoveAll("cp.tar")
 		os.RemoveAll("dump.log")
@@ -47,12 +51,17 @@ var _ = t.Describe("ContainerRestore", func() {
 		It("should fail because archive does not exist", func() {
 			// Given
 			size := uint64(100)
-			checkpointImageName, err := references.ParseRegistryImageReferenceFromOutOfProcessData("docker.io/library/does-not-exist.tar:latest")
+			checkpointImageName, err := references.ParseRegistryImageReferenceFromOutOfProcessData(
+				"docker.io/library/does-not-exist.tar:latest",
+			)
 			Expect(err).ToNot(HaveOccurred())
-			imageID, err := storage.ParseStorageImageIDFromOutOfProcessData("8a788232037eaf17794408ff3df6b922a1aedf9ef8de36afdae3ed0b0381907b")
+			imageID, err := storage.ParseStorageImageIDFromOutOfProcessData(
+				"8a788232037eaf17794408ff3df6b922a1aedf9ef8de36afdae3ed0b0381907b",
+			)
 			Expect(err).ToNot(HaveOccurred())
 			gomock.InOrder(
-				imageServerMock.EXPECT().HeuristicallyTryResolvingStringAsIDPrefix("does-not-exist.tar").
+				imageServerMock.EXPECT().
+					HeuristicallyTryResolvingStringAsIDPrefix("does-not-exist.tar").
 					Return(nil),
 				imageServerMock.EXPECT().CandidatesForPotentiallyShortImageName(
 					gomock.Any(), "does-not-exist.tar").
@@ -66,6 +75,7 @@ var _ = t.Describe("ContainerRestore", func() {
 			)
 
 			containerConfig := &types.ContainerConfig{
+				Metadata: &types.ContainerMetadata{Name: "name"},
 				Image: &types.ImageSpec{
 					Image: "does-not-exist.tar",
 				},
@@ -75,12 +85,14 @@ var _ = t.Describe("ContainerRestore", func() {
 			_, err = sut.CRImportCheckpoint(
 				context.Background(),
 				containerConfig,
-				"",
+				testSandbox,
 				"",
 			)
 
 			// Then
-			Expect(err.Error()).To(Equal(`failed to open checkpoint archive does-not-exist.tar for import: open does-not-exist.tar: no such file or directory`))
+			Expect(
+				err.Error(),
+			).To(Equal(`failed to open checkpoint archive does-not-exist.tar for import: open does-not-exist.tar: no such file or directory`))
 		})
 	})
 	t.Describe("ContainerRestore from archive into new pod", func() {
@@ -89,8 +101,11 @@ var _ = t.Describe("ContainerRestore", func() {
 			archive, err := os.OpenFile("empty.tar", os.O_RDONLY|os.O_CREATE, 0o644)
 			Expect(err).ToNot(HaveOccurred())
 			archive.Close()
+
 			defer os.RemoveAll("empty.tar")
+
 			containerConfig := &types.ContainerConfig{
+				Metadata: &types.ContainerMetadata{Name: "name"},
 				Image: &types.ImageSpec{
 					Image: "empty.tar",
 				},
@@ -99,7 +114,7 @@ var _ = t.Describe("ContainerRestore", func() {
 			_, err = sut.CRImportCheckpoint(
 				context.Background(),
 				containerConfig,
-				"",
+				testSandbox,
 				"",
 			)
 			// Then
@@ -111,8 +126,11 @@ var _ = t.Describe("ContainerRestore", func() {
 			// Given
 			err := os.WriteFile("no.tar", []byte("notar"), 0o644)
 			Expect(err).ToNot(HaveOccurred())
+
 			defer os.RemoveAll("no.tar")
+
 			containerConfig := &types.ContainerConfig{
+				Metadata: &types.ContainerMetadata{Name: "name"},
 				Image: &types.ImageSpec{
 					Image: "no.tar",
 				},
@@ -121,7 +139,7 @@ var _ = t.Describe("ContainerRestore", func() {
 			_, err = sut.CRImportCheckpoint(
 				context.Background(),
 				containerConfig,
-				"",
+				testSandbox,
 				"",
 			)
 			// Then
@@ -133,20 +151,26 @@ var _ = t.Describe("ContainerRestore", func() {
 			// Given
 			err := os.WriteFile("spec.dump", []byte("not json"), 0o644)
 			Expect(err).ToNot(HaveOccurred())
+
 			defer os.RemoveAll("spec.dump")
+
 			outFile, err := os.Create("archive.tar")
 			Expect(err).ToNot(HaveOccurred())
+
+			defer os.RemoveAll("archive.tar")
 			defer outFile.Close()
+
 			input, err := archive.TarWithOptions(".", &archive.TarOptions{
 				Compression:      archive.Uncompressed,
 				IncludeSourceDir: true,
 				IncludeFiles:     []string{"spec.dump"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			defer os.RemoveAll("archive.tar")
 			_, err = io.Copy(outFile, input)
 			Expect(err).ToNot(HaveOccurred())
+
 			containerConfig := &types.ContainerConfig{
+				Metadata: &types.ContainerMetadata{Name: "name"},
 				Image: &types.ImageSpec{
 					Image: "archive.tar",
 				},
@@ -155,11 +179,13 @@ var _ = t.Describe("ContainerRestore", func() {
 			_, err = sut.CRImportCheckpoint(
 				context.Background(),
 				containerConfig,
-				"",
+				testSandbox,
 				"",
 			)
 			// Then
-			Expect(err.Error()).To(ContainSubstring(`failed to read "spec.dump": failed to unmarshal `))
+			Expect(
+				err.Error(),
+			).To(ContainSubstring(`failed to read "spec.dump": failed to unmarshal `))
 		})
 	})
 	t.Describe("ContainerRestore from archive into new pod", func() {
@@ -167,23 +193,31 @@ var _ = t.Describe("ContainerRestore", func() {
 			// Given
 			err := os.WriteFile("spec.dump", []byte("{}"), 0o644)
 			Expect(err).ToNot(HaveOccurred())
+
 			defer os.RemoveAll("spec.dump")
+
 			err = os.WriteFile("config.dump", []byte("{}"), 0o644)
 			Expect(err).ToNot(HaveOccurred())
+
 			defer os.RemoveAll("config.dump")
+
 			outFile, err := os.Create("archive.tar")
 			Expect(err).ToNot(HaveOccurred())
+
+			defer os.RemoveAll("archive.tar")
 			defer outFile.Close()
+
 			input, err := archive.TarWithOptions(".", &archive.TarOptions{
 				Compression:      archive.Uncompressed,
 				IncludeSourceDir: true,
 				IncludeFiles:     []string{"spec.dump", "config.dump"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			defer os.RemoveAll("archive.tar")
 			_, err = io.Copy(outFile, input)
 			Expect(err).ToNot(HaveOccurred())
+
 			containerConfig := &types.ContainerConfig{
+				Metadata: &types.ContainerMetadata{Name: "name"},
 				Image: &types.ImageSpec{
 					Image: "archive.tar",
 				},
@@ -192,12 +226,14 @@ var _ = t.Describe("ContainerRestore", func() {
 			_, err = sut.CRImportCheckpoint(
 				context.Background(),
 				containerConfig,
-				"",
+				testSandbox,
 				"",
 			)
 
 			// Then
-			Expect(err.Error()).To(ContainSubstring(`failed to read "io.kubernetes.cri-o.Metadata": unexpected end of JSON input`))
+			Expect(
+				err.Error(),
+			).To(ContainSubstring(`failed to read "io.kubernetes.cri-o.Annotations": unexpected end of JSON input`))
 		})
 	})
 	t.Describe("ContainerRestore from archive into new pod", func() {
@@ -205,23 +241,31 @@ var _ = t.Describe("ContainerRestore", func() {
 			// Given
 			outFile, err := os.Create("archive.tar")
 			Expect(err).ToNot(HaveOccurred())
+
+			defer os.RemoveAll("archive.tar")
 			defer outFile.Close()
+
 			err = os.WriteFile("config.dump", []byte("not json"), 0o644)
 			Expect(err).ToNot(HaveOccurred())
+
 			defer os.RemoveAll("config.dump")
+
 			err = os.WriteFile("spec.dump", []byte("{}"), 0o644)
 			Expect(err).ToNot(HaveOccurred())
+
 			defer os.RemoveAll("spec.dump")
+
 			input, err := archive.TarWithOptions(".", &archive.TarOptions{
 				Compression:      archive.Uncompressed,
 				IncludeSourceDir: true,
 				IncludeFiles:     []string{"spec.dump", "config.dump"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			defer os.RemoveAll("archive.tar")
 			_, err = io.Copy(outFile, input)
 			Expect(err).ToNot(HaveOccurred())
+
 			containerConfig := &types.ContainerConfig{
+				Metadata: &types.ContainerMetadata{Name: "name"},
 				Image: &types.ImageSpec{
 					Image: "archive.tar",
 				},
@@ -231,12 +275,14 @@ var _ = t.Describe("ContainerRestore", func() {
 			_, err = sut.CRImportCheckpoint(
 				context.Background(),
 				containerConfig,
-				"",
+				testSandbox,
 				"",
 			)
 
 			// Then
-			Expect(err.Error()).To(ContainSubstring(`failed to read "config.dump": failed to unmarshal`))
+			Expect(
+				err.Error(),
+			).To(ContainSubstring(`failed to read "config.dump": failed to unmarshal`))
 		})
 	})
 	t.Describe("ContainerRestore from archive into new pod", func() {
@@ -246,27 +292,37 @@ var _ = t.Describe("ContainerRestore", func() {
 
 			err := os.WriteFile(
 				"spec.dump",
-				[]byte(`{"annotations":{"io.kubernetes.cri-o.Metadata":"{\"name\":\"container-to-restore\"}"}}`),
+				[]byte(
+					`{"annotations":{"io.kubernetes.cri-o.Metadata":"{\"name\":\"container-to-restore\"}"}}`,
+				),
 				0o644,
 			)
 			Expect(err).ToNot(HaveOccurred())
+
 			defer os.RemoveAll("spec.dump")
+
 			err = os.WriteFile("config.dump", []byte("{}"), 0o644)
 			Expect(err).ToNot(HaveOccurred())
+
 			defer os.RemoveAll("config.dump")
+
 			outFile, err := os.Create("archive.tar")
 			Expect(err).ToNot(HaveOccurred())
+
+			defer os.RemoveAll("archive.tar")
 			defer outFile.Close()
+
 			input, err := archive.TarWithOptions(".", &archive.TarOptions{
 				Compression:      archive.Uncompressed,
 				IncludeSourceDir: true,
 				IncludeFiles:     []string{"spec.dump", "config.dump"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			defer os.RemoveAll("archive.tar")
 			_, err = io.Copy(outFile, input)
 			Expect(err).ToNot(HaveOccurred())
+
 			containerConfig := &types.ContainerConfig{
+				Metadata: &types.ContainerMetadata{Name: "name"},
 				Image: &types.ImageSpec{
 					Image: "archive.tar",
 				},
@@ -276,12 +332,14 @@ var _ = t.Describe("ContainerRestore", func() {
 			_, err = sut.CRImportCheckpoint(
 				context.Background(),
 				containerConfig,
-				"",
+				testSandbox,
 				"",
 			)
 
 			// Then
-			Expect(err.Error()).To(Equal(`failed to read "io.kubernetes.cri-o.Annotations": unexpected end of JSON input`))
+			Expect(
+				err.Error(),
+			).To(Equal(`failed to read "io.kubernetes.cri-o.Annotations": unexpected end of JSON input`))
 		})
 	})
 	t.Describe("ContainerRestore from archive into new pod", func() {
@@ -294,78 +352,37 @@ var _ = t.Describe("ContainerRestore", func() {
 
 			err := os.WriteFile(
 				"spec.dump",
-				[]byte(`{"annotations":{"io.kubernetes.cri-o.Metadata":"{\"name\":\"container-to-restore\"}"}}`),
-				0o644,
-			)
-			Expect(err).ToNot(HaveOccurred())
-			defer os.RemoveAll("spec.dump")
-			err = os.WriteFile("config.dump", []byte(`{"rootfsImageName": "image"}`), 0o644)
-			Expect(err).ToNot(HaveOccurred())
-			defer os.RemoveAll("config.dump")
-			outFile, err := os.Create("archive.tar")
-			Expect(err).ToNot(HaveOccurred())
-			defer outFile.Close()
-			input, err := archive.TarWithOptions(".", &archive.TarOptions{
-				Compression:      archive.Uncompressed,
-				IncludeSourceDir: true,
-				IncludeFiles:     []string{"spec.dump", "config.dump"},
-			})
-			Expect(err).ToNot(HaveOccurred())
-			defer os.RemoveAll("archive.tar")
-			_, err = io.Copy(outFile, input)
-			Expect(err).ToNot(HaveOccurred())
-			containerConfig := &types.ContainerConfig{
-				Image: &types.ImageSpec{
-					Image: "archive.tar",
-				},
-			}
-			// When
-
-			_, err = sut.CRImportCheckpoint(
-				context.Background(),
-				containerConfig,
-				"",
-				"",
-			)
-
-			// Then
-			Expect(err.Error()).To(Equal(`failed to read "io.kubernetes.cri-o.Annotations": unexpected end of JSON input`))
-		})
-	})
-	t.Describe("ContainerRestore from archive into new pod", func() {
-		It("should fail because archive contains no io.kubernetes.cri-o.Labels", func() {
-			// Given
-			addContainerAndSandbox()
-			testContainer.SetStateAndSpoofPid(&oci.ContainerState{
-				State: specs.State{Status: oci.ContainerStateRunning},
-			})
-
-			err := os.WriteFile(
-				"spec.dump",
 				[]byte(
-					`{"annotations":{"io.kubernetes.cri-o.Metadata"`+
-						`:"{\"name\":\"container-to-restore\"}",`+
-						`"io.kubernetes.cri-o.Annotations": "{\"name\":\"NAME\"}"}}`),
+					`{"annotations":{"io.kubernetes.cri-o.Metadata":"{\"name\":\"container-to-restore\"}"}}`,
+				),
 				0o644,
 			)
 			Expect(err).ToNot(HaveOccurred())
+
 			defer os.RemoveAll("spec.dump")
+
 			err = os.WriteFile("config.dump", []byte(`{"rootfsImageName": "image"}`), 0o644)
 			Expect(err).ToNot(HaveOccurred())
+
 			defer os.RemoveAll("config.dump")
+
 			outFile, err := os.Create("archive.tar")
 			Expect(err).ToNot(HaveOccurred())
+
+			defer os.RemoveAll("archive.tar")
 			defer outFile.Close()
+
 			input, err := archive.TarWithOptions(".", &archive.TarOptions{
 				Compression:      archive.Uncompressed,
 				IncludeSourceDir: true,
 				IncludeFiles:     []string{"spec.dump", "config.dump"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			defer os.RemoveAll("archive.tar")
 			_, err = io.Copy(outFile, input)
 			Expect(err).ToNot(HaveOccurred())
+
 			containerConfig := &types.ContainerConfig{
+				Metadata: &types.ContainerMetadata{Name: "name"},
 				Image: &types.ImageSpec{
 					Image: "archive.tar",
 				},
@@ -375,64 +392,14 @@ var _ = t.Describe("ContainerRestore", func() {
 			_, err = sut.CRImportCheckpoint(
 				context.Background(),
 				containerConfig,
-				"",
-				"",
-			)
-
-			// Then
-			Expect(err.Error()).To(Equal(`failed to read "io.kubernetes.cri-o.Labels": unexpected end of JSON input`))
-		})
-	})
-	t.Describe("ContainerRestore from archive into new pod", func() {
-		It("should fail with 'PodSandboxId should not be empty'", func() {
-			// Given
-			addContainerAndSandbox()
-			testContainer.SetStateAndSpoofPid(&oci.ContainerState{
-				State: specs.State{Status: oci.ContainerStateRunning},
-			})
-
-			err := os.WriteFile(
-				"spec.dump",
-				[]byte(
-					`{"annotations":{"io.kubernetes.cri-o.Metadata"`+
-						`:"{\"name\":\"container-to-restore\"}",`+
-						`"io.kubernetes.cri-o.Annotations": "{\"name\":\"NAME\"}",`+
-						`"io.kubernetes.cri-o.Labels": "{\"io.kubernetes.container.name\":\"counter\"}"}}`),
-				0o644,
-			)
-			Expect(err).ToNot(HaveOccurred())
-			defer os.RemoveAll("spec.dump")
-			err = os.WriteFile("config.dump", []byte(`{"rootfsImageName": "image"}`), 0o644)
-			Expect(err).ToNot(HaveOccurred())
-			defer os.RemoveAll("config.dump")
-			outFile, err := os.Create("archive.tar")
-			Expect(err).ToNot(HaveOccurred())
-			defer outFile.Close()
-			input, err := archive.TarWithOptions(".", &archive.TarOptions{
-				Compression:      archive.Uncompressed,
-				IncludeSourceDir: true,
-				IncludeFiles:     []string{"spec.dump", "config.dump"},
-			})
-			Expect(err).ToNot(HaveOccurred())
-			defer os.RemoveAll("archive.tar")
-			_, err = io.Copy(outFile, input)
-			Expect(err).ToNot(HaveOccurred())
-			containerConfig := &types.ContainerConfig{
-				Image: &types.ImageSpec{
-					Image: "archive.tar",
-				},
-			}
-			// When
-
-			_, err = sut.CRImportCheckpoint(
-				context.Background(),
-				containerConfig,
-				"",
+				testSandbox,
 				"",
 			)
 
 			// Then
-			Expect(err.Error()).To(Equal(`PodSandboxId should not be empty`))
+			Expect(
+				err.Error(),
+			).To(Equal(`failed to read "io.kubernetes.cri-o.Annotations": unexpected end of JSON input`))
 		})
 	})
 	t.Describe("ContainerRestore from archive into new pod", func() {
@@ -441,11 +408,24 @@ var _ = t.Describe("ContainerRestore", func() {
 			byID   bool
 		}{
 			{`{"rootfsImageName": "image"}`, false},
-			{`{"rootfsImageRef": "8a788232037eaf17794408ff3df6b922a1aedf9ef8de36afdae3ed0b0381907b"}`, true},
+			{
+				`{"rootfsImageRef": "8a788232037eaf17794408ff3df6b922a1aedf9ef8de36afdae3ed0b0381907b"}`,
+				true,
+			},
 		}
+
+		var graphRoot string
+
+		BeforeEach(func() {
+			graphRoot = t.MustTempDir("ociartifact")
+		})
+
 		for _, image := range images {
-			loopImage := image
 			It(fmt.Sprintf("should succeed (%s)", image.config), func() {
+				if unshare.IsRootless() {
+					Skip("should run as root")
+				}
+
 				// Given
 				addContainerAndSandbox()
 				testContainer.SetStateAndSpoofPid(&oci.ContainerState{
@@ -469,22 +449,29 @@ var _ = t.Describe("ContainerRestore", func() {
 					0o644,
 				)
 				Expect(err).ToNot(HaveOccurred())
+
 				defer os.RemoveAll("spec.dump")
-				err = os.WriteFile("config.dump", []byte(loopImage.config), 0o644)
+
+				err = os.WriteFile("config.dump", []byte(image.config), 0o644)
 				Expect(err).ToNot(HaveOccurred())
+
 				defer os.RemoveAll("config.dump")
+
 				outFile, err := os.Create("archive.tar")
 				Expect(err).ToNot(HaveOccurred())
+
+				defer os.RemoveAll("archive.tar")
 				defer outFile.Close()
+
 				input, err := archive.TarWithOptions(".", &archive.TarOptions{
 					Compression:      archive.Uncompressed,
 					IncludeSourceDir: true,
 					IncludeFiles:     []string{"spec.dump", "config.dump"},
 				})
 				Expect(err).ToNot(HaveOccurred())
-				defer os.RemoveAll("archive.tar")
 				_, err = io.Copy(outFile, input)
 				Expect(err).ToNot(HaveOccurred())
+
 				containerConfig := &types.ContainerConfig{
 					Image: &types.ImageSpec{
 						Image: "archive.tar",
@@ -503,17 +490,24 @@ var _ = t.Describe("ContainerRestore", func() {
 					Metadata: &types.ContainerMetadata{
 						Name: "new-container-name",
 					},
+					Mounts: []*types.Mount{{
+						ContainerPath: "/data",
+						HostPath:      "/data",
+					}},
 				}
 
 				size := uint64(100)
-				imageID, err := storage.ParseStorageImageIDFromOutOfProcessData("8a788232037eaf17794408ff3df6b922a1aedf9ef8de36afdae3ed0b0381907b")
+				imageID, err := storage.ParseStorageImageIDFromOutOfProcessData(
+					"8a788232037eaf17794408ff3df6b922a1aedf9ef8de36afdae3ed0b0381907b",
+				)
 				Expect(err).ToNot(HaveOccurred())
-				var imageLookup mockutils.MockSequence
-				if loopImage.byID {
-					imageLookup = mockutils.InOrder(
-						imageServerMock.EXPECT().HeuristicallyTryResolvingStringAsIDPrefix(imageID.IDStringForOutOfProcessConsumptionOnly()).
-							Return(&imageID),
 
+				var imageLookup mockutils.MockSequence
+				if image.byID {
+					imageLookup = mockutils.InOrder(
+						imageServerMock.EXPECT().
+							HeuristicallyTryResolvingStringAsIDPrefix(imageID.IDStringForOutOfProcessConsumptionOnly()).
+							Return(&imageID),
 						imageServerMock.EXPECT().ImageStatusByID(
 							gomock.Any(), imageID).
 							Return(&storage.ImageResult{
@@ -525,8 +519,11 @@ var _ = t.Describe("ContainerRestore", func() {
 							}, nil),
 					)
 				} else {
-					checkpointImageName, err := references.ParseRegistryImageReferenceFromOutOfProcessData("docker.io/library/image:latest")
+					checkpointImageName, err := references.ParseRegistryImageReferenceFromOutOfProcessData(
+						"docker.io/library/image:latest",
+					)
 					Expect(err).ToNot(HaveOccurred())
+
 					imageLookup = mockutils.InOrder(
 						imageServerMock.EXPECT().HeuristicallyTryResolvingStringAsIDPrefix("image").
 							Return(nil),
@@ -544,6 +541,7 @@ var _ = t.Describe("ContainerRestore", func() {
 							}, nil),
 					)
 				}
+
 				mockutils.InOrder(
 					imageLookup,
 
@@ -562,6 +560,7 @@ var _ = t.Describe("ContainerRestore", func() {
 						),
 					runtimeServerMock.EXPECT().StartContainer(gomock.Any()).
 						Return(emptyDir, nil),
+					storeMock.EXPECT().GraphRoot().Return(graphRoot),
 				)
 
 				// When
@@ -569,7 +568,7 @@ var _ = t.Describe("ContainerRestore", func() {
 				_, err = sut.CRImportCheckpoint(
 					context.Background(),
 					containerConfig,
-					"",
+					testSandbox,
 					"new-sandbox-id",
 				)
 
@@ -581,13 +580,20 @@ var _ = t.Describe("ContainerRestore", func() {
 	t.Describe("ContainerRestore from OCI archive", func() {
 		It("should fail because archive does not exist", func() {
 			// Given
+			addContainerAndSandbox()
+
 			size := uint64(100)
-			checkpointImageName, err := references.ParseRegistryImageReferenceFromOutOfProcessData("localhost/checkpoint-image:tag1")
+			checkpointImageName, err := references.ParseRegistryImageReferenceFromOutOfProcessData(
+				"localhost/checkpoint-image:tag1",
+			)
 			Expect(err).ToNot(HaveOccurred())
-			imageID, err := storage.ParseStorageImageIDFromOutOfProcessData("8a788232037eaf17794408ff3df6b922a1aedf9ef8de36afdae3ed0b0381907b")
+			imageID, err := storage.ParseStorageImageIDFromOutOfProcessData(
+				"8a788232037eaf17794408ff3df6b922a1aedf9ef8de36afdae3ed0b0381907b",
+			)
 			Expect(err).ToNot(HaveOccurred())
 			gomock.InOrder(
-				imageServerMock.EXPECT().HeuristicallyTryResolvingStringAsIDPrefix("localhost/checkpoint-image:tag1").
+				imageServerMock.EXPECT().
+					HeuristicallyTryResolvingStringAsIDPrefix("localhost/checkpoint-image:tag1").
 					Return(nil),
 				imageServerMock.EXPECT().CandidatesForPotentiallyShortImageName(
 					gomock.Any(), "localhost/checkpoint-image:tag1").
@@ -602,13 +608,17 @@ var _ = t.Describe("ContainerRestore", func() {
 						},
 					}, nil),
 				imageServerMock.EXPECT().GetStore().Return(storeMock),
-				storeMock.EXPECT().MountImage(imageID.IDStringForOutOfProcessConsumptionOnly(), gomock.Any(), gomock.Any()).
+				storeMock.EXPECT().
+					MountImage(imageID.IDStringForOutOfProcessConsumptionOnly(), gomock.Any(), gomock.Any()).
 					Return("", nil),
 				imageServerMock.EXPECT().GetStore().Return(storeMock),
-				storeMock.EXPECT().UnmountImage(imageID.IDStringForOutOfProcessConsumptionOnly(), true).
+				storeMock.EXPECT().
+					UnmountImage(imageID.IDStringForOutOfProcessConsumptionOnly(), true).
 					Return(false, nil),
 			)
+
 			containerConfig := &types.ContainerConfig{
+				Metadata: &types.ContainerMetadata{Name: "name"},
 				Image: &types.ImageSpec{
 					Image: "localhost/checkpoint-image:tag1",
 				},
@@ -617,12 +627,14 @@ var _ = t.Describe("ContainerRestore", func() {
 			_, err = sut.CRImportCheckpoint(
 				context.Background(),
 				containerConfig,
-				"",
+				testSandbox,
 				"",
 			)
 
 			// Then
-			Expect(err.Error()).To(ContainSubstring(`failed to read "spec.dump": open spec.dump: no such file or directory`))
+			Expect(
+				err.Error(),
+			).To(ContainSubstring(`failed to read "spec.dump": open spec.dump: no such file or directory`))
 		})
 	})
 })

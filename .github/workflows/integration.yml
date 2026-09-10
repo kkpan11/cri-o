@@ -1,5 +1,6 @@
 name: integration
 on:
+  workflow_dispatch:
   push:
     tags:
       - v*
@@ -9,44 +10,39 @@ on:
       - update-nixpkgs-*
   pull_request:
 env:
-  GO_VERSION: '1.22'
-  CONMON_BINARY: /usr/local/bin/conmon  # from: scripts/github-actions-setup
+  CONMON_BINARY: /usr/local/bin/conmon # from: scripts/github-actions-setup
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test-binaries:
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         run:
           - runner: ubuntu-latest
             arch: amd64
-          - runner: actuated-arm64-4cpu-16gb
+          - runner: ubuntu-24.04-arm
             arch: arm64
     name: binaries / ${{ matrix.run.arch }}
     runs-on: ${{ matrix.run.runner }}
     steps:
-      - uses: alexellis/arkade-get@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          crane: latest
-          print-summary: false
-      - name: Install vmmeter
-        run: crane export --platform linux/${{ matrix.run.arch }} ghcr.io/openfaasltd/vmmeter:latest | sudo tar -xvf - -C /usr/local/bin
-      - uses: self-actuated/vmmeter-action@master
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-      - uses: actions/cache@v4
+          go-version-file: go.mod
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
           key: go-test-binaries-${{ matrix.run.arch }}-${{ hashFiles('**/go.sum') }}-${{ hashFiles('test') }}
       - run: scripts/github-actions-packages
-      - run: make all test-binaries
-      - uses: actions/upload-artifact@v4
+      - run: GO_BUILDFLAGS="-cover" make all test-binaries
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: test-binaries-${{ matrix.run.arch }}
           path: |
@@ -55,105 +51,166 @@ jobs:
             test/checkcriu/checkcriu
             test/checkseccomp/checkseccomp
             test/copyimg/copyimg
+            test/updateunified/updateunified
             test/nri/nri.test
 
   integration:
     needs: test-binaries
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         run:
-          - name: critest / conmon
+          # TODO: Re-enable runc integration tests when mitigation is found
+          # Disabled due to AppArmor issue in nested environments
+          # See: https://github.com/cri-o/cri-o/issues/9573
+          # See: https://github.com/opencontainers/runc/issues/4968
+          # - name: critest / conmon / runc / amd64
+          #   arch: amd64
+          #   runner: ubuntu-latest
+          #   defaultRuntime: runc
+          #   runtimeType: oci
+          #   critest: 1
+          #   userns: 0
+          #   jobs: 1
+          #   timeout: 20
+
+          - name: critest / conmon / crun / amd64
             arch: amd64
             runner: ubuntu-latest
+            defaultRuntime: crun
             runtimeType: oci
             critest: 1
             userns: 0
             jobs: 1
-          - name: critest / conmon
-            arch: arm64
-            runner: actuated-arm64-8cpu-32gb
-            runtimeType: oci
-            critest: 1
-            userns: 0
-          - name: critest / conmon-rs
+            timeout: 20
+
+          # - name: critest / conmon-rs / runc / amd64
+          #   arch: amd64
+          #   runner: ubuntu-latest
+          #   defaultRuntime: runc
+          #   runtimeType: pod
+          #   critest: 1
+          #   userns: 0
+          #   jobs: 1
+          #   timeout: 20
+
+          - name: critest / conmon-rs / crun / amd64
             arch: amd64
             runner: ubuntu-latest
+            defaultRuntime: crun
             runtimeType: pod
             critest: 1
             userns: 0
             jobs: 1
-          - name: critest / conmon-rs
+            timeout: 20
+
+          # - name: critest / conmon / runc / arm64
+          #   arch: arm64
+          #   runner: ubuntu-24.04-arm
+          #   defaultRuntime: runc
+          #   runtimeType: oci
+          #   critest: 1
+          #   userns: 0
+          #   jobs: 1
+          #   timeout: 20
+
+          - name: critest / conmon / crun / arm64
             arch: arm64
-            runner: actuated-arm64-8cpu-32gb
+            runner: ubuntu-24.04-arm
+            defaultRuntime: crun
+            runtimeType: oci
+            critest: 1
+            userns: 0
+            jobs: 1
+            timeout: 20
+
+          # - name: critest / conmon-rs / runc / arm64
+          #   arch: arm64
+          #   runner: ubuntu-24.04-arm
+          #   defaultRuntime: runc
+          #   runtimeType: pod
+          #   critest: 1
+          #   userns: 0
+          #   jobs: 1
+          #   timeout: 20
+
+          - name: critest / conmon-rs / crun / arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            defaultRuntime: crun
             runtimeType: pod
             critest: 1
             userns: 0
             jobs: 1
-          - name: integration / conmon
+            timeout: 20
+
+          # - name: integration / conmon / runc / amd64
+          #   arch: amd64
+          #   runner: ubuntu-latest
+          #   defaultRuntime: runc
+          #   runtimeType: oci
+          #   critest: 0
+          #   userns: 0
+          #   jobs: 2
+          #   timeout: 120
+
+          - name: integration / conmon / crun / amd64
             arch: amd64
             runner: ubuntu-latest
+            defaultRuntime: crun
             runtimeType: oci
             critest: 0
             userns: 0
             jobs: 2
-          - name: integration / conmon
+            timeout: 120
+
+          - name: integration / conmon / crun / arm64
             arch: arm64
-            runner: actuated-arm64-8cpu-32gb
+            runner: ubuntu-24.04-arm
+            defaultRuntime: crun
             runtimeType: oci
             critest: 0
             userns: 0
             jobs: 2
-          - name: integration / conmon-rs
+            timeout: 120
+
+          - name: integration / conmon-rs / crun / amd64
             arch: amd64
             runner: ubuntu-latest
+            defaultRuntime: crun
             runtimeType: pod
             critest: 0
-            userns: 1
+            userns: 0
             jobs: 2
-          - name: integration / conmon-rs
-            arch: arm64
-            runner: actuated-arm64-8cpu-32gb
-            runtimeType: pod
-            critest: 0
-            userns: 1
-            jobs: 2
-          - name: integration / userns
+            timeout: 120
+
+          - name: integration / userns / crun / amd64
             arch: amd64
             runner: ubuntu-latest
+            defaultRuntime: crun
             runtimeType: oci
             critest: 0
             userns: 1
             jobs: 2
-          - name: integration / userns
-            arch: arm64
-            runner: actuated-arm64-8cpu-32gb
-            runtimeType: oci
-            critest: 0
-            userns: 1
-            jobs: 2
-    name: ${{ matrix.run.name }} / ${{ matrix.run.arch }}
+            timeout: 120
+    env:
+      GOCOVERDIR: ${{ github.workspace }}/build/coverage/bats # It's used to make coverage profiles. https://go.dev/doc/build-cover
+    name: ${{ matrix.run.name }}
     runs-on: ${{ matrix.run.runner }}
+    timeout-minutes: ${{ matrix.run.timeout }}
     steps:
-      - uses: alexellis/arkade-get@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          crane: latest
-          print-summary: false
-      - name: Install vmmeter
-        run: crane export --platform linux/${{ matrix.run.arch }} ghcr.io/openfaasltd/vmmeter:latest | sudo tar -xvf - -C /usr/local/bin
-      - uses: self-actuated/vmmeter-action@master
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-      - uses: actions/cache@v4
+          go-version-file: go.mod
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
           key: go-${{ matrix.run.name }}-${{ matrix.run.arch }}-${{ hashFiles('**/go.sum') }}-${{ hashFiles('scripts/versions') }}
-      - uses: sigstore/cosign-installer@v3
-      - uses: actions/download-artifact@v4
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: test-binaries-${{ matrix.run.arch }}
       - name: Fix artifact permissions
@@ -164,12 +221,30 @@ jobs:
             test/checkcriu/checkcriu \
             test/checkseccomp/checkseccomp \
             test/copyimg/copyimg \
+            test/updateunified/updateunified \
             test/nri/nri.test
       - run: scripts/github-actions-packages
       - run: scripts/github-actions-setup
-      - run: sudo -E test/test_runner.sh
+      - name: Switch to runc instead of crun
+        if: ${{ matrix.run.defaultRuntime == 'runc' }}
+        run: |
+          sudo ln -sf $(command -v runc) $(command -v crun)
+          crun --version
+      - name: Run the test suite
+        run: sudo -E test/test_runner.sh
         env:
           JOBS: ${{ matrix.run.jobs }}
           RUN_CRITEST: ${{ matrix.run.critest }}
           RUNTIME_TYPE: ${{ matrix.run.runtimeType }}
           TEST_USERNS: ${{ matrix.run.userns }}
+          CONTAINER_DEFAULT_RUNTIME: ${{ matrix.run.defaultRuntime }}
+      # Codecov
+      - run: |
+          sudo chown -R $(id -u):$(id -g) build
+          go tool covdata textfmt -i="$GOCOVERDIR" -o build/coverage/coverprofile
+      - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          files: build/coverage/coverprofile
+          verbose: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

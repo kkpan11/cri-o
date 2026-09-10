@@ -1,5 +1,4 @@
 ---
-
 # When False, disable SELinux on the system during specific tests
 integration_selinux_enabled: True
 e2e_selinux_enabled: False
@@ -10,82 +9,94 @@ build_runc: True
 build_crun: False
 build_kata: False
 cgroupv2: False
-use_conmonrs: '{{ USE_CONMONRS | default(False) | bool }}'
-evented_pleg_fg: '{{ EVENTED_PLEG | default(False) | bool }}'
+use_conmonrs: "{{ USE_CONMONRS | default(False) | bool }}"
+evented_pleg_fg: "{{ EVENTED_PLEG | default(False) | bool }}"
 
 critest_mirror_repo: quay.io/crio
-cri_tools_git_version: v1.29.0
-golang_version: "1.22"
+cri_tools_git_version: v1.36.0
 
 # For results.yml Paths use rsync 'source' conventions
-artifacts: "/tmp/artifacts"  # Base-directory for collection
+artifacts: "/tmp/artifacts" # Base-directory for collection
 crio_integration_filepath: "{{ artifacts }}/testout.txt"
 crio_integration_userns_filepath: "{{ artifacts }}/testout_userns.txt"
 crio_node_e2e_filepath: "{{ artifacts }}/junit_01.xml"
 result_dest_basedir: '{{ lookup("env","WORKSPACE") |
-                         default(playbook_dir, True) }}/artifacts'
+  default(playbook_dir, True) }}/artifacts'
 # Environment variables to set when executing e2e tests
 e2e_test_env:
-    KUBECONFIG: /var/run/kubernetes/admin.kubeconfig
+  KUBECONFIG: /var/run/kubernetes/admin.kubeconfig
 
 # Environment variables to set when executing integration tests
 int_test_env:
-    CGROUP_MANAGER: "systemd"
-    STORAGE_OPTIONS: >
-        --storage-driver=overlay
+  CGROUP_MANAGER: "systemd"
+  STORAGE_OPTIONS: >
+    --storage-driver=overlay
 
 # Environment variables to set when executing integration tests with crun (mixed with int_test_env)
 crun_test_env:
-    CONTAINER_DEFAULT_RUNTIME: "crun"
-    CONTAINER_RUNTIMES: "crun::/run/crun:oci"
+  CONTAINER_DEFAULT_RUNTIME: "crun"
+  CONTAINER_RUNTIMES: "crun::/run/crun:oci"
 
 # for ssh ID generation
 ssh_user: "{{ lookup('env','USER') }}"
 ssh_location: "{{ lookup('env','HOME') }}/.ssh/id_rsa"
 
 # variables for testing with the kata-containers runtime
-kata_version: "3.1.3"
+kata_version: "3.31.0"
+# sha256 sourced from the GitHub release attestation — decode the
+# base64 payload and look up kata-static-<version>-amd64.tar.zst:
+# https://github.com/kata-containers/kata-containers/attestations/28048664/download
+kata_amd64_checksum: "sha256:68c2786a0b97023f62f3eca02dc868b78a794e5469d4ddd6cc9e0bd4a7212b0b"
+int_test_timeout: "{{ 120 * 60 }}"
+podvm_image: "quay.io/confidential-containers/podvm-generic-ubuntu-amd64:v0.18.0"
+caa_image: "quay.io/confidential-containers/cloud-api-adaptor:v0.18.0-dev"
 
 kata_skip_files:
   - "apparmor.bats"
   - "cdi.bats"
   - "checkpoint.bats"
-  - "conmonrs.bats"     # no use of conmon in runtimeVM implementation
+  - "conmonrs.bats" # no use of conmon in runtimeVM implementation
   - "cpu_load_balancing.bats"
   - "critest.bats"
   - "ctr_pause_unpause.bats"
-  - "ctr_seccomp.bats"  # see https://github.com/kata-containers/tests/issues/4587
+  - "ctr_seccomp.bats" # see https://github.com/kata-containers/tests/issues/4587
   - "ctr_userns.bats"
-  - "drop_infra.bats"   # infra ctr is not dropped on purpose with kata
+  - "drop_infra.bats" # infra ctr is not dropped on purpose with kata
+  - "exec_termination.bats" # exec during termination has different behavior in VM-based runtime
   - "infra_ctr_cpuset.bats"
+  - "imagefsinfo.bats" # image and container filesystems is not in kata at the moment
   - "inspect.bats"
   - "metrics.bats"
   - "network_ping.bats"
   - "nri.bats"
+  - "oci_volumes.bats"
   - "policy.bats"
-  - "restore.bats"      # restore operations are failing with Kata
+  - "restore.bats" # restore operations are failing with Kata
   - "seccomp_notifier.bats"
-  - "selinux.bats"      # SELinux disabled with kata for now (see https://github.com/kata-containers/tests/issues/4248)
+  - "selinux.bats" # SELinux disabled with kata for now (see https://github.com/kata-containers/tests/issues/4248)
   - "shm_size.bats"
   - "timeout.bats"
   - "umask_annotation.bats"
   - "userns_annotation.bats"
   - "version.bats"
   - "workloads.bats"
+  - "cri-metrics.bats"
 
 kata_int_test_env:
-    CONTAINER_RUNTIMES: "containerd-shim-kata-v2:/opt/kata/bin/containerd-shim-kata-v2:/run/vc:vm:true:/opt/kata/share/defaults/kata-containers/configuration.toml"
-    CONTAINER_RUNTIME: "containerd-shim-kata-v2"
-    CONTAINER_DEFAULT_RUNTIME: "containerd-shim-kata-v2"
-    RUNTIME_NAME: "containerd-shim-kata-v2"
-    RUNTIME_ROOT: "/run/vc"
-    RUNTIME_TYPE: "vm"
-    TESTFLAGS: "{{ lookup('fileglob', '{{ ansible_env.GOPATH }}/src/github.com/cri-o/cri-o/test/*.bats', wantlist=True) \
-      | map('basename') | difference(kata_skip_files) | join(' ') }}"
-    JOBS: "1"  # TODO: add support to parallelization in kata (causes failures in the integration tests)
-    PRIVILEGED_WITHOUT_HOST_DEVICES: true
-    RUNTIME_CONFIG_PATH: "/opt/kata/share/defaults/kata-containers/configuration.toml"
-    PATH: "/opt/kata/bin:{{ ansible_env.PATH }}"
+  CONTAINER_RUNTIMES: "containerd-shim-kata-v2:/opt/kata/bin/containerd-shim-kata-v2:/run/vc:vm:true:/opt/kata/share/defaults/kata-containers/configuration.toml"
+  CONTAINER_RUNTIME: "containerd-shim-kata-v2"
+  CONTAINER_DEFAULT_RUNTIME: "containerd-shim-kata-v2"
+  RUNTIME_NAME: "containerd-shim-kata-v2"
+  RUNTIME_ROOT: "/run/vc"
+  RUNTIME_TYPE: "vm"
+  TESTFLAGS:
+    "{{ lookup('fileglob', '{{ ansible_env.GOPATH }}/src/github.com/cri-o/cri-o/test/*.bats', wantlist=True) \
+    | map('basename') | difference(kata_skip_files) | join(' ') }}"
+  JOBS: "1" # TODO: add support to parallelization in kata (causes failures in the integration tests)
+  PRIVILEGED_WITHOUT_HOST_DEVICES: true
+  RUNTIME_CONFIG_PATH: "/opt/kata/share/defaults/kata-containers/configuration.toml"
+  PATH: "/opt/kata/bin:{{ ansible_env.PATH }}"
+  CONTAINER_STORAGE_OPT: "overlay.skip_mount_home=true"
 
 kata_skip_cgroups_tests:
   - 'test "pids limit"'
@@ -96,19 +107,15 @@ kata_skip_cgroups_tests:
 kata_skip_command_tests:
   - 'test "crio commands"'
   - 'test "log max boundary testing"'
-kata_skip_config_tests:
-  - 'test "choose different default runtime should succeed"'
-  - 'test "runc not existing when default_runtime changed should succeed"'
-  - 'test "retain default runtime should succeed"'
-kata_skip_config_migrate_tests:
-  - 'test "config migrate should succeed with default config"'
-  - 'test "config migrate should succeed with 1.17 config"'
+kata_skip_crio_check_tests:
+  - 'test "storage directory check should wipe everything on repair errors"'
 kata_skip_crio_wipe_tests:
   - 'test "clear neither when remove persist"'
-  - "test \"don't clear containers on a forced restart of crio\""
-  - "test \"don't clear containers if clean shutdown supported file not present\""
-  - "test \"internal_wipe don't clear containers on a forced restart of crio\""
+  - 'test "don''t clear containers on a forced restart of crio"'
+  - 'test "don''t clear containers if clean shutdown supported file not present"'
+  - 'test "internal_wipe don''t clear containers on a forced restart of crio"'
   - 'test "internal_wipe eventually cleans network on forced restart of crio if network is slow to come up"'
+  - 'test "recover from badly corrupted storage directory"'
 kata_skip_ctr_tests:
   - 'test "ctr logging"'
   - 'test "ctr journald logging"'
@@ -130,6 +137,10 @@ kata_skip_ctr_tests:
   - 'test "ctr with default_env set in configuration"'
   - 'test "ctr with absent mount that should be rejected"'
   - 'test "ctr stop loop kill retry attempts"'
+  - 'test "ctr that mounts container storage as read-only option but not recursively"'
+  - 'test "ctr that mounts container storage as recursively read-only"'
+  - 'test "ctr that fails to mount container storage as recursively read-only without readonly option"'
+  - 'test "ctr that fails to mount container storage as recursively read-only without private propagation"'
 kata_skip_devices_tests:
   - 'test "additional devices permissions"'
   - 'test "annotation devices support"'
@@ -151,12 +162,21 @@ kata_skip_network_tests:
   - 'test "Connect to pod hostport from the host"'
   - 'test "Clean up network if pod sandbox fails"'
   - 'test "Clean up network if pod sandbox gets killed"'
+  - 'test "Network recovery after reboot with destroyed netns"'
 kata_skip_pod_tests:
   - 'test "pass pod sysctls to runtime"'
+  - 'test "pass pod sysctls to runtime when in userns"'
   - 'test "skip pod sysctls to runtime if host"'
   - 'test "restart crio and still get pod status"'
   - 'test "systemd cgroup_parent correctly set"'
   - 'test "kubernetes pod terminationGracePeriod passthru"'
+  - 'test "disable crypto.fips_enabled when FIPS_DISABLE is set"'
+  - 'test "run container with memory_limit_in_bytes -1"'
+  - 'test "run container with memory_limit_in_bytes 12.5MiB"'
+  - 'test "run container with container_min_memory 17.5MiB"'
+  - 'test "run container with container_min_memory 5.5MiB"'
+  - 'test "run container with empty container_min_memory"'
+  - 'test "run container with default annotations"'
 kata_skip_seccomp_oci_artifacts_tests:
   - 'test "seccomp OCI artifact with pod annotation"'
   - 'test "seccomp OCI artifact with container annotation"'
@@ -165,5 +185,13 @@ kata_skip_seccomp_oci_artifacts_tests:
   - 'test "seccomp OCI artifact with image annotation for container"'
   - 'test "seccomp OCI artifact with image annotation and profile set to unconfined"'
   - 'test "seccomp OCI artifact with missing artifact"'
+kata_skip_annotation_migration_tests:
+  - 'test "v1 cgroup2-mount-hierarchy-rw annotation should still work"'
+  - 'test "v2 cgroup2-mount-hierarchy-rw annotation should work"'
+  - 'test "v1 userns-mode annotation should still work"'
+  - 'test "v2 userns-mode annotation should work"'
+  - 'test "v1 umask annotation should still work"'
+  - 'test "v2 unified-cgroup annotation for specific container with slash separator should work"'
 
-runc_git_version: main
+runc_git_version: v1.5.1
+crun_git_version: 1.29.1

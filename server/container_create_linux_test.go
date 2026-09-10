@@ -1,11 +1,15 @@
 package server
 
 import (
-	"context"
+	"strings"
 	"testing"
 
-	"github.com/cri-o/cri-o/internal/factory/container"
+	"github.com/opencontainers/runtime-tools/generate"
+	"go.podman.io/storage/pkg/mount"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/factory/container"
+	"github.com/cri-o/cri-o/internal/storage"
 )
 
 func TestAddOCIBindsForDev(t *testing.T) {
@@ -13,6 +17,7 @@ func TestAddOCIBindsForDev(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
+
 	if err := ctr.SetConfig(&types.ContainerConfig{
 		Mounts: []*types.Mount{
 			{
@@ -31,22 +36,42 @@ func TestAddOCIBindsForDev(t *testing.T) {
 		t.Error(err)
 	}
 
-	_, binds, err := addOCIBindMounts(context.Background(), ctr, "", "", nil, false, false, false, false, "")
+	sut := &Server{}
+	ctrInfo := &storage.ContainerInfo{
+		MountLabel: "",
+	}
+
+	_, binds, _, err := sut.addOCIBindMounts(
+		t.Context(),
+		ctr,
+		ctrInfo,
+		false,
+		false,
+		false,
+		false,
+		false,
+		nil,
+	)
 	if err != nil {
 		t.Error(err)
 	}
+
 	for _, m := range ctr.Spec().Mounts() {
 		if m.Destination == "/dev" {
 			t.Error("/dev shouldn't be in the spec if it's bind mounted from kube")
 		}
 	}
+
 	var foundDev bool
+
 	for _, b := range binds {
 		if b.Destination == "/dev" {
 			foundDev = true
+
 			break
 		}
 	}
+
 	if !foundDev {
 		t.Error("no /dev mount found in spec mounts")
 	}
@@ -57,6 +82,7 @@ func TestAddOCIBindsForSys(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
+
 	if err := ctr.SetConfig(&types.ContainerConfig{
 		Mounts: []*types.Mount{
 			{
@@ -75,18 +101,225 @@ func TestAddOCIBindsForSys(t *testing.T) {
 		t.Error(err)
 	}
 
-	_, binds, err := addOCIBindMounts(context.Background(), ctr, "", "", nil, false, false, false, false, "")
+	sut := &Server{}
+	ctrInfo := &storage.ContainerInfo{
+		MountLabel: "",
+	}
+
+	_, binds, _, err := sut.addOCIBindMounts(
+		t.Context(),
+		ctr,
+		ctrInfo,
+		false,
+		false,
+		false,
+		false,
+		false,
+		nil,
+	)
 	if err != nil {
 		t.Error(err)
 	}
+
 	var howManySys int
+
 	for _, b := range binds {
 		if b.Destination == "/sys" && b.Type != "sysfs" {
 			howManySys++
 		}
 	}
+
 	if howManySys != 1 {
 		t.Error("there is not a single /sys bind mount")
+	}
+}
+
+func TestAddOCIBindsRROMounts(t *testing.T) {
+	t.Parallel()
+
+	const hostPath = "/mnt"
+
+	ctr, err := container.New()
+	if err != nil {
+		t.Fatalf("Should create a container, got: %v", err)
+	}
+
+	err = ctr.SetConfig(&types.ContainerConfig{
+		Mounts: []*types.Mount{
+			{
+				HostPath:          hostPath,
+				ContainerPath:     "/host",
+				Readonly:          true,
+				RecursiveReadOnly: true,
+				Propagation:       0,
+			},
+		},
+		Metadata: &types.ContainerMetadata{
+			Name: "test-container",
+		},
+	}, &types.PodSandboxConfig{
+		Metadata: &types.PodSandboxMetadata{
+			Name: "test-pod",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Should set container configuration, got: %v", err)
+	}
+
+	ctx := t.Context()
+
+	sut := &Server{}
+	ctrInfo := &storage.ContainerInfo{
+		MountLabel: "",
+	}
+
+	_, binds, _, err := sut.addOCIBindMounts(
+		ctx,
+		ctr,
+		ctrInfo,
+		false,
+		false,
+		false,
+		false,
+		true,
+		nil,
+	)
+	if err != nil {
+		t.Errorf("Should not fail to create RRO mount, got: %v", err)
+	}
+
+	hasRRO := false
+
+	for _, m := range binds {
+		if m.Source == hostPath {
+			for _, o := range m.Options {
+				if o == "rro" {
+					hasRRO = true
+				}
+			}
+		}
+	}
+
+	if !hasRRO {
+		t.Errorf("Should add an RRO mount to be created, got: %#v", binds)
+	}
+}
+
+func TestAddOCIBindsRROMountsError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		description         string
+		rroSupport          bool
+		given               *types.Mount
+		want                string
+		requiresSharedMount bool
+	}{
+		{
+			"should fail to add an RRO mount without RRO mounts support",
+			false,
+			&types.Mount{
+				HostPath:          "/mnt",
+				ContainerPath:     "/host",
+				Readonly:          true,
+				RecursiveReadOnly: true,
+				Propagation:       0,
+			},
+			`recursive read-only mount support is not available for hostPath "/mnt"`,
+			false,
+		},
+		{
+			"should fail to add an RRO mount without readonly option",
+			true,
+			&types.Mount{
+				HostPath:          "/mnt",
+				ContainerPath:     "/host",
+				Readonly:          false,
+				RecursiveReadOnly: true,
+				Propagation:       0,
+			},
+			`recursive read-only mount conflicts with read-write mount for hostPath "/mnt"`,
+			false,
+		},
+		{
+			"should fail to add an RRO mount without private propagation",
+			true,
+			&types.Mount{
+				HostPath:          "/mnt",
+				ContainerPath:     "/host",
+				Readonly:          true,
+				RecursiveReadOnly: true,
+				Propagation:       2,
+			},
+			`recursive read-only mount requires private propagation for hostPath "/mnt", got: PROPAGATION_BIDIRECTIONAL`,
+			true,
+		},
+	}
+
+	ctx := t.Context()
+
+	for _, tc := range cases {
+		t.Run(tc.description, func(t *testing.T) {
+			t.Parallel()
+
+			if tc.requiresSharedMount {
+				mountInfos, err := mount.GetMounts()
+				if err != nil {
+					t.Fatalf("Failed to get mount info: %v", err)
+				}
+
+				// Some test environments (e.g. running unit tests inside a container) do not have
+				// shared mounts, so skip in those environments.
+				if err := ensureShared(tc.given.GetHostPath(), mountInfos); err != nil {
+					t.Skipf("skipping: %v", err)
+				}
+			}
+
+			ctr, err := container.New()
+			if err != nil {
+				t.Fatalf("Should create a container, got: %v", err)
+			}
+
+			err = ctr.SetConfig(&types.ContainerConfig{
+				Mounts: []*types.Mount{
+					tc.given,
+				},
+				Metadata: &types.ContainerMetadata{
+					Name: "test-container",
+				},
+			}, &types.PodSandboxConfig{
+				Metadata: &types.PodSandboxMetadata{
+					Name: "test-pod",
+				},
+			})
+			if err != nil {
+				t.Fatalf("Should set container configuration, got: %v", err)
+			}
+
+			sut := &Server{}
+			ctrInfo := &storage.ContainerInfo{
+				MountLabel: "",
+			}
+
+			_, _, _, err = sut.addOCIBindMounts(
+				ctx,
+				ctr,
+				ctrInfo,
+				false,
+				false,
+				false,
+				false,
+				tc.rroSupport,
+				nil,
+			)
+			if err == nil {
+				t.Error("Should fail to add an RRO mount with a specific error")
+			}
+
+			if tc.want != err.Error() {
+				t.Errorf("Should fail to add an RRO mount with error %s, got %v", tc.want, err)
+			}
+		})
 	}
 }
 
@@ -107,11 +340,30 @@ func TestAddOCIBindsCGroupRW(t *testing.T) {
 	}); err != nil {
 		t.Error(err)
 	}
-	_, _, err = addOCIBindMounts(context.Background(), ctr, "", "", nil, false, false, true, false, "")
+
+	sut := &Server{}
+	ctrInfo := &storage.ContainerInfo{
+		MountLabel: "",
+	}
+
+	//nolint:dogsled // test only needs the error return
+	_, _, _, err = sut.addOCIBindMounts(
+		t.Context(),
+		ctr,
+		ctrInfo,
+		false,
+		false,
+		true,
+		false,
+		false,
+		nil,
+	)
 	if err != nil {
 		t.Error(err)
 	}
+
 	var hasCgroupRW bool
+
 	for _, m := range ctr.Spec().Mounts() {
 		if m.Destination == "/sys/fs/cgroup" {
 			for _, o := range m.Options {
@@ -121,6 +373,7 @@ func TestAddOCIBindsCGroupRW(t *testing.T) {
 			}
 		}
 	}
+
 	if !hasCgroupRW {
 		t.Error("Cgroup mount not added with RW.")
 	}
@@ -129,6 +382,7 @@ func TestAddOCIBindsCGroupRW(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
+
 	if err := ctr.SetConfig(&types.ContainerConfig{
 		Metadata: &types.ContainerMetadata{
 			Name: "testctr",
@@ -140,11 +394,25 @@ func TestAddOCIBindsCGroupRW(t *testing.T) {
 	}); err != nil {
 		t.Error(err)
 	}
+
 	var hasCgroupRO bool
-	_, _, err = addOCIBindMounts(context.Background(), ctr, "", "", nil, false, false, false, false, "")
+
+	//nolint:dogsled // test only needs the error return
+	_, _, _, err = sut.addOCIBindMounts(
+		t.Context(),
+		ctr,
+		ctrInfo,
+		false,
+		false,
+		false,
+		false,
+		false,
+		nil,
+	)
 	if err != nil {
 		t.Error(err)
 	}
+
 	for _, m := range ctr.Spec().Mounts() {
 		if m.Destination == "/sys/fs/cgroup" {
 			for _, o := range m.Options {
@@ -154,6 +422,7 @@ func TestAddOCIBindsCGroupRW(t *testing.T) {
 			}
 		}
 	}
+
 	if !hasCgroupRO {
 		t.Error("Cgroup mount not added with RO.")
 	}
@@ -189,14 +458,161 @@ func TestAddOCIBindsErrorWithoutIDMap(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = addOCIBindMounts(context.Background(), ctr, "", "", nil, false, false, false, false, "")
+
+	sut := &Server{}
+	ctrInfo := &storage.ContainerInfo{
+		MountLabel: "",
+	}
+
+	//nolint:dogsled // test only needs the error return
+	_, _, _, err = sut.addOCIBindMounts(
+		t.Context(),
+		ctr,
+		ctrInfo,
+		false,
+		false,
+		false,
+		false,
+		false,
+		nil,
+	)
 	if err == nil {
 		t.Errorf("Should have failed to create id mapped mount with no id map support")
 	}
 
-	_, _, err = addOCIBindMounts(context.Background(), ctr, "", "", nil, false, false, false, true, "")
+	//nolint:dogsled // test only needs the error return
+	_, _, _, err = sut.addOCIBindMounts(
+		t.Context(),
+		ctr,
+		ctrInfo,
+		false,
+		false,
+		false,
+		true,
+		false,
+		nil,
+	)
 	if err != nil {
 		t.Errorf("%v", err)
+	}
+}
+
+func TestSetupContainerUserRejectsNewlineInHOME(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		homeVal string
+		wantErr bool
+	}{
+		{
+			name:    "actual newline byte in HOME",
+			homeVal: "/root\nmalicious::0:0::/:/bin/bash",
+			wantErr: true,
+		},
+		{
+			name:    "carriage return in HOME",
+			homeVal: "/root\r\nmalicious::0:0::/:/bin/bash",
+			wantErr: true,
+		},
+		{
+			name:    "valid HOME value",
+			homeVal: "/home/user",
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			specgen, err := generate.New("linux")
+			if err != nil {
+				t.Fatalf("failed to create spec generator: %v", err)
+			}
+
+			specgen.AddProcessEnv("HOME", tc.homeVal)
+
+			sc := &types.LinuxContainerSecurityContext{
+				RunAsUser: &types.Int64Value{Value: 1000},
+			}
+
+			err = setupContainerUser(t.Context(), &specgen, t.TempDir(), "", t.TempDir(), sc, nil)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error for HOME with newline, got nil")
+				}
+
+				if !strings.Contains(err.Error(), "newline") {
+					t.Errorf("expected newline-related error, got: %v", err)
+				}
+			} else if err != nil {
+				// Valid HOME may still fail on missing rootfs files; that's fine.
+				// Only fail if the error is the newline check.
+				if strings.Contains(err.Error(), "newline") {
+					t.Errorf("unexpected newline error for valid HOME: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestUserSpecifiedSELinuxType(t *testing.T) {
+	newCtr := func(containerType, sandboxType string) container.Container {
+		t.Helper()
+
+		ctr, err := container.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := &types.ContainerConfig{
+			Metadata: &types.ContainerMetadata{Name: "testctr"},
+			Linux: &types.LinuxContainerConfig{
+				SecurityContext: &types.LinuxContainerSecurityContext{
+					SelinuxOptions: &types.SELinuxOption{Type: containerType},
+				},
+			},
+		}
+		sbox := &types.PodSandboxConfig{
+			Metadata: &types.PodSandboxMetadata{Name: "testpod"},
+			Linux: &types.LinuxPodSandboxConfig{
+				SecurityContext: &types.LinuxSandboxSecurityContext{
+					SelinuxOptions: &types.SELinuxOption{Type: sandboxType},
+				},
+			},
+		}
+
+		if err := ctr.SetConfig(cfg, sbox); err != nil {
+			t.Fatal(err)
+		}
+
+		return ctr
+	}
+
+	tests := []struct {
+		name          string
+		containerType string
+		sandboxType   string
+		want          string
+	}{
+		{name: "no type specified"},
+		{name: "container type", containerType: "container_init_t", want: "container_init_t"},
+		{name: "sandbox type", sandboxType: "spc_t", want: "spc_t"},
+		{
+			name: "container type overrides sandbox", containerType: "container_t",
+			sandboxType: "spc_t", want: "container_t",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := userSpecifiedSELinuxType(newCtr(tt.containerType, tt.sandboxType))
+			if got != tt.want {
+				t.Errorf("userSpecifiedSELinuxType() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -217,9 +633,9 @@ func TestIsSubDirectoryOf(t *testing.T) {
 	for _, tt := range tests {
 		testname := tt.base + " " + tt.target
 		t.Run(testname, func(t *testing.T) {
-			ans := isSubDirectoryOf(tt.base, tt.target)
-			if ans != tt.want {
-				t.Errorf("got %v, want %v", ans, tt.want)
+			res := isSubDirectoryOf(tt.base, tt.target)
+			if res != tt.want {
+				t.Errorf("got %v, want %v", res, tt.want)
 			}
 		})
 	}

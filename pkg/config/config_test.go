@@ -1,18 +1,23 @@
 package config_test
 
 import (
+	"context"
+	"crypto/tls"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
-
-	"github.com/containers/storage"
-	crioann "github.com/cri-o/cri-o/pkg/annotations"
-	"github.com/cri-o/cri-o/pkg/config"
-	"github.com/cri-o/cri-o/utils/cmdrunner"
+	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.podman.io/storage"
+
+	"github.com/cri-o/cri-o/internal/config/cgmgr"
+	v2 "github.com/cri-o/cri-o/pkg/annotations/v2"
+	"github.com/cri-o/cri-o/pkg/config"
+	"github.com/cri-o/cri-o/utils/cmdrunner"
 )
 
 const (
@@ -20,23 +25,26 @@ const (
 	invalid           = "invalid"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Config", func() {
 	BeforeEach(beforeEach)
 
 	runtimeValidConfig := func() *config.Config {
-		sut.Runtimes["runc"] = &config.RuntimeHandler{
-			RuntimePath: validFilePath, RuntimeType: config.DefaultRuntimeType,
+		sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{
+			RuntimePath:        validFilePath,
+			RuntimeType:        config.DefaultRuntimeType,
+			ContainerMinMemory: "12MiB",
 		}
 		sut.PinnsPath = validFilePath
 		sut.NamespacesDir = os.TempDir()
 		sut.Conmon = validConmonPath()
 		tmpDir := t.MustTempDir("cni-test")
-		sut.NetworkConfig.PluginDirs = []string{tmpDir}
+		sut.PluginDirs = []string{tmpDir}
 		sut.NetworkDir = os.TempDir()
 		sut.LogDir = "/"
 		sut.Listen = t.MustTempFile("crio.sock")
 		sut.HooksDir = []string{}
+
 		return sut
 	}
 
@@ -72,7 +80,7 @@ var _ = t.Describe("Config", func() {
 
 		It("should fail with invalid log_dir", func() {
 			// Given
-			sut.RootConfig.LogDir = "/dev/null"
+			sut.LogDir = "/dev/null"
 
 			// When
 			err := sut.Validate(true)
@@ -106,9 +114,9 @@ var _ = t.Describe("Config", func() {
 
 		It("should fail with invalid network config", func() {
 			// Given
-			sut.Runtimes["runc"] = &config.RuntimeHandler{RuntimePath: validDirPath}
+			sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{RuntimePath: validDirPath}
 			sut.Conmon = validConmonPath()
-			sut.NetworkConfig.NetworkDir = invalidPath
+			sut.NetworkDir = invalidPath
 
 			// When
 			err := sut.Validate(true)
@@ -186,6 +194,51 @@ var _ = t.Describe("Config", func() {
 			// Then
 			Expect(err).To(HaveOccurred())
 		})
+
+		It("should succeed if stream server TLS enabled", func() {
+			// Given
+			sut = runtimeValidConfig()
+			sut.StreamEnableTLS = true
+			sut.StreamTLSCert = "cert"
+			sut.StreamTLSKey = "key"
+			sut.StreamTLSCA = "ca"
+
+			// When
+			err := sut.APIConfig.Validate(false)
+
+			// Then
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should fail if stream server TLS enabled and cert is empty", func() {
+			// Given
+			sut = runtimeValidConfig()
+			sut.StreamEnableTLS = true
+			sut.StreamTLSCert = ""
+			sut.StreamTLSKey = "key"
+			sut.StreamTLSCA = "ca"
+
+			// When
+			err := sut.APIConfig.Validate(false)
+
+			// Then
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should fail if stream server TLS enabled and key is empty", func() {
+			// Given
+			sut = runtimeValidConfig()
+			sut.StreamEnableTLS = true
+			sut.StreamTLSCert = "cert"
+			sut.StreamTLSKey = ""
+			sut.StreamTLSCA = "ca"
+
+			// When
+			err := sut.APIConfig.Validate(false)
+
+			// Then
+			Expect(err).To(HaveOccurred())
+		})
 	})
 
 	t.Describe("ValidateRuntimeConfig", func() {
@@ -198,12 +251,177 @@ var _ = t.Describe("Config", func() {
 			Expect(err).ToNot(HaveOccurred())
 		})
 
+		It("should succeed with empty additional_artifact_stores", func() {
+			// Given
+			sut.AdditionalArtifactStores = []string{}
+
+			// When
+			err := sut.RuntimeConfig.Validate(nil, false)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should succeed with valid absolute paths in additional_artifact_stores", func() {
+			// Given
+			sut.AdditionalArtifactStores = []string{"/mnt/nfs/store1", "/opt/artifacts"}
+
+			// When
+			err := sut.RuntimeConfig.Validate(nil, false)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should fail with relative path in additional_artifact_stores", func() {
+			// Given
+			sut.AdditionalArtifactStores = []string{"./relative/path"}
+
+			// When
+			err := sut.RuntimeConfig.Validate(nil, false)
+
+			// Then
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("additional_artifact_stores"))
+			Expect(err.Error()).To(ContainSubstring("./relative/path"))
+		})
+
+		It(
+			"should fail with mix of absolute and relative paths in additional_artifact_stores",
+			func() {
+				// Given
+				sut.AdditionalArtifactStores = []string{"/valid/store", "relative/path"}
+
+				// When
+				err := sut.RuntimeConfig.Validate(nil, false)
+
+				// Then
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("relative/path"))
+			},
+		)
+
+		It("should fail with dot-dot traversal in additional_artifact_stores", func() {
+			// Given
+			sut.AdditionalArtifactStores = []string{"/var/lib/../../etc"}
+
+			// When
+			err := sut.RuntimeConfig.Validate(nil, false)
+
+			// Then
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("'..'"))
+		})
+
+		It(
+			"should fail with path containing special characters in additional_artifact_stores",
+			func() {
+				// Given
+				sut.AdditionalArtifactStores = []string{"/var/lib/store@v1"}
+
+				// When
+				err := sut.RuntimeConfig.Validate(nil, false)
+
+				// Then
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("must be absolute"))
+			},
+		)
+
+		It("should fail with consecutive slashes in additional_artifact_stores", func() {
+			// Given
+			sut.AdditionalArtifactStores = []string{"/var//lib/store"}
+
+			// When
+			err := sut.RuntimeConfig.Validate(nil, false)
+
+			// Then
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("consecutive forward slashes"))
+		})
+
+		It("should fail with empty path in additional_artifact_stores", func() {
+			// Given
+			sut.AdditionalArtifactStores = []string{""}
+
+			// When
+			err := sut.RuntimeConfig.Validate(nil, false)
+
+			// Then
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("must not be empty"))
+		})
+
+		It(
+			"should succeed with double dots within a filename in additional_artifact_stores",
+			func() {
+				// Given
+				sut.AdditionalArtifactStores = []string{"/var/lib/foo..bar"}
+
+				// When
+				err := sut.RuntimeConfig.Validate(nil, false)
+
+				// Then
+				Expect(err).ToNot(HaveOccurred())
+			},
+		)
+
+		It("should fail with single dot component in additional_artifact_stores", func() {
+			// Given
+			sut.AdditionalArtifactStores = []string{"/var/./lib"}
+
+			// When
+			err := sut.RuntimeConfig.Validate(nil, false)
+
+			// Then
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("'.'"))
+		})
+
+		It("should fail with trailing slash in additional_artifact_stores", func() {
+			// Given
+			sut.AdditionalArtifactStores = []string{"/var/lib/store/"}
+
+			// When
+			err := sut.RuntimeConfig.Validate(nil, false)
+
+			// Then
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("trailing slash"))
+		})
+
+		It(
+			"should succeed with path at exactly 256 characters in additional_artifact_stores",
+			func() {
+				// Given
+				sut.AdditionalArtifactStores = []string{"/" + strings.Repeat("a", 255)}
+
+				// When
+				err := sut.RuntimeConfig.Validate(nil, false)
+
+				// Then
+				Expect(err).ToNot(HaveOccurred())
+			},
+		)
+
+		It("should fail with path exceeding 256 characters in additional_artifact_stores", func() {
+			// Given
+			sut.AdditionalArtifactStores = []string{"/" + strings.Repeat("a", 256)}
+
+			// When
+			err := sut.RuntimeConfig.Validate(nil, false)
+
+			// Then
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("must not exceed 256 characters"))
+		})
+
 		It("should succeed during runtime", func() {
 			// Given
 			sut = runtimeValidConfig()
 
 			// When
-			err := sut.RuntimeConfig.Validate(nil, true)
+			err := sut.RuntimeConfig.Validate(sut.SystemContext, true)
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -215,7 +433,7 @@ var _ = t.Describe("Config", func() {
 			sut.AdditionalDevices = []string{"/dev/null:/dev/null:rw"}
 
 			// When
-			err := sut.RuntimeConfig.Validate(nil, true)
+			err := sut.RuntimeConfig.Validate(sut.SystemContext, true)
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -223,7 +441,7 @@ var _ = t.Describe("Config", func() {
 
 		It("should succeed with hooks directories", func() {
 			// Given
-			sut.Runtimes["runc"] = &config.RuntimeHandler{
+			sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{
 				RuntimePath: validFilePath,
 				RuntimeType: config.DefaultRuntimeType,
 			}
@@ -233,7 +451,7 @@ var _ = t.Describe("Config", func() {
 			sut.HooksDir = []string{validDirPath, validDirPath, validDirPath}
 
 			// When
-			err := sut.RuntimeConfig.Validate(nil, true)
+			err := sut.RuntimeConfig.Validate(sut.SystemContext, true)
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -242,14 +460,14 @@ var _ = t.Describe("Config", func() {
 
 		It("should sort out invalid hooks directories", func() {
 			// Given
-			sut.Runtimes["runc"] = &config.RuntimeHandler{RuntimePath: validFilePath}
+			sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{RuntimePath: validFilePath}
 			sut.Conmon = validConmonPath()
 			sut.PinnsPath = validFilePath
 			sut.NamespacesDir = os.TempDir()
 			sut.HooksDir = []string{invalidPath, validDirPath, validDirPath}
 
 			// When
-			err := sut.RuntimeConfig.Validate(nil, true)
+			err := sut.RuntimeConfig.Validate(sut.SystemContext, true)
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -258,14 +476,14 @@ var _ = t.Describe("Config", func() {
 
 		It("should create non-existent hooks directory", func() {
 			// Given
-			sut.Runtimes["runc"] = &config.RuntimeHandler{RuntimePath: validFilePath}
+			sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{RuntimePath: validFilePath}
 			sut.Conmon = validConmonPath()
 			sut.PinnsPath = validFilePath
 			sut.NamespacesDir = os.TempDir()
 			sut.HooksDir = []string{filepath.Join(validDirPath, "new")}
 
 			// When
-			err := sut.RuntimeConfig.Validate(nil, true)
+			err := sut.RuntimeConfig.Validate(sut.SystemContext, true)
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -274,7 +492,7 @@ var _ = t.Describe("Config", func() {
 
 		It("should fail on invalid conmon path", func() {
 			// Given
-			sut.Runtimes["runc"] = &config.RuntimeHandler{RuntimePath: validFilePath}
+			sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{RuntimePath: validFilePath}
 			sut.Conmon = invalidPath
 			sut.HooksDir = []string{validDirPath}
 
@@ -295,6 +513,20 @@ var _ = t.Describe("Config", func() {
 			// Then
 			Expect(err).To(HaveOccurred())
 		})
+
+		It(
+			"should inherit default value if invalid runtime container minimum memory limit is set",
+			func() {
+				// Given
+				sut.Runtimes[config.DefaultRuntime].ContainerMinMemory = "123invalid"
+
+				// When
+				err := sut.RuntimeConfig.Validate(nil, false)
+
+				// Then
+				Expect(err).ToNot(HaveOccurred())
+			},
+		)
 
 		It("should fail on wrong invalid device specification", func() {
 			// Given
@@ -364,7 +596,9 @@ var _ = t.Describe("Config", func() {
 
 		It("should fail on non existing runtime binary", func() {
 			// Given
-			sut.Runtimes["runc"] = &config.RuntimeHandler{RuntimePath: "not-existing"}
+			sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{
+				RuntimePath: "not-existing",
+			}
 
 			// When
 			err := sut.RuntimeConfig.Validate(nil, true)
@@ -393,7 +627,7 @@ var _ = t.Describe("Config", func() {
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
-			Expect(sut.DefaultRuntime).To(Equal("runc"))
+			Expect(sut.DefaultRuntime).To(Equal(config.DefaultRuntime))
 		})
 
 		It("should succeed without Runtimes and DefaultRuntime set", func() {
@@ -406,7 +640,7 @@ var _ = t.Describe("Config", func() {
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
-			Expect(sut.DefaultRuntime).To(Equal("runc"))
+			Expect(sut.DefaultRuntime).To(Equal(config.DefaultRuntime))
 		})
 
 		It("should fail on invalid default_sysctls", func() {
@@ -460,7 +694,7 @@ var _ = t.Describe("Config", func() {
 			sut.ConmonCgroup = "wrong"
 
 			// When
-			err := sut.RuntimeConfig.TranslateMonitorFieldsForHandler(handler, true)
+			err := sut.TranslateMonitorFieldsForHandler(handler, true)
 
 			// Then
 			Expect(err).To(HaveOccurred())
@@ -472,15 +706,31 @@ var _ = t.Describe("Config", func() {
 			sut.ConmonCgroup = invalid
 
 			// When
-			err := sut.RuntimeConfig.TranslateMonitorFieldsForHandler(handler, true)
+			err := sut.TranslateMonitorFieldsForHandler(handler, true)
 
 			// Then
 			Expect(err).To(HaveOccurred())
 		})
+		It("should not fail on cgroupfs as cgroup manager and conmon_cgroup as empty", func() {
+			handler := &config.RuntimeHandler{}
+
+			// Given
+			cgm, _ := cgmgr.SetCgroupManager( //nolint:errcheck // test setup
+				"cgroupfs",
+			)
+			runtimeConfig := *config.DefaultRuntimeConfig(cgm)
+
+			// When
+			err := runtimeConfig.TranslateMonitorFieldsForHandler(handler, true)
+
+			// Then
+			Expect(handler.MonitorCgroup).To(Equal(""))
+			Expect(err).ToNot(HaveOccurred())
+		})
 
 		It("should fail on invalid InfraCtrCPUSet", func() {
 			// Given
-			sut.RuntimeConfig.InfraCtrCPUSet = "unparsable"
+			sut.InfraCtrCPUSet = "unparsable"
 
 			// When
 			err := sut.RuntimeConfig.Validate(nil, false)
@@ -495,7 +745,7 @@ var _ = t.Describe("Config", func() {
 			handler := &config.RuntimeHandler{}
 
 			// When
-			err := sut.RuntimeConfig.TranslateMonitorFieldsForHandler(handler, true)
+			err := sut.TranslateMonitorFieldsForHandler(handler, true)
 
 			// Then
 			Expect(err).To(HaveOccurred())
@@ -506,7 +756,7 @@ var _ = t.Describe("Config", func() {
 			handler := &config.RuntimeHandler{}
 
 			// When
-			err := sut.RuntimeConfig.TranslateMonitorFieldsForHandler(handler, true)
+			err := sut.TranslateMonitorFieldsForHandler(handler, true)
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -514,11 +764,11 @@ var _ = t.Describe("Config", func() {
 		})
 		It("should inherit from .ConmonEnv", func() {
 			// Given
-			sut.ConmonEnv = []string{"PATH=/usr/bin"}
+			sut.ConmonEnv = []string{"PATH=/foo/bar/baz"}
 			handler := &config.RuntimeHandler{}
 
 			// When
-			err := sut.RuntimeConfig.TranslateMonitorFieldsForHandler(handler, true)
+			err := sut.TranslateMonitorFieldsForHandler(handler, false)
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -530,7 +780,7 @@ var _ = t.Describe("Config", func() {
 			handler := &config.RuntimeHandler{}
 
 			// When
-			err := sut.RuntimeConfig.TranslateMonitorFieldsForHandler(handler, true)
+			err := sut.TranslateMonitorFieldsForHandler(handler, false)
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -545,7 +795,8 @@ var _ = t.Describe("Config", func() {
 
 			// Given
 			cmdrunner.ResetPrependedCmd()
-			sut.RuntimeConfig.InfraCtrCPUSet = "0"
+
+			sut.InfraCtrCPUSet = "0"
 
 			// When
 			err = sut.RuntimeConfig.Validate(nil, false)
@@ -555,25 +806,29 @@ var _ = t.Describe("Config", func() {
 			Expect(cmdrunner.GetPrependedCmd()).To(Equal(executable))
 		})
 
-		It("should not configure a taskset prefix for cmdrunner for an empty InfraCtrCPUSet", func() {
-			// Given
-			cmdrunner.ResetPrependedCmd()
-			sut.RuntimeConfig.InfraCtrCPUSet = ""
+		It(
+			"should not configure a taskset prefix for cmdrunner for an empty InfraCtrCPUSet",
+			func() {
+				// Given
+				cmdrunner.ResetPrependedCmd()
 
-			// When
-			err := sut.RuntimeConfig.Validate(nil, false)
+				sut.InfraCtrCPUSet = ""
 
-			// Then
-			Expect(err).ToNot(HaveOccurred())
-			Expect(cmdrunner.GetPrependedCmd()).To(Equal(""))
-		})
+				// When
+				err := sut.RuntimeConfig.Validate(nil, false)
+
+				// Then
+				Expect(err).ToNot(HaveOccurred())
+				Expect(cmdrunner.GetPrependedCmd()).To(Equal(""))
+			},
+		)
 	})
 
 	t.Describe("ValidateRuntimes", func() {
 		It("should succeed with default config", func() {
 			// Given
 			// When
-			err := sut.RuntimeConfig.ValidateRuntimes()
+			err := sut.ValidateRuntimes()
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -581,12 +836,12 @@ var _ = t.Describe("Config", func() {
 
 		It("should succeed with empty runtime_type", func() {
 			// Given
-			sut.Runtimes["runc"] = &config.RuntimeHandler{
+			sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{
 				RuntimePath: validFilePath,
 			}
 
 			// When
-			err := sut.RuntimeConfig.ValidateRuntimes()
+			err := sut.ValidateRuntimes()
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -598,7 +853,7 @@ var _ = t.Describe("Config", func() {
 			sut.DefaultRuntime = invalidPath
 
 			// When
-			err := sut.RuntimeConfig.ValidateRuntimes()
+			err := sut.ValidateRuntimes()
 
 			// Then
 			Expect(err).To(HaveOccurred())
@@ -607,10 +862,10 @@ var _ = t.Describe("Config", func() {
 		It("should not fail if non-default executable not in $PATH", func() {
 			// Given
 			sut.Runtimes[invalidPath] = &config.RuntimeHandler{RuntimePath: ""}
-			sut.DefaultRuntime = "runc"
+			sut.DefaultRuntime = config.DefaultRuntime
 
 			// When
-			err := sut.RuntimeConfig.ValidateRuntimes()
+			err := sut.ValidateRuntimes()
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -618,10 +873,10 @@ var _ = t.Describe("Config", func() {
 
 		It("should fail with wrong but set runtime_path", func() {
 			// Given
-			sut.Runtimes["runc"] = &config.RuntimeHandler{RuntimePath: invalidPath}
+			sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{RuntimePath: invalidPath}
 
 			// When
-			err := sut.RuntimeConfig.ValidateRuntimes()
+			err := sut.ValidateRuntimes()
 
 			// Then
 			Expect(err).To(HaveOccurred())
@@ -629,13 +884,13 @@ var _ = t.Describe("Config", func() {
 
 		It("should fail with wrong runtime_type", func() {
 			// Given
-			sut.Runtimes["runc"] = &config.RuntimeHandler{
+			sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{
 				RuntimePath: validFilePath,
 				RuntimeType: "wrong",
 			}
 
 			// When
-			err := sut.RuntimeConfig.ValidateRuntimes()
+			err := sut.ValidateRuntimes()
 
 			// Then
 			Expect(err).To(HaveOccurred())
@@ -643,42 +898,189 @@ var _ = t.Describe("Config", func() {
 
 		It("should fail with wrong allowed_annotation", func() {
 			// Given
-			sut.Runtimes["runc"] = &config.RuntimeHandler{
+			sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{
 				RuntimePath:        validFilePath,
 				AllowedAnnotations: []string{"wrong"},
 			}
 
 			// When
-			err := sut.RuntimeConfig.ValidateRuntimes()
+			err := sut.ValidateRuntimes()
 
 			// Then
 			Expect(err).To(HaveOccurred())
 		})
 		It("should have allowed and disallowed annotation", func() {
 			// Given
-			sut.Runtimes["runc"] = &config.RuntimeHandler{
+			sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{
 				RuntimePath:        validFilePath,
-				AllowedAnnotations: []string{crioann.DevicesAnnotation},
+				AllowedAnnotations: []string{v2.Devices},
 			}
 
 			// When
-			err := sut.RuntimeConfig.ValidateRuntimes()
+			err := sut.ValidateRuntimes()
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
-			Expect(sut.Runtimes["runc"].AllowedAnnotations).To(ContainElement(crioann.DevicesAnnotation))
-			Expect(sut.Runtimes["runc"].DisallowedAnnotations).NotTo(ContainElement(crioann.DevicesAnnotation))
+			Expect(
+				sut.Runtimes[config.DefaultRuntime].AllowedAnnotations,
+			).To(ContainElement(v2.Devices))
+			Expect(
+				sut.Runtimes[config.DefaultRuntime].DisallowedAnnotations,
+			).NotTo(ContainElement(v2.Devices))
 		})
+
+		It("should allow no_sync_log for implicit default runtime", func() {
+			sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{
+				RuntimePath: validFilePath,
+			}
+			sut.Runtimes[config.DefaultRuntime].NoSyncLog = true
+
+			err := sut.Runtimes[config.DefaultRuntime].Validate(config.DefaultRuntime)
+
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sut.Runtimes[config.DefaultRuntime].NoSyncLog).To(BeTrue())
+		})
+
+		It("should allow no_sync_log for the 'oci' runtime", func() {
+			sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{
+				RuntimePath: validFilePath,
+				RuntimeType: "oci",
+			}
+			sut.Runtimes[config.DefaultRuntime].NoSyncLog = true
+
+			err := sut.Runtimes[config.DefaultRuntime].Validate(config.DefaultRuntime)
+
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sut.Runtimes[config.DefaultRuntime].NoSyncLog).To(BeTrue())
+		})
+
+		It("should disallow no_sync_log for the 'vm' runtime", func() {
+			sut.Runtimes["kata"] = &config.RuntimeHandler{
+				RuntimePath: "containerd-shim-kata-qemu-v2", RuntimeType: config.RuntimeTypeVM,
+			}
+			sut.Runtimes["kata"].NoSyncLog = true
+
+			err := sut.Runtimes["kata"].ValidateNoSyncLog()
+
+			Expect(err).To(HaveOccurred())
+			Expect(
+				err,
+			).To(MatchError("no_sync_log is only allowed with runtime type 'oci', runtime type is 'vm'"))
+		})
+
+		It("should disallow stream_websockets for the 'oci' runtime", func() {
+			sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{
+				RuntimePath:      validFilePath,
+				RuntimeType:      config.DefaultRuntimeType,
+				StreamWebsockets: true,
+			}
+
+			err := sut.Runtimes[config.DefaultRuntime].ValidateWebsocketStreaming(
+				config.DefaultRuntime,
+			)
+
+			Expect(err).To(HaveOccurred())
+			Expect(
+				err,
+			).To(MatchError(`only the 'runtime_type = "pod"' supports websocket streaming, not "oci" (runtime "crun")`))
+		})
+
+		It("should allow 'stream_websockets == false' for the 'oci' runtime", func() {
+			sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{
+				RuntimePath:      validFilePath,
+				RuntimeType:      config.DefaultRuntimeType,
+				StreamWebsockets: false,
+			}
+
+			err := sut.Runtimes[config.DefaultRuntime].ValidateWebsocketStreaming(
+				config.DefaultRuntime,
+			)
+
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		conmonrsFakeBinary := func(command string) (name string) {
+			file, err := os.CreateTemp("", "conmonrs-fake-*")
+			Expect(err).NotTo(HaveOccurred())
+
+			err = file.Chmod(0o755)
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = file.WriteString("#!/bin/sh\n" + command)
+			Expect(err).NotTo(HaveOccurred())
+
+			err = file.Close()
+			Expect(err).NotTo(HaveOccurred())
+
+			return file.Name()
+		}
+
+		It("should support streaming websockets if conmon-rs is >= v0.7.0", func() {
+			fileName := conmonrsFakeBinary("echo '{ \"version\": \"0.7.0\" }'")
+			defer os.RemoveAll(fileName)
+
+			sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{
+				RuntimePath:      validFilePath,
+				RuntimeType:      config.RuntimeTypePod,
+				StreamWebsockets: true,
+				MonitorPath:      fileName,
+			}
+
+			err := sut.Runtimes[config.DefaultRuntime].ValidateWebsocketStreaming(
+				config.DefaultRuntime,
+			)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(sut.Runtimes[config.DefaultRuntime].StreamWebsockets).To(BeTrue())
+		})
+
+		It("should disable streaming websockets if conmon-rs is < v0.7.0", func() {
+			fileName := conmonrsFakeBinary("echo 'error: unexpected argument' && exit 1")
+			defer os.RemoveAll(fileName)
+
+			sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{
+				RuntimePath:      validFilePath,
+				RuntimeType:      config.RuntimeTypePod,
+				StreamWebsockets: true,
+				MonitorPath:      fileName,
+			}
+
+			err := sut.Runtimes[config.DefaultRuntime].ValidateWebsocketStreaming(
+				config.DefaultRuntime,
+			)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(sut.Runtimes[config.DefaultRuntime].StreamWebsockets).To(BeFalse())
+		})
+
+		It(
+			"should not disable streaming websockets if conmon-rs is version is not retrievable",
+			func() {
+				fileName := conmonrsFakeBinary("exit 1")
+				defer os.RemoveAll(fileName)
+
+				sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{
+					RuntimePath:      validFilePath,
+					RuntimeType:      config.RuntimeTypePod,
+					StreamWebsockets: true,
+					MonitorPath:      fileName,
+				}
+
+				err := sut.Runtimes[config.DefaultRuntime].ValidateWebsocketStreaming(
+					config.DefaultRuntime,
+				)
+				Expect(err).To(HaveOccurred())
+				Expect(sut.Runtimes[config.DefaultRuntime].StreamWebsockets).To(BeTrue())
+			},
+		)
 	})
 
 	t.Describe("ValidateConmonPath", func() {
 		It("should succeed with valid file in $PATH", func() {
 			// Given
-			sut.RuntimeConfig.Conmon = ""
+			sut.Conmon = ""
 			handler := &config.RuntimeHandler{MonitorPath: ""}
 
 			// When
-			err := sut.RuntimeConfig.ValidateConmonPath(validConmonPath(), handler)
+			err := sut.ValidateConmonPath(validConmonPath(), handler)
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -690,7 +1092,7 @@ var _ = t.Describe("Config", func() {
 			handler := &config.RuntimeHandler{MonitorPath: ""}
 
 			// When
-			err := sut.RuntimeConfig.ValidateConmonPath(invalidPath, handler)
+			err := sut.ValidateConmonPath(invalidPath, handler)
 
 			// Then
 			Expect(err).To(HaveOccurred())
@@ -701,7 +1103,7 @@ var _ = t.Describe("Config", func() {
 			handler := &config.RuntimeHandler{MonitorPath: validConmonPath()}
 
 			// When
-			err := sut.RuntimeConfig.ValidateConmonPath("", handler)
+			err := sut.ValidateConmonPath("", handler)
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -712,7 +1114,7 @@ var _ = t.Describe("Config", func() {
 			handler := &config.RuntimeHandler{MonitorPath: invalidPath}
 
 			// When
-			err := sut.RuntimeConfig.ValidateConmonPath("", handler)
+			err := sut.ValidateConmonPath("", handler)
 
 			// Then
 			Expect(err).To(HaveOccurred())
@@ -731,18 +1133,40 @@ var _ = t.Describe("Config", func() {
 
 		It("should succeed on execution and writing permissions", func() {
 			// Given
-			sut.ImageConfig.SignaturePolicyDir = os.TempDir()
+			signaturePolicyDir := t.MustTempDir("signature-policy-dir-")
+			Expect(os.RemoveAll(signaturePolicyDir)).NotTo(HaveOccurred())
+			sut.SignaturePolicyDir = signaturePolicyDir
+
+			namespacedAuthDir := t.MustTempDir("namespaced-auth-dir-")
+			Expect(os.RemoveAll(namespacedAuthDir)).NotTo(HaveOccurred())
+			sut.NamespacedAuthDir = namespacedAuthDir
 
 			// When
 			err := sut.ImageConfig.Validate(true)
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
+
+			for _, dir := range []string{signaturePolicyDir, namespacedAuthDir} {
+				_, err := os.Stat(dir)
+				Expect(err).NotTo(HaveOccurred())
+			}
 		})
 
 		It("should fail when SignaturePolicyDir is not absolute", func() {
 			// Given
-			sut.ImageConfig.SignaturePolicyDir = "./wrong/path"
+			sut.SignaturePolicyDir = "./wrong/path"
+
+			// When
+			err := sut.ImageConfig.Validate(false)
+
+			// Then
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should fail when NamespacedAuthDir is not absolute", func() {
+			// Given
+			sut.NamespacedAuthDir = "./wrong/path"
 
 			// When
 			err := sut.ImageConfig.Validate(false)
@@ -753,7 +1177,7 @@ var _ = t.Describe("Config", func() {
 
 		It("should fail when PauseImage is invalid", func() {
 			// Given
-			sut.ImageConfig.PauseImage = "//NOT:a valid image reference!"
+			sut.PauseImage = "//NOT:a valid image reference!"
 
 			// When
 			err := sut.ImageConfig.Validate(false)
@@ -766,10 +1190,10 @@ var _ = t.Describe("Config", func() {
 	t.Describe("ImageConfig.ParsePauseImage", func() {
 		It("should succeed with the default value", func() {
 			// Given
-			sut.ImageConfig.PauseImage = config.DefaultPauseImage
+			sut.PauseImage = config.DefaultPauseImage
 
 			// When
-			ref, err := sut.ImageConfig.ParsePauseImage()
+			ref, err := sut.ParsePauseImage()
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -779,14 +1203,16 @@ var _ = t.Describe("Config", func() {
 
 		It("should succeed with a name-only value", func() {
 			// Given
-			sut.ImageConfig.PauseImage = "registry.k8s.io/pause"
+			sut.PauseImage = "registry.k8s.io/pause"
 
 			// When
-			ref, err := sut.ImageConfig.ParsePauseImage()
+			ref, err := sut.ParsePauseImage()
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
-			Expect(ref.StringForOutOfProcessConsumptionOnly()).To(Equal("registry.k8s.io/pause:latest"))
+			Expect(
+				ref.StringForOutOfProcessConsumptionOnly(),
+			).To(Equal("registry.k8s.io/pause:latest"))
 		})
 
 		It("should succeed with a short name", func() {
@@ -794,22 +1220,24 @@ var _ = t.Describe("Config", func() {
 			// name with a registry
 
 			// Given
-			sut.ImageConfig.PauseImage = "short:notlatest"
+			sut.PauseImage = "short:notlatest"
 
 			// When
-			ref, err := sut.ImageConfig.ParsePauseImage()
+			ref, err := sut.ParsePauseImage()
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
-			Expect(ref.StringForOutOfProcessConsumptionOnly()).To(Equal("docker.io/library/short:notlatest"))
+			Expect(
+				ref.StringForOutOfProcessConsumptionOnly(),
+			).To(Equal("docker.io/library/short:notlatest"))
 		})
 
 		It("should fail with an invalid value", func() {
 			// Given
-			sut.ImageConfig.PauseImage = "//THIS is:very!invalid="
+			sut.PauseImage = "//THIS is:very!invalid="
 
 			// When
-			_, err := sut.ImageConfig.ParsePauseImage()
+			_, err := sut.ParsePauseImage()
 
 			// Then
 			Expect(err).To(HaveOccurred())
@@ -837,18 +1265,19 @@ var _ = t.Describe("Config", func() {
 			Expect(err).ToNot(HaveOccurred())
 		})
 
-		It("should create the  NetworkDir", func() {
+		It("should create the NetworkDir", func() {
 			// Given
-			tmpDir := path.Join(os.TempDir(), invalidPath)
-			sut.NetworkConfig.NetworkDir = tmpDir
-			sut.NetworkConfig.PluginDirs = []string{validDirPath}
+			tmpDir := t.MustTempDir("network")
+			Expect(os.RemoveAll(tmpDir)).ToNot(HaveOccurred())
+
+			sut.NetworkDir = tmpDir
+			sut.PluginDirs = []string{validDirPath}
 
 			// When
 			err := sut.NetworkConfig.Validate(true)
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
-			os.RemoveAll(tmpDir)
 		})
 
 		It("should fail on invalid NetworkDir", func() {
@@ -857,9 +1286,11 @@ var _ = t.Describe("Config", func() {
 			file, err := os.Create(tmpfile)
 			Expect(err).ToNot(HaveOccurred())
 			file.Close()
+
 			defer os.Remove(tmpfile)
-			sut.NetworkConfig.NetworkDir = tmpfile
-			sut.NetworkConfig.PluginDirs = []string{}
+
+			sut.NetworkDir = tmpfile
+			sut.PluginDirs = []string{}
 
 			// When
 			err = sut.NetworkConfig.Validate(true)
@@ -870,8 +1301,8 @@ var _ = t.Describe("Config", func() {
 
 		It("should fail on invalid PluginDirs", func() {
 			// Given
-			sut.NetworkConfig.NetworkDir = validDirPath
-			sut.NetworkConfig.PluginDirs = []string{invalidPath}
+			sut.NetworkDir = validDirPath
+			sut.PluginDirs = []string{invalidPath}
 
 			// When
 			err := sut.NetworkConfig.Validate(true)
@@ -882,9 +1313,9 @@ var _ = t.Describe("Config", func() {
 
 		It("should succeed on having PluginDir", func() {
 			// Given
-			sut.NetworkConfig.NetworkDir = validDirPath
-			sut.NetworkConfig.PluginDir = validDirPath
-			sut.NetworkConfig.PluginDirs = []string{}
+			sut.NetworkDir = validDirPath
+			sut.PluginDir = validDirPath
+			sut.PluginDirs = []string{}
 
 			// When
 			err := sut.NetworkConfig.Validate(true)
@@ -895,9 +1326,9 @@ var _ = t.Describe("Config", func() {
 
 		It("should succeed in appending PluginDir to PluginDirs", func() {
 			// Given
-			sut.NetworkConfig.NetworkDir = validDirPath
-			sut.NetworkConfig.PluginDir = validDirPath
-			sut.NetworkConfig.PluginDirs = []string{}
+			sut.NetworkDir = validDirPath
+			sut.PluginDir = validDirPath
+			sut.PluginDirs = []string{}
 
 			// When
 			err := sut.NetworkConfig.Validate(true)
@@ -909,15 +1340,49 @@ var _ = t.Describe("Config", func() {
 
 		It("should fail in validating invalid PluginDir", func() {
 			// Given
-			sut.NetworkConfig.NetworkDir = validDirPath
-			sut.NetworkConfig.PluginDir = invalidPath
-			sut.NetworkConfig.PluginDirs = []string{}
+			sut.NetworkDir = validDirPath
+			sut.PluginDir = invalidPath
+			sut.PluginDirs = []string{}
 
 			// When
 			err := sut.NetworkConfig.Validate(true)
 
 			// Then
 			Expect(err).To(HaveOccurred())
+		})
+
+		It("should fail on negative CNIStatusGracePeriod", func() {
+			// Given
+			sut.CNIStatusGracePeriod = -1 * time.Second
+
+			// When
+			err := sut.NetworkConfig.Validate(false)
+
+			// Then
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("must not be negative"))
+		})
+
+		It("should succeed with zero CNIStatusGracePeriod", func() {
+			// Given
+			sut.CNIStatusGracePeriod = 0
+
+			// When
+			err := sut.NetworkConfig.Validate(false)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should succeed with positive CNIStatusGracePeriod", func() {
+			// Given
+			sut.CNIStatusGracePeriod = 30 * time.Second
+
+			// When
+			err := sut.NetworkConfig.Validate(false)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
 		})
 	})
 
@@ -948,7 +1413,7 @@ var _ = t.Describe("Config", func() {
 
 		It("should fail on invalid LogDir", func() {
 			// Given
-			sut.RootConfig.LogDir = "/dev/null"
+			sut.LogDir = "/dev/null"
 
 			// When
 			err := sut.RootConfig.Validate(true)
@@ -959,7 +1424,7 @@ var _ = t.Describe("Config", func() {
 
 		It("should fail with non absolute log_dir", func() {
 			// Given
-			sut.RootConfig.LogDir = "test"
+			sut.LogDir = "test"
 
 			// When
 			err := sut.Validate(true)
@@ -977,12 +1442,12 @@ var _ = t.Describe("Config", func() {
 			defaultStore, err := storage.GetStore(storage.StoreOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
-			sut.RootConfig.RunRoot = ""
-			sut.RootConfig.Root = ""
-			sut.RootConfig.Storage = ""
-			sut.RootConfig.StorageOptions = make([]string, 0)
+			sut.RunRoot = ""
+			sut.Root = ""
+			sut.Storage = ""
+			sut.StorageOptions = make([]string, 0)
 			// this must be set in case pinns isn't downloaded to the $PATH
-			sut.RuntimeConfig.PinnsPath = alwaysPresentPath
+			sut.PinnsPath = alwaysPresentPath
 
 			// When
 			err = sut.Validate(true)
@@ -1004,10 +1469,10 @@ var _ = t.Describe("Config", func() {
 			defaultStore, err := storage.GetStore(storage.StoreOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
-			sut.RootConfig.RunRoot = alwaysPresentPath
-			sut.RootConfig.Root = alwaysPresentPath
+			sut.RunRoot = alwaysPresentPath
+			sut.Root = alwaysPresentPath
 			// this must be set in case pinns isn't downloaded to the $PATH
-			sut.RuntimeConfig.PinnsPath = alwaysPresentPath
+			sut.PinnsPath = alwaysPresentPath
 
 			// When
 			err = sut.Validate(true)
@@ -1057,13 +1522,13 @@ var _ = t.Describe("Config", func() {
 			).To(Succeed())
 
 			// When
-			err := sut.UpdateFromFile(f)
+			err := sut.UpdateFromFile(context.Background(), f)
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
 			Expect(sut.Storage).To(Equal("overlay2"))
 			Expect(sut.Runtimes).To(HaveLen(1))
-			Expect(sut.Runtimes).To(HaveKey("runc"))
+			Expect(sut.Runtimes).To(HaveKey(config.DefaultRuntime))
 			Expect(sut.PidsLimit).To(BeEquivalentTo(2048))
 		})
 
@@ -1078,6 +1543,7 @@ var _ = t.Describe("Config", func() {
 					]`,
 				), 0),
 			).To(Succeed())
+
 			for _, tc := range []struct {
 				opts   []string
 				expect []string
@@ -1090,7 +1556,7 @@ var _ = t.Describe("Config", func() {
 				// When
 				defaultcfg := defaultConfig()
 				defaultcfg.StorageOptions = tc.opts
-				err := defaultcfg.UpdateFromFile(f)
+				err := defaultcfg.UpdateFromFile(context.Background(), f)
 
 				// Then
 				Expect(err).ToNot(HaveOccurred())
@@ -1120,7 +1586,7 @@ var _ = t.Describe("Config", func() {
 				// When
 				defaultcfg := defaultConfig()
 				defaultcfg.Root = tc.graphRoot
-				err := defaultcfg.UpdateFromFile(f)
+				err := defaultcfg.UpdateFromFile(context.Background(), f)
 
 				// Then
 				Expect(err).ToNot(HaveOccurred())
@@ -1150,7 +1616,7 @@ var _ = t.Describe("Config", func() {
 				// When
 				defaultcfg := defaultConfig()
 				defaultcfg.RunRoot = tc.runRoot
-				err := defaultcfg.UpdateFromFile(f)
+				err := defaultcfg.UpdateFromFile(context.Background(), f)
 
 				// Then
 				Expect(err).ToNot(HaveOccurred())
@@ -1180,7 +1646,7 @@ var _ = t.Describe("Config", func() {
 				// When
 				defaultcfg := defaultConfig()
 				defaultcfg.Storage = tc.storageDriver
-				err := defaultcfg.UpdateFromFile(f)
+				err := defaultcfg.UpdateFromFile(context.Background(), f)
 
 				// Then
 				Expect(err).ToNot(HaveOccurred())
@@ -1192,16 +1658,16 @@ var _ = t.Describe("Config", func() {
 			// Given
 			f := t.MustTempFile("config")
 			Expect(os.WriteFile(f,
-				[]byte("[crio.runtime.runtimes.crun]"), 0),
+				[]byte("[crio.runtime.runtimes.foo]"), 0),
 			).To(Succeed())
 
 			// When
-			err := sut.UpdateFromFile(f)
+			err := sut.UpdateFromFile(context.Background(), f)
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
 			Expect(sut.Runtimes).To(HaveLen(2))
-			Expect(sut.Runtimes).To(HaveKey("crun"))
+			Expect(sut.Runtimes).To(HaveKey("foo"))
 		})
 
 		It("should succeed with additional runtime", func() {
@@ -1209,25 +1675,47 @@ var _ = t.Describe("Config", func() {
 			f := t.MustTempFile("config")
 			Expect(os.WriteFile(f,
 				[]byte(`
-					[crio.runtime.runtimes.runc]
 					[crio.runtime.runtimes.crun]
+					[crio.runtime.runtimes.foo]
 				`), 0),
 			).To(Succeed())
 
 			// When
-			err := sut.UpdateFromFile(f)
+			err := sut.UpdateFromFile(context.Background(), f)
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
 			Expect(sut.Runtimes).To(HaveLen(2))
-			Expect(sut.Runtimes).To(HaveKey("crun"))
-			Expect(sut.Runtimes).To(HaveKey("runc"))
+			Expect(sut.Runtimes).To(HaveKey("foo"))
+			Expect(sut.Runtimes).To(HaveKey(config.DefaultRuntime))
+		})
+
+		It("should succeed with additional runtime with inheritance", func() {
+			// Given
+			f := t.MustTempFile("config")
+			Expect(os.WriteFile(f,
+				[]byte(`
+					[crio.runtime.runtimes.crun]
+					[crio.runtime.runtimes.foo]
+					inherit_default_runtime = true
+				`), 0),
+			).To(Succeed())
+
+			// When
+			err := sut.UpdateFromFile(context.Background(), f)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sut.Runtimes).To(HaveLen(2))
+			Expect(sut.Runtimes).To(HaveKey("foo"))
+			Expect(sut.Runtimes).To(HaveKey(config.DefaultRuntime))
+			Expect(sut.Runtimes["foo"].InheritDefaultRuntime).To(BeTrue())
 		})
 
 		It("should fail when file does not exist", func() {
 			// Given
 			// When
-			err := sut.UpdateFromFile("/invalid/file")
+			err := sut.UpdateFromFile(context.Background(), "/invalid/file")
 
 			// Then
 			Expect(err).To(HaveOccurred())
@@ -1236,10 +1724,28 @@ var _ = t.Describe("Config", func() {
 		It("should fail when toml decode fails", func() {
 			// Given
 			// When
-			err := sut.UpdateFromFile("config.go")
+			err := sut.UpdateFromFile(context.Background(), "config.go")
 
 			// Then
 			Expect(err).To(HaveOccurred())
+		})
+
+		It("should fail with invalid cni_status_grace_period duration string", func() {
+			// Given
+			f := t.MustTempFile("config")
+			Expect(os.WriteFile(f,
+				[]byte(`
+					[crio.network]
+					cni_status_grace_period = "bogus"`,
+				), 0),
+			).To(Succeed())
+
+			// When
+			err := sut.UpdateFromFile(context.Background(), f)
+
+			// Then
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("invalid duration"))
 		})
 	})
 
@@ -1308,7 +1814,7 @@ var _ = t.Describe("Config", func() {
 			)).To(Succeed())
 
 			// When
-			err := sut.UpdateFromPath(configDir)
+			err := sut.UpdateFromPath(context.Background(), configDir)
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -1325,7 +1831,7 @@ var _ = t.Describe("Config", func() {
 			)).To(Succeed())
 
 			// When
-			err := sut.UpdateFromPath(configDir)
+			err := sut.UpdateFromPath(context.Background(), configDir)
 
 			// Then
 			Expect(err).To(HaveOccurred())
@@ -1334,7 +1840,7 @@ var _ = t.Describe("Config", func() {
 		It("should succeed with not existing path", func() {
 			// Given
 			// When
-			err := sut.UpdateFromPath("not-existing")
+			err := sut.UpdateFromPath(context.Background(), "not-existing")
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -1342,71 +1848,527 @@ var _ = t.Describe("Config", func() {
 	})
 
 	t.Describe("ValidateRuntimeVMBinaryPattern", func() {
-		It("should succeed when using RuntimeTypeVM and runtime_path follows the containerd pattern", func() {
+		It(
+			"should succeed when using RuntimeTypeVM and runtime_path follows the containerd pattern",
+			func() {
+				// Given
+				sut.Runtimes["kata"] = &config.RuntimeHandler{
+					RuntimePath: "containerd-shim-kata-qemu-v2", RuntimeType: config.RuntimeTypeVM,
+				}
+
+				// When
+				ok := sut.Runtimes["kata"].ValidateRuntimeVMBinaryPattern()
+
+				// Then
+				Expect(ok).To(BeTrue())
+			},
+		)
+
+		It(
+			"should succeed when using RuntimeTypeVM and runtime_path is a containerd-shim binary with v1 suffix",
+			func() {
+				// Given
+				sut.Runtimes["runsc"] = &config.RuntimeHandler{
+					RuntimePath: "containerd-shim-runsc-v1", RuntimeType: config.RuntimeTypeVM,
+				}
+
+				// When
+				ok := sut.Runtimes["runsc"].ValidateRuntimeVMBinaryPattern()
+
+				// Then
+				Expect(ok).To(BeTrue())
+			},
+		)
+
+		It("should succeed with gVisor runtime handler (v1 shim with config path)", func() {
 			// Given
-			sut.Runtimes["kata"] = &config.RuntimeHandler{
-				RuntimePath: "containerd-shim-kata-qemu-v2", RuntimeType: config.RuntimeTypeVM,
+			sut.Runtimes["runsc"] = &config.RuntimeHandler{
+				RuntimePath:       "containerd-shim-runsc-v1",
+				RuntimeType:       config.RuntimeTypeVM,
+				RuntimeConfigPath: validFilePath,
 			}
 
 			// When
-			ok := sut.Runtimes["kata"].ValidateRuntimeVMBinaryPattern()
+			okPattern := sut.Runtimes["runsc"].ValidateRuntimeVMBinaryPattern()
+			errPath := sut.Runtimes["runsc"].ValidateRuntimeConfigPath("runsc")
 
 			// Then
-			Expect(ok).To(BeTrue())
+			Expect(okPattern).To(BeTrue())
+			Expect(errPath).ToNot(HaveOccurred())
 		})
 
-		It("should fail when using RuntimeTypeVM and runtime_path does not follow the containerd pattern", func() {
-			// Given
-			sut.Runtimes["kata"] = &config.RuntimeHandler{
-				RuntimePath: "kata-runtime", RuntimeType: config.RuntimeTypeVM,
-			}
+		It(
+			"should fail when using RuntimeTypeVM and runtime_path does not follow the containerd pattern",
+			func() {
+				// Given
+				sut.Runtimes["kata"] = &config.RuntimeHandler{
+					RuntimePath: "kata-runtime", RuntimeType: config.RuntimeTypeVM,
+				}
 
-			// When
-			ok := sut.Runtimes["kata"].ValidateRuntimeVMBinaryPattern()
+				// When
+				ok := sut.Runtimes["kata"].ValidateRuntimeVMBinaryPattern()
 
-			// Then
-			Expect(ok).To(BeFalse())
-		})
+				// Then
+				Expect(ok).To(BeFalse())
+			},
+		)
+
+		It(
+			"should fail when the binary name only contains the containerd-shim pattern as a substring",
+			func() {
+				// Given the pattern is anchored, near-miss names that embed
+				// containerd-shim-* as a prefix or suffix must not match.
+				for _, name := range []string{
+					"my-containerd-shim-kata-v2",
+					"containerd-shim-runsc-v1.bak",
+					"containerd-shim",
+				} {
+					sut.Runtimes["runsc"] = &config.RuntimeHandler{
+						RuntimePath: name, RuntimeType: config.RuntimeTypeVM,
+					}
+
+					// When
+					ok := sut.Runtimes["runsc"].ValidateRuntimeVMBinaryPattern()
+
+					// Then
+					Expect(ok).To(BeFalse(), "expected %q to be rejected", name)
+				}
+			},
+		)
 	})
 
 	t.Describe("ValidateRuntimeConfigPath", func() {
 		It("should fail with OCI runtime type when runtime_config_path is used", func() {
 			// Given
-			sut.Runtimes["runc"] = &config.RuntimeHandler{
+			sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{
 				RuntimeConfigPath: validFilePath, RuntimeType: config.DefaultRuntimeType,
 			}
 
 			// When
-			err := sut.Runtimes["runc"].ValidateRuntimeConfigPath("runc")
+			err := sut.Runtimes[config.DefaultRuntime].ValidateRuntimeConfigPath(
+				config.DefaultRuntime,
+			)
 
 			// Then
 			Expect(err).To(HaveOccurred())
 		})
 
-		It("should fail with VM runtime type and runtime_config_path points to an invalid path", func() {
-			// Given
-			sut.Runtimes["kata"] = &config.RuntimeHandler{
-				RuntimeConfigPath: invalidPath, RuntimeType: config.RuntimeTypeVM,
-			}
+		It(
+			"should fail with VM runtime type and runtime_config_path points to an invalid path",
+			func() {
+				// Given
+				sut.Runtimes["kata"] = &config.RuntimeHandler{
+					RuntimeConfigPath: invalidPath, RuntimeType: config.RuntimeTypeVM,
+				}
 
-			// When
-			err := sut.Runtimes["kata"].ValidateRuntimeConfigPath("kata")
+				// When
+				err := sut.Runtimes["kata"].ValidateRuntimeConfigPath("kata")
+
+				// Then
+				Expect(err).To(HaveOccurred())
+			},
+		)
+
+		It(
+			"should succeed with VM runtime type and runtime_config_path points to a valid path",
+			func() {
+				// Given
+				sut.Runtimes["kata"] = &config.RuntimeHandler{
+					RuntimeConfigPath: validFilePath, RuntimeType: config.RuntimeTypeVM,
+				}
+
+				// When
+				err := sut.Runtimes["kata"].ValidateRuntimeConfigPath("kata")
+
+				// Then
+				Expect(err).ToNot(HaveOccurred())
+			},
+		)
+
+		It(
+			"should succeed with empty runtime type and runtime_config_path when inheriting from default",
+			func() {
+				// Given
+				sut.Runtimes["inherited"] = &config.RuntimeHandler{
+					RuntimeConfigPath:     invalidPath,
+					RuntimeType:           "invalid",
+					InheritDefaultRuntime: true,
+				}
+				// When
+				err := sut.ValidateRuntimes()
+
+				// Then
+				Expect(err).ToNot(HaveOccurred())
+				Expect(sut.Runtimes).To(HaveKey(sut.DefaultRuntime))
+				Expect(sut.Runtimes).To(HaveKey("inherited"))
+
+				// When
+				Expect(
+					sut.Runtimes["inherited"].RuntimePath,
+				).To(Equal(sut.Runtimes[sut.DefaultRuntime].RuntimePath))
+			},
+		)
+	})
+
+	t.Describe("RuntimeHandlerFeatures", func() {
+		It("should fail to load runtime features with nothing to load", func() {
+			// Given
+			handler := &config.RuntimeHandler{}
+
+			err := handler.LoadRuntimeFeatures([]byte(``))
 
 			// Then
 			Expect(err).To(HaveOccurred())
 		})
 
-		It("should succeed with VM runtime type and runtime_config_path points to a valid path", func() {
+		It("should fail to load runtime features with an empty document", func() {
 			// Given
-			sut.Runtimes["kata"] = &config.RuntimeHandler{
-				RuntimeConfigPath: validFilePath, RuntimeType: config.RuntimeTypeVM,
-			}
+			handler := &config.RuntimeHandler{}
 
-			// When
-			err := sut.Runtimes["kata"].ValidateRuntimeConfigPath("kata")
+			err := handler.LoadRuntimeFeatures([]byte(`{}`))
+
+			// Then
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should fail to load OCI runtime features when required attributes are missing", func() {
+			// Given
+			handler := &config.RuntimeHandler{}
+
+			err := handler.LoadRuntimeFeatures(
+				[]byte(`
+					{
+					  "ociVersionMin": "1.0.0",
+					  "mountOptions": ["ro"]
+					}
+				`),
+			)
+
+			// Then
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should fail to load OCI runtime features when malformed document is used", func() {
+			// Given
+			handler := &config.RuntimeHandler{}
+
+			err := handler.LoadRuntimeFeatures(
+				[]byte(`
+					{
+					  "ociVersionMin": "1.0.0",
+					  "ociVersionMax": "1.2.0",
+					  "mountOptions": ["ro",]
+					}
+				`),
+			)
+
+			// Then
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should succeed to load OCI runtime features with support for RRO mounts", func() {
+			// Given
+			handler := &config.RuntimeHandler{}
+
+			err := handler.LoadRuntimeFeatures(
+				[]byte(`
+					{
+					  "ociVersionMin": "1.0.0",
+					  "ociVersionMax": "1.2.0",
+					  "mountOptions": ["ro", "rro"]
+					}
+				`),
+			)
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
+
+			// When
+			ok := handler.RuntimeSupportsMountFlag("rro")
+
+			// Then
+			Expect(ok).To(BeTrue())
+		})
+
+		It("should succeed to load OCI runtime features with support for ID-mapping", func() {
+			// Given
+			handler := &config.RuntimeHandler{}
+
+			err := handler.LoadRuntimeFeatures(
+				[]byte(`
+					{
+					  "ociVersionMin": "1.0.0",
+					  "ociVersionMax": "1.2.0",
+					  "linux": {
+					    "mountExtensions": {
+					      "idmap": {
+					        "enabled": true
+					      }
+					    }
+					  }
+					}
+				`),
+			)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+
+			// When
+			ok := handler.RuntimeSupportsIDMap()
+
+			// Then
+			Expect(ok).To(BeTrue())
+		})
+	})
+
+	t.Describe("ValidateContainerCreateTimeout", func() {
+		It("should set default timeout when not configured", func() {
+			// Given
+			handler := &config.RuntimeHandler{}
+
+			// When
+			handler.ValidateContainerCreateTimeout("test-runtime")
+
+			// Then
+			Expect(handler.ContainerCreateTimeout).To(Equal(int64(240)))
+		})
+
+		It("should use configured timeout when valid", func() {
+			// Given
+			handler := &config.RuntimeHandler{
+				ContainerCreateTimeout: 600, // 10 minutes
+			}
+
+			// When
+			handler.ValidateContainerCreateTimeout("test-runtime")
+
+			// Then
+			Expect(handler.ContainerCreateTimeout).To(Equal(int64(600)))
+		})
+
+		It("should set minimum timeout when below minimum", func() {
+			// Given
+			handler := &config.RuntimeHandler{
+				ContainerCreateTimeout: 15, // Below minimum of 30
+			}
+
+			// When
+			handler.ValidateContainerCreateTimeout("test-runtime")
+
+			// Then
+			Expect(handler.ContainerCreateTimeout).To(Equal(int64(30)))
+		})
+
+		It("should allow minimum timeout", func() {
+			// Given
+			handler := &config.RuntimeHandler{
+				ContainerCreateTimeout: 30, // Exactly minimum
+			}
+
+			// When
+			handler.ValidateContainerCreateTimeout("test-runtime")
+
+			// Then
+			Expect(handler.ContainerCreateTimeout).To(Equal(int64(30)))
+		})
+
+		It("should handle zero timeout by setting default", func() {
+			// Given
+			handler := &config.RuntimeHandler{
+				ContainerCreateTimeout: 0,
+			}
+
+			// When
+			handler.ValidateContainerCreateTimeout("test-runtime")
+
+			// Then
+			Expect(handler.ContainerCreateTimeout).To(Equal(int64(240)))
+		})
+
+		It("should handle negative timeout by setting minimum", func() {
+			// Given
+			handler := &config.RuntimeHandler{
+				ContainerCreateTimeout: -10,
+			}
+
+			// When
+			handler.ValidateContainerCreateTimeout("test-runtime")
+
+			// Then
+			Expect(handler.ContainerCreateTimeout).To(Equal(int64(30)))
+		})
+
+		It("should set different timeouts for different runtime handlers", func() {
+			// Given
+			sut.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{
+				RuntimePath:            validFilePath,
+				ContainerCreateTimeout: 300, // 5 minutes for OCI runtime
+			}
+			sut.Runtimes["kata"] = &config.RuntimeHandler{
+				RuntimePath:            validFilePath,
+				ContainerCreateTimeout: 600, // 10 minutes for VM runtime
+			}
+
+			// When
+			err := sut.ValidateRuntimes()
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sut.Runtimes[config.DefaultRuntime].ContainerCreateTimeout).To(Equal(int64(300)))
+			Expect(sut.Runtimes["kata"].ContainerCreateTimeout).To(Equal(int64(600)))
+		})
+	})
+
+	t.Describe("StatsConfig.Validate", func() {
+		It("should succeed with default config", func() {
+			// Given
+			// When
+			err := sut.StatsConfig.Validate()
+
+			// Then
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should succeed with valid config", func() {
+			// Given
+			sut.IncludedPodMetrics = []string{"cpu", "memory"}
+
+			// When
+			err := sut.StatsConfig.Validate()
+
+			// Then
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should succeed with all", func() {
+			// Given
+			sut.IncludedPodMetrics = []string{"all"}
+
+			// When
+			err := sut.StatsConfig.Validate()
+
+			// Then
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should fail with invalid metric", func() {
+			// Given
+			sut.IncludedPodMetrics = []string{"invalid"}
+
+			// When
+			err := sut.StatsConfig.Validate()
+
+			// Then
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should fail when all not in the first element", func() {
+			// Given
+			sut.IncludedPodMetrics = []string{"cpu", "memory", "all"}
+
+			// When
+			err := sut.StatsConfig.Validate()
+
+			// Then
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should fail when all is not the only one element", func() {
+			// Given
+			sut.IncludedPodMetrics = []string{"all", "cpu", "memory"}
+
+			// When
+			err := sut.StatsConfig.Validate()
+
+			// Then
+			Expect(err).To(HaveOccurred())
+		})
+	})
+
+	// TLSMinVersion configuration tests
+	t.Describe("TLSMinVersion", func() {
+		It("should validate VersionTLS12 in APIConfig", func() {
+			sut.TLSMinVersion = "VersionTLS12"
+			Expect(sut.APIConfig.Validate(false)).To(Succeed())
+			Expect(sut.APIConfig.GetTLSMinVersion()).To(Equal(uint16(tls.VersionTLS12)))
+		})
+
+		It("should validate VersionTLS13 in APIConfig", func() {
+			sut.TLSMinVersion = "VersionTLS13"
+			Expect(sut.APIConfig.Validate(false)).To(Succeed())
+			Expect(sut.APIConfig.GetTLSMinVersion()).To(Equal(uint16(tls.VersionTLS13)))
+		})
+
+		It("should fail validation for invalid version string", func() {
+			sut.TLSMinVersion = "InvalidTLSVersion"
+			Expect(sut.APIConfig.Validate(false)).ToNot(Succeed())
+		})
+
+		It("should fail validation for deprecated TLS 1.0", func() {
+			sut.TLSMinVersion = "VersionTLS10"
+			Expect(sut.APIConfig.Validate(false)).ToNot(Succeed())
+		})
+
+		It("should fail validation for deprecated TLS 1.1", func() {
+			sut.TLSMinVersion = "VersionTLS11"
+			Expect(sut.APIConfig.Validate(false)).ToNot(Succeed())
+		})
+
+		It("should default to TLS 1.2 when empty", func() {
+			sut.TLSMinVersion = ""
+			Expect(sut.APIConfig.Validate(false)).To(Succeed())
+			Expect(sut.APIConfig.GetTLSMinVersion()).To(Equal(uint16(tls.VersionTLS12)))
+		})
+	})
+
+	// TLSCipherSuites configuration tests
+	t.Describe("TLSCipherSuites", func() {
+		It("should return nil when no cipher suites configured", func() {
+			sut.TLSCipherSuites = nil
+			Expect(sut.APIConfig.Validate(false)).To(Succeed())
+			Expect(sut.APIConfig.GetTLSCipherSuites()).To(BeNil())
+		})
+
+		It("should parse valid cipher suite names after Validate", func() {
+			sut.TLSMinVersion = "VersionTLS12"
+			sut.TLSCipherSuites = []string{"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"}
+			Expect(sut.APIConfig.Validate(false)).To(Succeed())
+			Expect(sut.APIConfig.GetTLSCipherSuites()).To(HaveLen(1))
+		})
+
+		It("should fail validation for unknown cipher suite", func() {
+			sut.TLSMinVersion = "VersionTLS12"
+			sut.TLSCipherSuites = []string{"UNKNOWN_CIPHER"}
+			Expect(sut.APIConfig.Validate(false)).ToNot(Succeed())
+		})
+	})
+
+	// TLSMinVersion and TLSCipherSuites together tests
+	t.Describe("TLSMinVersion and CipherSuites together", func() {
+		It("should accept both minVersion and cipher suites for TLS 1.2", func() {
+			sut.TLSMinVersion = "VersionTLS12"
+			sut.TLSCipherSuites = []string{
+				"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+				"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+			}
+			Expect(sut.APIConfig.Validate(false)).To(Succeed())
+			Expect(sut.APIConfig.GetTLSCipherSuites()).To(HaveLen(2))
+		})
+
+		It("should ignore cipher suites when TLS 1.3 is set", func() {
+			sut.TLSMinVersion = "VersionTLS13"
+			sut.TLSCipherSuites = []string{"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"}
+			Expect(sut.APIConfig.Validate(false)).To(Succeed())
+			// GetTLSCipherSuites returns nil for TLS 1.3
+			Expect(sut.APIConfig.GetTLSCipherSuites()).To(BeNil())
+		})
+
+		It("should skip cipher suite validation when TLS 1.3 is set", func() {
+			sut.TLSMinVersion = "VersionTLS13"
+			// Invalid cipher suite should not cause validation error with TLS 1.3
+			sut.TLSCipherSuites = []string{"INVALID_CIPHER_SUITE"}
+			Expect(sut.APIConfig.Validate(false)).To(Succeed())
+			Expect(sut.APIConfig.GetTLSCipherSuites()).To(BeNil())
 		})
 	})
 })

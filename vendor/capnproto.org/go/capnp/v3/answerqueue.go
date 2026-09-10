@@ -14,19 +14,40 @@ import (
 //
 // An AnswerQueue can be in one of three states:
 //
-//	1) Queueing.  Incoming method calls will be added to the queue.
-//	2) Draining, entered by calling Fulfill or Reject.  Queued method
-//	   calls will be delivered in sequence, and new incoming method calls
-//	   will block until the AnswerQueue enters the Drained state.
-//	3) Drained, entered once all queued methods have been delivered.
-//	   Incoming methods are passthrough.
+//  1. Queueing.  Incoming method calls will be added to the queue.
+//  2. Draining, entered by calling Fulfill or Reject.  Queued method
+//     calls will be delivered in sequence, and new incoming method calls
+//     will block until the AnswerQueue enters the Drained state.
+//  3. Drained, entered once all queued methods have been delivered.
+//     Incoming methods are passthrough.
 type AnswerQueue struct {
 	method   Method
 	draining chan struct{} // closed while exiting queueing state
 
-	mu    sync.Mutex
-	q     []qent // non-nil while queueing
-	bases []base // set when drain starts. len(bases) >= 1
+	mu sync.Mutex
+	// The entries of the queue. The queue refers to method calls
+	// after an earlier call finishes. But not all entries need to refer
+	// to the same call. Entries can refer to *earlier* entries in
+	// the queue as their "basis". The basis for the initial fulfilled
+	// value is always 0. Take for instance the call chain:
+	//
+	// A() -> a
+	// a.B() -> b
+	// b.C() -> c
+	// a.D() -> d
+	//
+	// Call A is pipelined to B which is pipelined to C. This would
+	// produce a chain of 2 qents with the bases 0 and 1, where 0 is
+	// the fulfilled result of A, and 1 is the result of B. If we add
+	// in a qent to the end for call D pipelined from A, it would have
+	// a basis 0 like with call B.
+	//
+	// This field is set to nil when draining starts.
+	q []qent
+	// Message targets derived from applying a qent. Its length always
+	// at least 1, since the 0 index is used for the initial fulfilled result.
+	// This is set when draining starts.
+	bases []base
 }
 
 // qent is a single entry in an AnswerQueue.
@@ -77,7 +98,10 @@ func (aq *AnswerQueue) Fulfill(ptr Ptr) {
 	for i := range q {
 		ent := &q[i]
 		recv := aq.bases[ent.basis].recv
-		recv(ent.ctx, ent.path, ent.Recv)
+		pcall := recv(ent.ctx, ent.path, ent.Recv)
+		// The basis for our result will always be our index in the queue + 1
+		// since 0 is used for the initial fulfilled result.
+		aq.bases[i+1].recv = pcall.PipelineRecv
 	}
 }
 
@@ -146,7 +170,9 @@ func (qc queueCaller) PipelineRecv(ctx context.Context, transform []PipelineOp, 
 		path:  transform,
 		Recv:  r,
 	})
-	basis := len(qc.aq.q) - 1
+	// The basis for our result will always be our index in the queue + 1
+	// since 0 is used for the initial fulfilled result.
+	basis := len(qc.aq.q)
 	qc.aq.mu.Unlock()
 	return queueCaller{aq: qc.aq, basis: basis}
 }
@@ -154,8 +180,9 @@ func (qc queueCaller) PipelineRecv(ctx context.Context, transform []PipelineOp, 
 func (qc queueCaller) PipelineSend(ctx context.Context, transform []PipelineOp, s Send) (*Answer, ReleaseFunc) {
 	ret := new(StructReturner)
 	r := Recv{
-		Method:   s.Method,
-		Returner: ret,
+		Method:      s.Method,
+		Returner:    ret,
+		ReleaseArgs: func() {},
 	}
 	if s.PlaceArgs != nil {
 		var err error
@@ -167,12 +194,9 @@ func (qc queueCaller) PipelineSend(ctx context.Context, transform []PipelineOp, 
 		if err = s.PlaceArgs(r.Args); err != nil {
 			return ErrorAnswer(s.Method, err), func() {}
 		}
-		r.ReleaseArgs = func() {
-			r.Args.Message().Reset(nil)
-		}
-	} else {
-		r.ReleaseArgs = func() {}
+		r.ReleaseArgs = r.Args.Message().Release
 	}
+
 	pcall := qc.PipelineRecv(ctx, transform, r)
 	return ret.Answer(s.Method, pcall)
 }
@@ -258,7 +282,7 @@ func (sr *StructReturner) ReleaseResults() {
 		return
 	}
 	if err != nil && msg != nil {
-		msg.Reset(nil)
+		msg.Release()
 	}
 }
 
@@ -280,11 +304,11 @@ func (sr *StructReturner) Answer(m Method, pcall PipelineCaller) (*Answer, Relea
 			sr.result = Struct{}
 			sr.mu.Unlock()
 			if msg != nil {
-				msg.Reset(nil)
+				msg.Release()
 			}
 		}
 	}
-	sr.p = NewPromise(m, pcall)
+	sr.p = NewPromise(m, pcall, nil)
 	ans := sr.p.Answer()
 	return ans, func() {
 		<-ans.Done()
@@ -294,7 +318,7 @@ func (sr *StructReturner) Answer(m Method, pcall PipelineCaller) (*Answer, Relea
 		sr.mu.Unlock()
 		sr.p.ReleaseClients()
 		if msg != nil {
-			msg.Reset(nil)
+			msg.Release()
 		}
 	}
 }

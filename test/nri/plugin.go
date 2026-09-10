@@ -16,6 +16,7 @@ type PluginOption func(*plugin)
 
 type plugin struct {
 	sync.Mutex
+
 	namespace string
 	options   []stub.Option
 	stub      stub.Stub
@@ -35,12 +36,14 @@ type plugin struct {
 }
 
 type event struct {
-	kind string
-	pods []*api.PodSandbox
-	ctrs []*api.Container
-	pod  *api.PodSandbox
-	ctr  *api.Container
-	err  error
+	kind      string
+	pods      []*api.PodSandbox
+	ctrs      []*api.Container
+	pod       *api.PodSandbox
+	ctr       *api.Container
+	overhead  *api.LinuxResources
+	resources *api.LinuxResources
+	err       error
 }
 
 func WithStubOptions(options ...stub.Option) PluginOption {
@@ -55,7 +58,9 @@ func WithTestNamespace(namespace string) PluginOption {
 	}
 }
 
-func WithCreateHandler(fn func(*plugin, *api.PodSandbox, *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error)) PluginOption {
+func WithCreateHandler(
+	fn func(*plugin, *api.PodSandbox, *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error),
+) PluginOption {
 	return func(p *plugin) {
 		p.createContainer = fn
 	}
@@ -67,13 +72,17 @@ func WithPostCreateHandler(fn func(*plugin, *api.PodSandbox, *api.Container) err
 	}
 }
 
-func WithStopHandler(fn func(*plugin, *api.PodSandbox, *api.Container) ([]*api.ContainerUpdate, error)) PluginOption {
+func WithStopHandler(
+	fn func(*plugin, *api.PodSandbox, *api.Container) ([]*api.ContainerUpdate, error),
+) PluginOption {
 	return func(p *plugin) {
 		p.stopContainer = fn
 	}
 }
 
-func WithUpdateHandler(fn func(*plugin, *api.PodSandbox, *api.Container) ([]*api.ContainerUpdate, error)) PluginOption {
+func WithUpdateHandler(
+	fn func(*plugin, *api.PodSandbox, *api.Container) ([]*api.ContainerUpdate, error),
+) PluginOption {
 	return func(p *plugin) {
 		p.updateContainer = fn
 	}
@@ -118,6 +127,7 @@ func (p *plugin) Start() error {
 	if err != nil {
 		return fmt.Errorf("failed to create plugin: %w", err)
 	}
+
 	p.stub = s
 
 	go p.pumpEvents()
@@ -133,6 +143,7 @@ func (p *plugin) Start() error {
 func (p *plugin) Stop() {
 	p.stopOnce.Do(func() {
 		close(p.doneC)
+
 		if p.stub != nil {
 			p.stub.Stop()
 			p.stub.Wait()
@@ -147,10 +158,15 @@ func (p *plugin) onClose() {
 
 func (p *plugin) Configure(_ context.Context, cfg, name, version string) (stub.EventMask, error) {
 	p.emitEvent(PluginConfigEvent)
+
 	return 0, nil
 }
 
-func (p *plugin) Synchronize(_ context.Context, pods []*api.PodSandbox, ctrs []*api.Container) ([]*api.ContainerUpdate, error) {
+func (p *plugin) Synchronize(
+	_ context.Context,
+	pods []*api.PodSandbox,
+	ctrs []*api.Container,
+) ([]*api.ContainerUpdate, error) {
 	p.Lock()
 	defer p.Unlock()
 
@@ -182,6 +198,7 @@ func (p *plugin) Synchronize(_ context.Context, pods []*api.PodSandbox, ctrs []*
 			ctrs: nsCtrs,
 		},
 	)
+
 	return nil, nil
 }
 
@@ -201,6 +218,34 @@ func (p *plugin) RunPodSandbox(_ context.Context, pod *api.PodSandbox) error {
 			pod:  pod,
 		},
 	)
+
+	return nil
+}
+
+func (p *plugin) UpdatePodSandbox(
+	_ context.Context,
+	pod *api.PodSandbox,
+	overhead, resources *api.LinuxResources,
+) error {
+	if !p.inNamespace(pod.GetNamespace()) {
+		return nil
+	}
+
+	p.Lock()
+	defer p.Unlock()
+
+	p.pods[pod.GetId()].Linux.PodOverhead = overhead
+	p.pods[pod.GetId()].Linux.PodResources = resources
+
+	p.emitEvent(
+		&event{
+			kind:      "UpdatePodSandbox",
+			pod:       pod,
+			overhead:  overhead,
+			resources: resources,
+		},
+	)
+
 	return nil
 }
 
@@ -215,6 +260,7 @@ func (p *plugin) StopPodSandbox(_ context.Context, pod *api.PodSandbox) error {
 			pod:  pod,
 		},
 	)
+
 	return nil
 }
 
@@ -234,10 +280,15 @@ func (p *plugin) RemovePodSandbox(_ context.Context, pod *api.PodSandbox) error 
 			pod:  pod,
 		},
 	)
+
 	return nil
 }
 
-func (p *plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+func (p *plugin) CreateContainer(
+	_ context.Context,
+	pod *api.PodSandbox,
+	ctr *api.Container,
+) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 	if !p.inNamespace(pod.GetNamespace()) {
 		return nil, nil, nil
 	}
@@ -265,10 +316,15 @@ func (p *plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, ctr *ap
 			err:  err,
 		},
 	)
+
 	return adjust, update, err
 }
 
-func (p *plugin) PostCreateContainer(_ context.Context, pod *api.PodSandbox, ctr *api.Container) error {
+func (p *plugin) PostCreateContainer(
+	_ context.Context,
+	pod *api.PodSandbox,
+	ctr *api.Container,
+) error {
 	if !p.inNamespace(pod.GetNamespace()) {
 		return nil
 	}
@@ -286,6 +342,7 @@ func (p *plugin) PostCreateContainer(_ context.Context, pod *api.PodSandbox, ctr
 			ctr:  ctr,
 		},
 	)
+
 	return err
 }
 
@@ -301,10 +358,15 @@ func (p *plugin) StartContainer(_ context.Context, pod *api.PodSandbox, ctr *api
 			ctr:  ctr,
 		},
 	)
+
 	return nil
 }
 
-func (p *plugin) PostStartContainer(_ context.Context, pod *api.PodSandbox, ctr *api.Container) error {
+func (p *plugin) PostStartContainer(
+	_ context.Context,
+	pod *api.PodSandbox,
+	ctr *api.Container,
+) error {
 	if !p.inNamespace(pod.GetNamespace()) {
 		return nil
 	}
@@ -316,10 +378,16 @@ func (p *plugin) PostStartContainer(_ context.Context, pod *api.PodSandbox, ctr 
 			ctr:  ctr,
 		},
 	)
+
 	return nil
 }
 
-func (p *plugin) UpdateContainer(_ context.Context, pod *api.PodSandbox, ctr *api.Container, _ *api.LinuxResources) ([]*api.ContainerUpdate, error) {
+func (p *plugin) UpdateContainer(
+	_ context.Context,
+	pod *api.PodSandbox,
+	ctr *api.Container,
+	_ *api.LinuxResources,
+) ([]*api.ContainerUpdate, error) {
 	if !p.inNamespace(pod.GetNamespace()) {
 		return nil, nil
 	}
@@ -346,10 +414,15 @@ func (p *plugin) UpdateContainer(_ context.Context, pod *api.PodSandbox, ctr *ap
 			err:  err,
 		},
 	)
+
 	return update, err
 }
 
-func (p *plugin) PostUpdateContainer(_ context.Context, pod *api.PodSandbox, ctr *api.Container) error {
+func (p *plugin) PostUpdateContainer(
+	_ context.Context,
+	pod *api.PodSandbox,
+	ctr *api.Container,
+) error {
 	if !p.inNamespace(pod.GetNamespace()) {
 		return nil
 	}
@@ -361,10 +434,15 @@ func (p *plugin) PostUpdateContainer(_ context.Context, pod *api.PodSandbox, ctr
 			ctr:  ctr,
 		},
 	)
+
 	return nil
 }
 
-func (p *plugin) StopContainer(_ context.Context, pod *api.PodSandbox, ctr *api.Container) ([]*api.ContainerUpdate, error) {
+func (p *plugin) StopContainer(
+	_ context.Context,
+	pod *api.PodSandbox,
+	ctr *api.Container,
+) ([]*api.ContainerUpdate, error) {
 	if !p.inNamespace(pod.GetNamespace()) {
 		return nil, nil
 	}
@@ -386,6 +464,7 @@ func (p *plugin) StopContainer(_ context.Context, pod *api.PodSandbox, ctr *api.
 			err:  err,
 		},
 	)
+
 	return update, err
 }
 
@@ -406,6 +485,7 @@ func (p *plugin) RemoveContainer(_ context.Context, pod *api.PodSandbox, ctr *ap
 			ctr:  ctr,
 		},
 	)
+
 	return nil
 }
 
@@ -414,6 +494,7 @@ func (p *plugin) GetPod(id string) (*api.PodSandbox, bool) {
 	defer p.Unlock()
 
 	pod, ok := p.pods[id]
+
 	return pod, ok
 }
 
@@ -422,6 +503,7 @@ func (p *plugin) GetContainer(id string) (*api.Container, bool) {
 	defer p.Unlock()
 
 	ctr, ok := p.ctrs[id]
+
 	return ctr, ok
 }
 
@@ -431,6 +513,7 @@ func (p *plugin) pumpEvents() {
 		eventR chan *event
 		next   *event
 	)
+
 	for {
 		if next == nil {
 			if len(eventQ) > 0 {
@@ -449,9 +532,11 @@ func (p *plugin) pumpEvents() {
 			if !ok {
 				return
 			}
+
 			eventQ = append(eventQ, e)
 		case eventR <- next:
 			next = nil
+
 			continue
 		}
 	}
@@ -469,16 +554,19 @@ func (p *plugin) PollEvent(timeout time.Duration) *event {
 		}
 	case <-time.After(timeout):
 	}
+
 	return nil
 }
 
 func (p *plugin) WaitEvent(evt *event, timeout time.Duration) *event {
 	deadline := time.After(timeout)
+
 	for {
 		e := p.PollEvent(timeout)
 		if e != nil && (evt == nil || e.Matches(evt)) {
 			return e
 		}
+
 		select {
 		case <-deadline:
 			return nil
@@ -492,12 +580,14 @@ func (p *plugin) VerifyEventStream(events []*event, exact bool, timeout time.Dur
 		deadline = time.After(timeout)
 		i        int
 	)
+
 	for {
 		select {
 		case evt, ok := <-p.eventR:
 			if !ok {
 				return errors.New("receiving plugin event failed")
 			}
+
 			if evt.Matches(events[i]) {
 				i++
 				if i == len(events) {
@@ -514,6 +604,7 @@ func (e *event) String() string {
 	if e == nil {
 		return "<nil event>"
 	}
+
 	var (
 		pod string
 		ctr string
@@ -522,9 +613,11 @@ func (e *event) String() string {
 	if e.pod != nil {
 		pod = "/" + e.pod.GetId()
 	}
+
 	if e.ctr != nil {
 		ctr = ":" + e.ctr.GetId()
 	}
+
 	return "<" + e.kind + pod + ctr + ">"
 }
 
@@ -536,6 +629,7 @@ func (e *event) IsPodEvent(kind, podID string) bool {
 	if !e.IsEvent(kind) {
 		return false
 	}
+
 	return e.pod != nil && e.pod.GetId() == podID
 }
 
@@ -543,9 +637,11 @@ func (e *event) IsContainerEvent(kind, podID, ctrID string) bool {
 	if !e.IsEvent(kind) {
 		return false
 	}
+
 	if podID != "" && e.pod == nil || e.pod.GetId() != podID {
 		return false
 	}
+
 	return e.ctr != nil && e.ctr.GetId() == ctrID
 }
 
@@ -557,15 +653,19 @@ func (e *event) Matches(o *event) bool {
 	if e.kind != o.kind {
 		return false
 	}
+
 	if (e.pod == nil && o.pod != nil) || (e.pod != nil && o.pod == nil) {
 		return false
 	}
+
 	if e.pod != nil && e.pod.GetId() != o.pod.GetId() {
 		return false
 	}
+
 	if (e.ctr == nil && o.ctr != nil) || (e.ctr != nil && o.ctr == nil) {
 		return false
 	}
+
 	if e.ctr != nil && e.ctr.GetId() != o.ctr.GetId() {
 		return false
 	}
@@ -589,6 +689,17 @@ func StopPodEvent(pod string) *event {
 
 func RemovePodEvent(pod string) *event {
 	return PodEvent("RemovePodSandbox", pod)
+}
+
+func UpdatePodEvent(pod string, overhead, resources *api.LinuxResources) *event {
+	return &event{
+		kind: "UpdatePodSandbox",
+		pod: &api.PodSandbox{
+			Id: pod,
+		},
+		overhead:  overhead,
+		resources: resources,
+	}
 }
 
 func PodEvent(kind, pod string) *event {

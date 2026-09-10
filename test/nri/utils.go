@@ -25,6 +25,7 @@ func getAvailableCpuset(t *testing.T) []string {
 	if availableCpuset == nil {
 		availableCpuset = getXxxset(t, "cpuset", onlineCpus)
 	}
+
 	return availableCpuset
 }
 
@@ -33,6 +34,7 @@ func getAvailableMemset(t *testing.T) []string {
 	if availableMemset == nil {
 		availableMemset = getXxxset(t, "memset", normalMems)
 	}
+
 	return availableMemset
 }
 
@@ -48,33 +50,41 @@ func getXxxset(t *testing.T, kind, path string) []string {
 	data, err = os.ReadFile(path)
 	if err != nil {
 		t.Logf("failed to read %s: %v", path, err)
+
 		return nil
 	}
 
-	for _, rng := range strings.Split(strings.TrimSpace(string(data)), ",") {
+	for rng := range strings.SplitSeq(strings.TrimSpace(string(data)), ",") {
 		var (
 			lo int
 			hi = -1
 		)
+
 		loHi := strings.Split(rng, "-")
 		switch len(loHi) {
 		case 2:
 			one, err = strconv.ParseUint(loHi[1], 10, 32)
 			if err != nil {
 				t.Errorf("failed to parse %s range %q: %v", kind, rng, err)
+
 				return nil
 			}
+
 			hi = int(one) + 1
+
 			fallthrough
 		case 1:
 			one, err = strconv.ParseUint(loHi[0], 10, 32)
 			if err != nil {
 				t.Errorf("failed to parse %s range %q: %v", kind, rng, err)
+
 				return nil
 			}
+
 			lo = int(one)
 		default:
 			t.Errorf("invalid %s range %q", kind, rng)
+
 			return nil
 		}
 
@@ -93,14 +103,18 @@ func getXxxset(t *testing.T, kind, path string) []string {
 func getTestNamespace() string {
 	pcs := make([]uintptr, 32)
 	cnt := goruntime.Callers(2, pcs)
+
 	for _, pc := range pcs[:cnt] {
 		name := goruntime.FuncForPC(pc).Name()
 		modAndName := strings.Split(name, ".")
+
 		if cnt := len(modAndName); cnt >= 2 {
 			name = modAndName[cnt-1]
 		}
-		if strings.HasPrefix(name, "Test") {
-			name = strings.TrimPrefix(name, "Test")
+
+		if after, ok := strings.CutPrefix(name, "Test"); ok {
+			name = after
+
 			return name
 		}
 	}
@@ -119,6 +133,7 @@ func waitForFileAndRead(path string) ([]byte, error) {
 		if _, err := os.Stat(path); err == nil {
 			break
 		}
+
 		select {
 		case <-deadline:
 			return nil, fmt.Errorf("waiting for %s timed out", path)
@@ -128,5 +143,6 @@ func waitForFileAndRead(path string) ([]byte, error) {
 	}
 
 	time.Sleep(slack)
+
 	return os.ReadFile(path)
 }

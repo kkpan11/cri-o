@@ -1,6 +1,7 @@
 [files]
 extend-exclude = [
     "go.mod",
+    "go.sum",
     "vendor",
 ]
 ignore-hidden = true
@@ -18,12 +19,20 @@ unicode = true
 ignore-hex = true
 identifier-leading-digits = false
 locale = "en"
-extend-ignore-identifiers-re = []
+extend-ignore-identifiers-re = [
+    "writeable",
+    "facter",
+    "cpy",
+]
 extend-ignore-re = [
     "ClosID",
+    "ClosId",
     "stopp",
-    "WRONLY",
+    "f0ZSIOvlD7vv5lOifRFivd680XjxIATWqwJARJ35QFUl9DiRuhPnDYok8Cj9PT8A",
+    "CONTAINER_INCLUDED_POD_METRCIS",
 ]
 
 [type.sh]
-extend-ignore-re = [ "ba" ]
+extend-ignore-re = [
+    "rpmbuild -ba",
+]

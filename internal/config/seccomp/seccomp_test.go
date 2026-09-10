@@ -4,14 +4,15 @@ import (
 	"context"
 	"os"
 
-	"github.com/cri-o/cri-o/internal/config/seccomp"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/opencontainers/runtime-tools/generate"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/config/seccomp"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Config", func() {
 	var sut *seccomp.Config
 
@@ -41,6 +42,7 @@ var _ = t.Describe("Config", func() {
 					"caps": ["CAP_SYS_ADMIN"]
 				}
 			}`), 0o644)).To(Succeed())
+
 		return file
 	}
 
@@ -56,16 +58,6 @@ var _ = t.Describe("Config", func() {
 	})
 
 	t.Describe("LoadProfile", func() {
-		It("should succeed with default profile", func() {
-			// Given
-
-			// When
-			err := sut.LoadProfile("")
-
-			// Then
-			Expect(err).ToNot(HaveOccurred())
-		})
-
 		It("should succeed with profile", func() {
 			// Given
 			file := writeProfileFile()
@@ -89,11 +81,30 @@ var _ = t.Describe("Config", func() {
 		}
 	})
 
+	t.Describe("LoadDefaultProfile", func() {
+		It("should succeed", func() {
+			// Given
+			// When
+			err := sut.LoadDefaultProfile()
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sut.Profile()).To(Equal(seccomp.DefaultProfile()))
+		})
+	})
+
 	t.Describe("Setup", func() {
-		It("should succeed with custom profile from field", func() {
+		BeforeEach(func() {
+			if sut.IsDisabled() {
+				Skip("tests need to run as root and enabled seccomp")
+			}
+		})
+
+		It("should succeed with runtime default profile from field", func() {
 			// Given
 			generator, err := generate.New("linux")
 			Expect(err).ToNot(HaveOccurred())
+
 			field := &types.SecurityProfile{
 				ProfileType: types.SecurityProfile_RuntimeDefault,
 			}
@@ -109,6 +120,7 @@ var _ = t.Describe("Config", func() {
 				nil,
 				&generator,
 				field,
+				"",
 			)
 
 			// Then
@@ -116,10 +128,11 @@ var _ = t.Describe("Config", func() {
 			Expect(ref).To(Equal(types.SecurityProfile_RuntimeDefault.String()))
 		})
 
-		It("should succeed with custom profile from field", func() {
+		It("should succeed with localhost profile from field", func() {
 			// Given
 			generator, err := generate.New("linux")
 			Expect(err).ToNot(HaveOccurred())
+
 			file := writeProfileFile()
 			field := &types.SecurityProfile{
 				ProfileType:  types.SecurityProfile_Localhost,
@@ -137,6 +150,7 @@ var _ = t.Describe("Config", func() {
 				nil,
 				&generator,
 				field,
+				"",
 			)
 
 			// Then
@@ -148,6 +162,7 @@ var _ = t.Describe("Config", func() {
 			// Given
 			generator, err := generate.New("linux")
 			Expect(err).ToNot(HaveOccurred())
+
 			field := &types.SecurityProfile{
 				ProfileType:  types.SecurityProfile_Localhost,
 				LocalhostRef: "not-existing",
@@ -164,6 +179,7 @@ var _ = t.Describe("Config", func() {
 				nil,
 				&generator,
 				field,
+				"",
 			)
 
 			// Then

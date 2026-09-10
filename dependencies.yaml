@@ -1,111 +1,130 @@
+# Dependency tracking configuration for zeitgeist.
+# It verifies that the versions specified here match across all referenced files.
 dependencies:
   - name: go
-    version: 1.22
+    version: 1.26.4
     refPaths:
-    - path: .github/workflows/verify.yml
-      match: GO_VERSION
-    - path: .github/workflows/integration.yml
-      match: GO_VERSION
-    - path: .github/workflows/test.yml
-      match: GO_VERSION
-    - path: .github/workflows/cron.yml
-      match: GO_VERSION
-    - path: contrib/test/ci/vars.yml
-      match: golang_version
+      - path: nix/derivation.nix
+        match: buildGo126Module
+      - path: go.mod
+        match: go
+      - path: hack/build-rpms.sh
+        match: go
+      - path: hack/Containerfile.dev
+        match: GOVERSION
+
+  # For a new minor (1.x.0) release, move the "development version"
+  # below to the "supported versions" section (by omitting the patch version).
+  # The .github/workflows/tag-reconciler.yml workflow should then automatically
+  # tag the .0 release if it does not already exist. If the .0 release is done,
+  # increase the development version to the next minor (1.x.0).
+  - name: development version
+    version: 1.37.0
+    refPaths:
+      - path: internal/version/version.go
+        match: Version
+      - path: contrib/test/ci/cri-o.spec
+        match: Version
+
+  - name: supported versions
+    version: '{"1.36", "1.35", "1.34"}'
+    refPaths:
+      - path: internal/version/version.go
+        match: ReleaseMinorVersions
 
   - name: golangci-lint
-    version: v1.56.2
+    version: v2.13.2
     refPaths:
-    - path: .github/workflows/verify.yml
-      match: GOLANGCI_LINT_VERSION
-    - path: Makefile
-      match: GOLANGCI_LINT_VERSION
+      - path: .github/workflows/verify.yml
+        match: GOLANGCI_LINT_VERSION
+      - path: Makefile
+        match: GOLANGCI_LINT_VERSION
 
   - name: shellcheck
-    version: v0.9.0
+    version: v0.11.0
     refPaths:
-    - path: Makefile
-      match: SHELLCHECK_VERSION
+      - path: Makefile
+        match: SHELLCHECK_VERSION
 
   - name: cni-plugins
-    version: v1.4.1
+    version: v1.9.1
     refPaths:
-    - path: scripts/versions
-      match: cni-plugins
-    - path: contrib/test/ci/build/plugins.yml
-      match: version
+      - path: scripts/versions
+        match: cni-plugins
+      - path: contrib/test/ci/build/plugins.yml
+        match: version
 
   - name: conmon
-    version: v2.1.10
+    version: v2.2.1
     refPaths:
-    - path: scripts/versions
-      match: conmon
-
-  - name: conmon-rs
-    version: v0.6.1
-    refPaths:
-    - path: scripts/versions
-      match: conmon-rs
+      - path: scripts/versions
+        match: conmon
 
   - name: cri-tools
-    version: v1.29.0
+    version: v1.36.0
     refPaths:
-    - path: scripts/versions
-      match: cri-tools
-    - path: contrib/test/ci/vars.yml
-      match: cri_tools_git_version
+      - path: contrib/test/ci/vars.yml
+        match: cri_tools_git_version
+      - path: scripts/versions
+        match: cri-tools
 
   - name: buildah
-    version: v1.34.0
+    version: v1.45.0
     refPaths:
-    - path: scripts/versions
-      match: buildah
+      - path: scripts/versions
+        match: buildah
+
+  - name: crun
+    version: 1.29.1
+    refPaths:
+      - path: scripts/versions
+        match: crun
+      - path: contrib/test/ci/vars.yml
+        match: crun_git_version
 
   - name: runc
-    version: v1.1.12
+    version: v1.5.1
     refPaths:
-    - path: scripts/versions
-      match: runc
+      - path: scripts/versions
+        match: runc
+      - path: contrib/test/ci/vars.yml
+        match: runc_git_version
 
   - name: bats
-    version: v1.11.0
+    version: v1.14.0
     refPaths:
-    - path: scripts/versions
-      match: bats
-    - path: contrib/test/ci/build/bats.yml
-      match: version
+      - path: scripts/versions
+        match: bats
+      - path: contrib/test/ci/build/bats.yml
+        match: version
 
   - name: zeitgeist
-    version: 0.4.4
+    version: 0.5.4
     refPaths:
       - path: Makefile
         match: ZEITGEIST_VERSION
 
   - name: nix
-    version: 2.19.2
+    version: 2.35.2
     refPaths:
       - path: .github/workflows/test.yml
         match: NIX_VERSION
       - path: .github/workflows/nixpkgs.yml
         match: NIX_VERSION
+      - path: Makefile
+        match: NIX_IMAGE
 
   - name: release-notes
-    version: 0.16.5
+    version: 0.21.1
     refPaths:
       - path: Makefile
         match: RELEASE_NOTES_VERSION
 
   - name: shfmt
-    version: 3.7.0
+    version: 3.14.1
     refPaths:
       - path: Makefile
         match: SHFMT_VERSION
-
-  - name: mockgen
-    version: 1.6.0
-    refPaths:
-      - path: Makefile
-        match: MOCKGEN_VERSION
 
   - name: go-mod-outdated
     version: 0.9.0
@@ -113,8 +132,36 @@ dependencies:
       - path: Makefile
         match: GO_MOD_OUTDATED_VERSION
 
+  - name: govulncheck
+    version: v1.1.4
+    refPaths:
+      - path: hack/govulncheck.sh
+        match: GOVULNCHECK_VERSION
+
   - name: gosec
-    version: 2.18.2
+    version: 2.29.0
     refPaths:
       - path: Makefile
         match: GOSEC_VERSION
+
+  - name: mdtoc
+    version: v1.4.0
+    refPaths:
+      - path: Makefile
+        match: MDTOC_VERSION
+
+  - name: pause
+    version: 3.10.2
+    refPaths:
+      - path: docs/crio.8.md
+        match: "registry.k8s.io/pause:"
+      - path: docs/crio.conf.5.md
+        match: "registry.k8s.io/pause:"
+      - path: internal/storage/image_test.go
+        match: "registry.k8s.io/pause:"
+      - path: pkg/config/config_linux.go
+        match: "registry.k8s.io/pause:"
+      - path: pkg/config/config_unsupported.go
+        match: "registry.k8s.io/pause:"
+      - path: test/common.sh
+        match: "registry.k8s.io/pause:"

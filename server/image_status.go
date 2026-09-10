@@ -7,30 +7,51 @@ import (
 	"strconv"
 	"strings"
 
-	istorage "github.com/containers/image/v5/storage"
-	"github.com/cri-o/cri-o/internal/log"
-	pkgstorage "github.com/cri-o/cri-o/internal/storage"
 	json "github.com/json-iterator/go"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
+	istorage "go.podman.io/image/v5/storage"
+	"go.podman.io/storage"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/log"
+	"github.com/cri-o/cri-o/internal/ociartifact"
+	pkgstorage "github.com/cri-o/cri-o/internal/storage"
 )
 
 // ImageStatus returns the status of the image.
-func (s *Server) ImageStatus(ctx context.Context, req *types.ImageStatusRequest) (*types.ImageStatusResponse, error) {
+func (s *Server) ImageStatus(
+	ctx context.Context,
+	req *types.ImageStatusRequest,
+) (*types.ImageStatusResponse, error) {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
-	img := req.Image
-	if img == nil || img.Image == "" {
+
+	img := req.GetImage()
+	if img == nil || img.GetImage() == "" {
 		return nil, errors.New("no image specified")
 	}
 
-	log.Infof(ctx, "Checking image status: %s", img.Image)
-	status, err := s.storageImageStatus(ctx, *img)
+	log.Infof(ctx, "Checking image status: %s", img.GetImage())
+
+	status, err := s.storageImageStatus(ctx, img)
 	if err != nil {
 		return nil, err
 	}
+
 	if status == nil {
-		log.Infof(ctx, "Image %s not found", img.Image)
+		artifact, err := s.ArtifactStore().Status(ctx, img.GetImage())
+		if err == nil {
+			return &types.ImageStatusResponse{
+				Image: artifact.CRIImage(),
+			}, nil
+		}
+
+		if errors.Is(err, ociartifact.ErrNotFound) {
+			log.Infof(ctx, "Neither image nor artifact %s found", img.GetImage())
+		} else if err != nil {
+			log.Errorf(ctx, "Unable to get artifact: %v", err)
+		}
+
 		return &types.ImageStatusResponse{}, nil
 	}
 
@@ -47,68 +68,110 @@ func (s *Server) ImageStatus(ctx context.Context, req *types.ImageStatusRequest)
 			Id:          status.ID.IDStringForOutOfProcessConsumptionOnly(),
 			RepoTags:    status.RepoTags,
 			RepoDigests: status.RepoDigests,
-			Size_:       size,
+			Size:        size,
 			Spec: &types.ImageSpec{
 				Annotations: status.Annotations,
 			},
+			Pinned: status.Pinned,
 		},
 	}
-	if req.Verbose {
+
+	if req.GetVerbose() {
 		info, err := createImageInfo(status)
 		if err != nil {
 			return nil, fmt.Errorf("creating image info: %w", err)
 		}
+
 		resp.Info = info
 	}
+
 	uid, username := getUserFromImage(status.User)
 	if uid != nil {
 		resp.Image.Uid = &types.Int64Value{Value: *uid}
 	}
+
 	resp.Image.Username = username
-	log.Infof(ctx, "Image status: %v", resp)
+
 	return resp, nil
 }
 
 // storageImageStatus calls ImageStatus for a k8s ImageSpec.
 // Returns (nil, nil) if image was not found.
-func (s *Server) storageImageStatus(ctx context.Context, spec types.ImageSpec) (*pkgstorage.ImageResult, error) {
-	if id := s.StorageImageServer().HeuristicallyTryResolvingStringAsIDPrefix(spec.Image); id != nil {
-		status, err := s.StorageImageServer().ImageStatusByID(s.config.SystemContext, *id)
-		if err != nil {
-			if errors.Is(err, istorage.ErrNoSuchImage) {
-				log.Infof(ctx, "Image %s not found", spec.Image)
-				return nil, nil
-			}
-			log.Warnf(ctx, "Error getting status from %s: %v", spec.Image, err)
-			return nil, err
-		}
-		return status, nil
-	}
-
-	potentialMatches, err := s.StorageImageServer().CandidatesForPotentiallyShortImageName(s.config.SystemContext, spec.Image)
+func (s *Server) storageImageStatus(
+	ctx context.Context,
+	spec *types.ImageSpec,
+) (*pkgstorage.ImageResult, error) {
+	// Use the default store here: Images managed by the runtime are ignored, to
+	// avoid confusion at the Kubernetes level, as we can't report multiple image
+	// satuses depending on the runtime being used.
+	imageService, err := s.StorageImageServer(nil)
 	if err != nil {
 		return nil, err
 	}
+
+	if id := imageService.HeuristicallyTryResolvingStringAsIDPrefix(spec.GetImage()); id != nil {
+		status, err := imageService.ImageStatusByID(s.config.SystemContext, *id)
+		if err != nil {
+			if errors.Is(err, istorage.ErrNoSuchImage) || errors.Is(err, storage.ErrImageUnknown) {
+				log.Infof(ctx, "Image %s not found", spec.GetImage())
+
+				return nil, nil
+			}
+
+			log.Warnf(ctx, "Error getting status from %s: %v", spec.GetImage(), err)
+
+			return nil, err
+		}
+
+		return status, nil
+	}
+
+	potentialMatches, err := imageService.CandidatesForPotentiallyShortImageName(
+		s.config.SystemContext,
+		spec.GetImage(),
+	)
+	if err != nil {
+		if len(spec.GetImage()) >= 3 && isHexString(spec.GetImage()) {
+			log.Debugf(
+				ctx,
+				"CandidatesForPotentiallyShortImageName failed for %q, but input looks like digest/ID: %v",
+				spec.GetImage(),
+				err,
+			)
+
+			return nil, nil
+		}
+
+		return nil, err
+	}
+
 	var lastErr error
+
 	for _, name := range potentialMatches {
-		status, err := s.StorageImageServer().ImageStatusByName(s.config.SystemContext, name)
+		status, err := imageService.ImageStatusByName(s.config.SystemContext, name)
 		if err != nil {
 			if errors.Is(err, istorage.ErrNoSuchImage) {
 				log.Debugf(ctx, "Can't find %s", name)
+
 				continue
 			}
+
 			log.Warnf(ctx, "Error getting status from %s: %v", name, err)
 			lastErr = err
+
 			continue
 		}
+
 		return status, nil
 	}
+
 	if lastErr != nil {
 		return nil, lastErr
 	}
 	// CandidatesForPotentiallyShortImageName returns at least one value if it doesn't fail.
 	// So, if we got here, there was at least one ErrNoSuchImage, and no other errors.
-	log.Infof(ctx, "Image %s not found", spec.Image)
+	log.Infof(ctx, "Image %s not found", spec.GetImage())
+
 	return nil, nil
 }
 
@@ -139,9 +202,22 @@ func createImageInfo(result *pkgstorage.ImageResult) (map[string]string, error) 
 		result.Labels,
 		result.OCIConfig,
 	}
+
 	bytes, err := json.Marshal(info)
 	if err != nil {
 		return nil, fmt.Errorf("marshal data: %v: %w", info, err)
 	}
+
 	return map[string]string{"info": string(bytes)}, nil
+}
+
+// isHexString returns true if the string contains only hexadecimal characters.
+func isHexString(s string) bool {
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+
+	return true
 }

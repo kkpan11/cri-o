@@ -1,10 +1,9 @@
 ---
-
 - name: clone bats source repo
   git:
     repo: "https://github.com/bats-core/bats-core.git"
     dest: "{{ ansible_env.GOPATH }}/src/github.com/bats-core/bats-core"
-    version: v1.11.0
+    version: v1.14.0
 
 - name: install bats
   command: "./install.sh /usr/local"

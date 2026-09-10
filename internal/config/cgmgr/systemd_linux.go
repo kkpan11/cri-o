@@ -1,32 +1,34 @@
 //go:build linux
-// +build linux
 
 package cgmgr
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 
-	"github.com/containers/podman/v4/pkg/rootless"
 	systemdDbus "github.com/coreos/go-systemd/v22/dbus"
-	"github.com/cri-o/cri-o/internal/config/node"
-	"github.com/cri-o/cri-o/internal/dbusmgr"
-	"github.com/cri-o/cri-o/utils"
 	"github.com/godbus/dbus/v5"
-	"github.com/opencontainers/runc/libcontainer/cgroups"
-	"github.com/opencontainers/runc/libcontainer/cgroups/systemd"
+	"github.com/opencontainers/cgroups"
+	"github.com/opencontainers/cgroups/systemd"
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/storage/pkg/unshare"
 	"golang.org/x/sys/unix"
+
+	"github.com/cri-o/cri-o/internal/config/node"
+	"github.com/cri-o/cri-o/internal/dbusmgr"
+	"github.com/cri-o/cri-o/internal/lib/stats"
+	"github.com/cri-o/cri-o/utils"
 )
 
 const defaultSystemdParent = "system.slice"
 
 // SystemdManager is the parent type of SystemdV{1,2}Manager.
-// it defines all of the common functionality between V1 and V2
+// it defines all of the common functionality between V1 and V2.
 type SystemdManager struct {
 	memoryPath, memoryMaxFile string
 	// a map of container ID to cgroup manager for cgroup v1
@@ -42,37 +44,39 @@ type SystemdManager struct {
 func NewSystemdManager() *SystemdManager {
 	systemdMgr := SystemdManager{}
 	if node.CgroupIsV2() {
-		systemdMgr.memoryPath = cgroupMemoryPathV2
+		systemdMgr.memoryPath = CgroupMemoryPathV2
 		systemdMgr.memoryMaxFile = cgroupMemoryMaxFileV2
 	} else {
-		systemdMgr.memoryPath = cgroupMemoryPathV1
+		systemdMgr.memoryPath = CgroupMemoryPathV1
 		systemdMgr.memoryMaxFile = cgroupMemoryMaxFileV1
 		systemdMgr.v1CtrCgMgr = make(map[string]cgroups.Manager)
 		systemdMgr.v1SbCgMgr = make(map[string]cgroups.Manager)
 	}
-	systemdMgr.dbusMgr = dbusmgr.NewDbusConnManager(rootless.IsRootless())
+
+	systemdMgr.dbusMgr = dbusmgr.NewDbusConnManager(unshare.IsRootless())
 
 	return &systemdMgr
 }
 
-// Name returns the name of the cgroup manager (systemd)
+// Name returns the name of the cgroup manager (systemd).
 func (*SystemdManager) Name() string {
 	return systemdCgroupManager
 }
 
-// IsSystemd returns that it is a systemd cgroup manager
+// IsSystemd returns that it is a systemd cgroup manager.
 func (*SystemdManager) IsSystemd() bool {
 	return true
 }
 
 // ContainerCgroupPath takes arguments sandbox parent cgroup and container ID and returns
 // the cgroup path for that containerID. If parentCgroup is empty, it
-// uses the default parent system.slice
+// uses the default parent system.slice.
 func (*SystemdManager) ContainerCgroupPath(sbParent, containerID string) string {
 	parent := defaultSystemdParent
 	if sbParent != "" {
 		parent = sbParent
 	}
+
 	return parent + ":" + CrioPrefix + ":" + containerID
 }
 
@@ -81,10 +85,16 @@ func (m *SystemdManager) ContainerCgroupAbsolutePath(sbParent, containerID strin
 	if sbParent != "" {
 		parent = sbParent
 	}
+
 	logrus.Debugf("Expanding systemd cgroup slice %v", parent)
+
 	cgroup, err := systemd.ExpandSlice(parent)
 	if err != nil {
-		return "", fmt.Errorf("expanding systemd slice to get container %s stats: %w", containerID, err)
+		return "", fmt.Errorf(
+			"expanding systemd slice to get container %s stats: %w",
+			containerID,
+			err,
+		)
 	}
 
 	return filepath.Join(cgroup, containerCgroupPath(containerID)+".scope"), nil
@@ -92,9 +102,12 @@ func (m *SystemdManager) ContainerCgroupAbsolutePath(sbParent, containerID strin
 
 // ContainerCgroupManager takes the cgroup parent, and container ID.
 // It returns the raw libcontainer cgroup manager for that container.
-func (m *SystemdManager) ContainerCgroupManager(sbParent, containerID string) (cgroups.Manager, error) {
+func (m *SystemdManager) ContainerCgroupManager(
+	sbParent, containerID string,
+) (cgroups.Manager, error) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
+
 	if !node.CgroupIsV2() {
 		if cgMgr, ok := m.v1CtrCgMgr[containerID]; ok {
 			return cgMgr, nil
@@ -106,7 +119,7 @@ func (m *SystemdManager) ContainerCgroupManager(sbParent, containerID string) (c
 		return nil, err
 	}
 	// Due to a quirk of libcontainer's cgroup driver, cgroup name = containerID
-	cgMgr, err := libctrManager(containerID, filepath.Dir(cgPath), true)
+	cgMgr, err := LibctrManager(containerID, filepath.Dir(cgPath), true)
 	if err != nil {
 		return nil, err
 	}
@@ -115,29 +128,30 @@ func (m *SystemdManager) ContainerCgroupManager(sbParent, containerID string) (c
 		// cache only cgroup v1 managers
 		m.v1CtrCgMgr[containerID] = cgMgr
 	}
+
 	return cgMgr, nil
 }
 
 // ContainerCgroupStats takes the sandbox parent, and container ID.
 // It creates a new cgroup if one does not already exist.
 // It returns the cgroup stats for that container.
-func (m *SystemdManager) ContainerCgroupStats(sbParent, containerID string) (*CgroupStats, error) {
+func (m *SystemdManager) ContainerCgroupStats(
+	sbParent, containerID string,
+) (*stats.CgroupStats, error) {
 	cgMgr, err := m.ContainerCgroupManager(sbParent, containerID)
 	if err != nil {
 		return nil, err
 	}
-	stats, err := cgMgr.GetStats()
-	if err != nil {
-		return nil, err
-	}
-	return libctrStatsToCgroupStats(stats), nil
+
+	return statsFromLibctrMgr(cgMgr)
 }
 
-// RemoveContainerCgManager removes the cgroup manager for the container
+// RemoveContainerCgManager removes the cgroup manager for the container.
 func (m *SystemdManager) RemoveContainerCgManager(containerID string) {
 	if !node.CgroupIsV2() {
 		m.mutex.Lock()
 		defer m.mutex.Unlock()
+
 		delete(m.v1CtrCgMgr, containerID)
 	}
 }
@@ -146,11 +160,16 @@ func (m *SystemdManager) RemoveContainerCgManager(containerID string) {
 // It attempts to move conmon to the correct cgroup.
 // cgroupPathToClean should always be returned empty. It is part of the interface to return the cgroup path
 // that cri-o is responsible for cleaning up upon the container's death.
-// Systemd takes care of this cleaning for us, so return an empty string
-func (m *SystemdManager) MoveConmonToCgroup(cid, cgroupParent, conmonCgroup string, pid int, resources *rspec.LinuxResources) (cgroupPathToClean string, _ error) {
+// Systemd takes care of this cleaning for us, so return an empty string.
+func (m *SystemdManager) MoveConmonToCgroup(
+	cid, cgroupParent, conmonCgroup string,
+	pid int,
+	resources *rspec.LinuxResources,
+) (cgroupPathToClean string, _ error) {
 	if strings.HasSuffix(conmonCgroup, ".slice") {
 		cgroupParent = conmonCgroup
 	}
+
 	conmonUnitName := fmt.Sprintf("crio-conmon-%s.scope", cid)
 
 	// Set the systemd KillSignal to SIGPIPE that conmon ignores.
@@ -173,24 +192,28 @@ func (m *SystemdManager) MoveConmonToCgroup(cid, cgroupParent, conmonCgroup stri
 				if err != nil {
 					return "", fmt.Errorf("cpuset conversion error: %w", err)
 				}
+
 				props = append(props, systemdDbus.Property{
 					Name:  "AllowedCPUs",
 					Value: dbus.MakeVariant(bits),
 				})
 			}
 		}
+
 		if resources.CPU.Shares != nil {
 			props = append(props, systemdDbus.Property{
 				Name:  "CPUShares",
 				Value: dbus.MakeVariant(resources.CPU.Shares),
 			})
 		}
+
 		if resources.CPU.Quota != nil {
 			props = append(props, systemdDbus.Property{
 				Name:  "CPUQuota",
 				Value: dbus.MakeVariant(resources.CPU.Quota),
 			})
 		}
+
 		if resources.CPU.Period != nil {
 			props = append(props, systemdDbus.Property{
 				Name:  "CPUQuotaPeriodSec",
@@ -200,27 +223,45 @@ func (m *SystemdManager) MoveConmonToCgroup(cid, cgroupParent, conmonCgroup stri
 	}
 
 	logrus.Debugf("Running conmon under slice %s and unitName %s", cgroupParent, conmonUnitName)
-	if err := utils.RunUnderSystemdScope(m.dbusMgr, pid, cgroupParent, conmonUnitName, props...); err != nil {
+
+	if err := utils.RunUnderSystemdScope(
+		m.dbusMgr,
+		pid,
+		cgroupParent,
+		conmonUnitName,
+		props...); err != nil {
 		return "", fmt.Errorf("failed to add conmon to systemd sandbox cgroup: %w", err)
 	}
 	// return empty string as path because cgroup cleanup is done by systemd
 	return "", nil
 }
 
-// SandboxCgroupPath takes the sandbox parent, and sandbox ID. It
-// returns the cgroup parent, cgroup path, and error.
-// It also checks there is enough memory in the given cgroup
-func (m *SystemdManager) SandboxCgroupPath(sbParent, sbID string) (cgParent, cgPath string, _ error) {
+// SandboxCgroupPath takes the sandbox parent, sandbox ID, and container minimum memory.
+// It returns the cgroup parent, cgroup path, and error.
+// It also checks if enough memory is available in the given cgroup.
+func (m *SystemdManager) SandboxCgroupPath(
+	sbParent, sbID string,
+	containerMinMemory int64,
+) (cgParent, cgPath string, _ error) {
 	if sbParent == "" {
 		return "", "", nil
 	}
 
 	if !strings.HasSuffix(filepath.Base(sbParent), ".slice") {
-		return "", "", fmt.Errorf("cri-o configured with systemd cgroup manager, but did not receive slice as parent: %s", sbParent)
+		return "", "", fmt.Errorf(
+			"cri-o configured with systemd cgroup manager, but did not receive slice as parent: %s",
+			sbParent,
+		)
 	}
 
 	cgParent = convertCgroupFsNameToSystemd(sbParent)
-	if err := verifyCgroupHasEnoughMemory(sbParent, m.memoryPath, m.memoryMaxFile); err != nil {
+
+	if err := verifyCgroupHasEnoughMemory(
+		sbParent,
+		m.memoryPath,
+		m.memoryMaxFile,
+		containerMinMemory,
+	); err != nil {
 		return "", "", err
 	}
 
@@ -234,6 +275,7 @@ func (m *SystemdManager) SandboxCgroupPath(sbParent, sbID string) (cgParent, cgP
 func (m *SystemdManager) SandboxCgroupManager(sbParent, sbID string) (cgroups.Manager, error) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
+
 	if !node.CgroupIsV2() {
 		if cgMgr, ok := m.v1SbCgMgr[sbID]; ok {
 			return cgMgr, nil
@@ -244,7 +286,8 @@ func (m *SystemdManager) SandboxCgroupManager(sbParent, sbID string) (cgroups.Ma
 	if err != nil {
 		return nil, err
 	}
-	cgMgr, err := libctrManager(filepath.Base(cgPath), filepath.Dir(cgPath), true)
+
+	cgMgr, err := LibctrManager(filepath.Base(cgPath), filepath.Dir(cgPath), true)
 	if err != nil {
 		return nil, err
 	}
@@ -253,45 +296,46 @@ func (m *SystemdManager) SandboxCgroupManager(sbParent, sbID string) (cgroups.Ma
 		// cache only cgroup v1 managers
 		m.v1SbCgMgr[sbID] = cgMgr
 	}
+
 	return cgMgr, nil
 }
 
 // SandboxCgroupStats takes the sandbox parent, and sandbox ID.
 // It creates a new cgroup for that sandbox if it does not already exist.
 // It returns the cgroup stats for that sandbox.
-func (m *SystemdManager) SandboxCgroupStats(sbParent, sbID string) (*CgroupStats, error) {
+func (m *SystemdManager) SandboxCgroupStats(sbParent, sbID string) (*stats.CgroupStats, error) {
 	cgMgr, err := m.SandboxCgroupManager(sbParent, sbID)
 	if err != nil {
 		return nil, err
 	}
-	stats, err := cgMgr.GetStats()
-	if err != nil {
-		return nil, err
-	}
-	return libctrStatsToCgroupStats(stats), nil
+
+	return statsFromLibctrMgr(cgMgr)
 }
 
-// RemoveSandboxCgroupManager removes cgroup manager for the sandbox
+// RemoveSandboxCgroupManager removes cgroup manager for the sandbox.
 func (m *SystemdManager) RemoveSandboxCgManager(sbID string) {
 	if !node.CgroupIsV2() {
 		m.mutex.Lock()
 		defer m.mutex.Unlock()
+
 		delete(m.v1SbCgMgr, sbID)
 	}
 }
 
-// nolint: unparam // golangci-lint claims cgParent is unused, though it's being used to include documentation inline.
+//nolint:unparam // golangci-lint claims cgParent is unused, though it's being used to include documentation inline.
 func sandboxCgroupAbsolutePath(sbParent string) (cgParent, slicePath string, err error) {
 	cgParent = convertCgroupFsNameToSystemd(sbParent)
+
 	slicePath, err = systemd.ExpandSlice(cgParent)
 	if err != nil {
 		return "", "", fmt.Errorf("expanding systemd slice path for %q: %w", cgParent, err)
 	}
+
 	return cgParent, slicePath, nil
 }
 
 // convertCgroupFsNameToSystemd converts an expanded cgroupfs name to its systemd name.
-// For example, it will convert test.slice/test-a.slice/test-a-b.slice to become test-a-b.slice
+// For example, it will convert test.slice/test-a.slice/test-a-b.slice to become test-a-b.slice.
 func convertCgroupFsNameToSystemd(cgroupfsName string) string {
 	// TODO: see if libcontainer systemd implementation could use something similar, and if so, move
 	// this function up to that library.  At that time, it would most likely do validation specific to systemd
@@ -312,12 +356,15 @@ func (m *SystemdManager) CreateSandboxCgroup(sbParent, containerID string) error
 	// Skip creation in this case.
 	if sbParent == "" {
 		logrus.Infof("Not creating sandbox cgroup: sbParent is empty")
+
 		return nil
 	}
+
 	expandedParent, err := systemd.ExpandSlice(sbParent)
 	if err != nil {
 		return err
 	}
+
 	return createSandboxCgroup(expandedParent, containerCgroupPath(containerID))
 }
 
@@ -327,11 +374,93 @@ func (m *SystemdManager) RemoveSandboxCgroup(sbParent, containerID string) error
 	// Skip creation in this case.
 	if sbParent == "" {
 		logrus.Infof("Not creating sandbox cgroup: sbParent is empty")
+
 		return nil
 	}
+
 	expandedParent, err := systemd.ExpandSlice(sbParent)
 	if err != nil {
 		return err
 	}
+
 	return removeSandboxCgroup(expandedParent, containerCgroupPath(containerID))
+}
+
+// PodAndContainerCgroupManagers returns the libcontainer cgroup managers for both the pod and container cgroups.
+// The sbParent is the sandbox parent cgroup, and containerID is the container's ID.
+func (m *SystemdManager) PodAndContainerCgroupManagers(
+	sbParent, containerID string,
+) (podManager cgroups.Manager, containerManagers []cgroups.Manager, _ error) {
+	containerCgroupFullPath, err := m.ContainerCgroupAbsolutePath(sbParent, containerID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	podCgroupFullPath := filepath.Dir(containerCgroupFullPath)
+
+	podManager, err = LibctrManager(
+		filepath.Base(podCgroupFullPath),
+		filepath.Dir(podCgroupFullPath),
+		true,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// The first argument should be container ID, otherwise it adds duplicate prefix/suffix.
+	containerManager, err := LibctrManager(containerID, filepath.Dir(containerCgroupFullPath), true)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	containerManagers = []cgroups.Manager{containerManager}
+
+	// crun actually does the cgroup configuration in a child of the cgroup CRI-O expects to be the container's
+	extraManager, err := crunContainerCgroupManager(containerCgroupFullPath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if extraManager != nil {
+		containerManagers = append(containerManagers, extraManager)
+	}
+
+	return podManager, containerManagers, nil
+}
+
+// ExecCgroupManager returns the cgroup manager for the exec cgroup used to place exec processes.
+// For systemd, the cgroupPath is in the format "slice:prefix:containerID".
+// This is only supported on cgroup v2.
+func (m *SystemdManager) ExecCgroupManager(cgroupPath string) (cgroups.Manager, error) {
+	if cgroupPath == "" {
+		return nil, errors.New("container cgroup path is empty")
+	}
+
+	if !node.CgroupIsV2() {
+		return nil, errors.New("exec cgroup with CgroupFD is only supported on cgroup v2")
+	}
+
+	// Parse systemd format: slice:prefix:containerID
+	parts := strings.Split(cgroupPath, ":")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf(
+			"invalid systemd cgroup path format: %s (expected slice:prefix:containerID)",
+			cgroupPath,
+		)
+	}
+
+	slice := parts[0]
+	prefix := parts[1]
+	containerID := parts[2]
+
+	expandedSlice, err := systemd.ExpandSlice(slice)
+	if err != nil {
+		return nil, fmt.Errorf("failed to expand systemd slice %q: %w", slice, err)
+	}
+
+	// The container cgroup is a scope under the expanded slice
+	// Format: <expanded-slice>/<prefix>-<containerID>.scope
+	containerCgroupAbsPath := filepath.Join(expandedSlice, prefix+"-"+containerID+".scope")
+
+	return execCgroupManager(containerCgroupAbsPath)
 }

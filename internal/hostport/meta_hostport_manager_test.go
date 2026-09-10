@@ -1,361 +1,274 @@
 package hostport
 
 import (
-	"bytes"
-	"net"
-	"strings"
-	"testing"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	v1 "k8s.io/api/core/v1"
+	utilnet "k8s.io/utils/net"
+	"sigs.k8s.io/knftables"
 
 	utiliptables "github.com/cri-o/cri-o/internal/iptables"
-	"github.com/stretchr/testify/assert"
-	v1 "k8s.io/api/core/v1"
 )
 
-func TestMetaHostportManager(t *testing.T) {
-	// ipv4
-	iptables := newFakeIPTables()
-	iptables.protocol = utiliptables.ProtocolIPv4
-	portOpener := newFakeSocketManager()
-	// ipv6
-	ip6tables := newFakeIPTables()
-	ip6tables.protocol = utiliptables.ProtocolIPv6
-	port6Opener := newFakeSocketManager()
-
-	manager := metaHostportManager{
-		ipv4HostportManager: &hostportManager{
-			hostPortMap: make(map[hostport]closeable),
-			iptables:    iptables,
-			portOpener:  portOpener.openFakeSocket,
-		},
-		ipv6HostportManager: &hostportManager{
-			hostPortMap: make(map[hostport]closeable),
-			iptables:    ip6tables,
-			portOpener:  port6Opener.openFakeSocket,
-		},
+var _ = t.Describe("MetaHostportManager", func() {
+	if len(testCasesV4) < len(testCasesV6) {
+		panic("internal error; expected more IPv4 than IPv6 test cases")
 	}
 
-	testCases := []struct {
-		mapping     *PodPortMapping
-		expectError bool
-	}{
-		{
-			mapping: &PodPortMapping{
-				Name:        "pod1",
-				Namespace:   "ns1",
-				IP:          net.ParseIP("192.168.2.7"),
-				HostNetwork: false,
-				PortMappings: []*PortMapping{
+	metaTestCases := make([]testCase, 0, len(testCasesV4)+len(testCasesV6))
+	for i := range testCasesV4 {
+		metaTestCases = append(metaTestCases, testCasesV4[i])
+		if i < len(testCasesV6) {
+			metaTestCases = append(metaTestCases, testCasesV6[i])
+		}
+	}
+
+	It("should work when only iptables is available", func() {
+		iptables := newFakeIPTables()
+		iptables.protocol = utiliptables.ProtocolIPv4
+		ip6tables := newFakeIPTables()
+		ip6tables.protocol = utiliptables.ProtocolIPv6
+
+		manager := newMetaHostportManagerInternal(
+			&hostportManagerIPTables{iptables: iptables},
+			&hostportManagerIPTables{iptables: ip6tables},
+			nil,
+			nil,
+		)
+
+		// Add Hostports
+		for _, tc := range metaTestCases {
+			err := manager.Add(tc.id, tc.name, tc.podIP, tc.portMappings)
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		// Check Iptables-save result after adding hostports
+		checkIPTablesRules(iptables, expectedIPTablesRulesV4)
+		checkIPTablesRules(ip6tables, expectedIPTablesRulesV6)
+
+		// Remove all added hostports
+		for _, tc := range metaTestCases {
+			err := manager.Remove(tc.id, tc.portMappings)
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		// Check Iptables-save result after deleting hostports
+		checkIPTablesRules(iptables, nil)
+		checkIPTablesRules(ip6tables, nil)
+	})
+
+	It("should work when only nftables is available", func() {
+		nft4 := knftables.NewFake(knftables.IPv4Family, hostPortsTable)
+		nft6 := knftables.NewFake(knftables.IPv6Family, hostPortsTable)
+
+		manager := newMetaHostportManagerInternal(
+			nil,
+			nil,
+			&hostportManagerNFTables{nft: nft4, family: knftables.IPv4Family},
+			&hostportManagerNFTables{nft: nft6, family: knftables.IPv6Family},
+		)
+
+		// Add Hostports
+		for _, tc := range metaTestCases {
+			err := manager.Add(tc.id, tc.name, tc.podIP, tc.portMappings)
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		checkNFTablesElements(nft4, expectedNFTablesElementsV4)
+		checkNFTablesElements(nft6, expectedNFTablesElementsV6)
+
+		// Remove all added hostports
+		for _, tc := range metaTestCases {
+			err := manager.Remove(tc.id, tc.portMappings)
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		checkNFTablesElements(nft4, nil)
+		checkNFTablesElements(nft6, nil)
+	})
+
+	It("should work when both iptables and nftables are available", func() {
+		iptables := newFakeIPTables()
+		iptables.protocol = utiliptables.ProtocolIPv4
+		ip6tables := newFakeIPTables()
+		ip6tables.protocol = utiliptables.ProtocolIPv6
+		nft4 := knftables.NewFake(knftables.IPv4Family, hostPortsTable)
+		nft6 := knftables.NewFake(knftables.IPv6Family, hostPortsTable)
+
+		manager := newMetaHostportManagerInternal(
+			&hostportManagerIPTables{iptables: iptables},
+			&hostportManagerIPTables{iptables: ip6tables},
+			&hostportManagerNFTables{nft: nft4, family: knftables.IPv4Family},
+			&hostportManagerNFTables{nft: nft6, family: knftables.IPv6Family},
+		)
+
+		// Add Hostports
+		for _, tc := range metaTestCases {
+			err := manager.Add(tc.id, tc.name, tc.podIP, tc.portMappings)
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		// Should not have used iptables since nftables is present
+		checkIPTablesRules(iptables, nil)
+		checkIPTablesRules(ip6tables, nil)
+
+		checkNFTablesElements(nft4, expectedNFTablesElementsV4)
+		checkNFTablesElements(nft6, expectedNFTablesElementsV6)
+
+		// Remove all added hostports
+		for _, tc := range metaTestCases {
+			err := manager.Remove(tc.id, tc.portMappings)
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		checkIPTablesRules(iptables, nil)
+		checkIPTablesRules(ip6tables, nil)
+		checkNFTablesElements(nft4, nil)
+		checkNFTablesElements(nft6, nil)
+	})
+
+	It("should clean up iptables when using nftables", func() {
+		legacyIPTablesTestCases := []testCase{
+			{
+				id:    "8062968aa5c4d61f8963c53918e1edce3c86e9e7f63eddf941db339630ea985a",
+				name:  "pod0_ns0",
+				podIP: "10.1.1.1",
+				portMappings: []*PortMapping{
 					{
-						HostPort:      8080,
+						HostPort:      9090,
 						ContainerPort: 80,
 						Protocol:      v1.ProtocolTCP,
 					},
-					{
-						HostPort:      8081,
-						ContainerPort: 81,
-						Protocol:      v1.ProtocolUDP,
-					},
-					{
-						HostPort:      8083,
-						ContainerPort: 83,
-						Protocol:      v1.ProtocolSCTP,
-					},
-					{
-						HostPort:      8084,
-						ContainerPort: 84,
-						Protocol:      v1.ProtocolTCP,
-						HostIP:        "127.0.0.1",
-					},
 				},
 			},
-			expectError: false,
-		},
-		// same pod and portmappings,
-		// but different IP must work
-		{
-			mapping: &PodPortMapping{
-				Name:        "pod1",
-				Namespace:   "ns1",
-				IP:          net.ParseIP("2001:beef::3"),
-				HostNetwork: false,
-				PortMappings: []*PortMapping{
+			{
+				id:    "8062968aa5c4d61f8963c53918e1edce3c86e9e7f63eddf941db339630ea985a",
+				name:  "pod0_ns0",
+				podIP: "2001:beef::1",
+				portMappings: []*PortMapping{
 					{
-						HostPort:      8080,
+						HostPort:      9090,
 						ContainerPort: 80,
 						Protocol:      v1.ProtocolTCP,
 					},
-					{
-						HostPort:      8081,
-						ContainerPort: 81,
-						Protocol:      v1.ProtocolUDP,
-					},
-					{
-						HostPort:      8083,
-						ContainerPort: 83,
-						Protocol:      v1.ProtocolSCTP,
-					},
-					{
-						HostPort:      8084,
-						ContainerPort: 84,
-						Protocol:      v1.ProtocolTCP,
-						HostIP:        "127.0.0.1",
-					},
 				},
 			},
-			expectError: false,
-		},
-		{
-			mapping: &PodPortMapping{
-				Name:        "pod3",
-				Namespace:   "ns1",
-				IP:          net.ParseIP("2001:beef::4"),
-				HostNetwork: false,
-				PortMappings: []*PortMapping{
-					{
-						HostPort:      8443,
-						ContainerPort: 443,
-						Protocol:      v1.ProtocolTCP,
-					},
-				},
-			},
-			expectError: false,
-		},
-		// port already taken by other pod
-		// but using another IP family
-		{
-			mapping: &PodPortMapping{
-				Name:        "pod4",
-				Namespace:   "ns2",
-				IP:          net.ParseIP("192.168.2.2"),
-				HostNetwork: false,
-				PortMappings: []*PortMapping{
-					{
-						HostPort:      8443,
-						ContainerPort: 443,
-						Protocol:      v1.ProtocolTCP,
-					},
-				},
-			},
-			expectError: false,
-		},
-		// port already taken by other pod
-		// but using same IP family must fail
-		{
-			mapping: &PodPortMapping{
-				Name:        "pod5",
-				Namespace:   "ns3",
-				IP:          net.ParseIP("192.168.12.12"),
-				HostNetwork: false,
-				PortMappings: []*PortMapping{
-					{
-						HostPort:      8443,
-						ContainerPort: 443,
-						Protocol:      v1.ProtocolTCP,
-					},
-				},
-			},
-			expectError: true,
-		},
-	}
-
-	// Add Hostports
-	for _, tc := range testCases {
-		err := manager.Add("id", tc.mapping, "")
-		if tc.expectError {
-			assert.Error(t, err)
-			continue
 		}
-		assert.NoError(t, err)
-	}
-
-	// Check port opened IPv4
-	expectedPorts := []hostport{{IPv4, "", 8080, "tcp"}, {IPv4, "", 8081, "udp"}, {IPv4, "127.0.0.1", 8084, "tcp"}, {IPv4, "", 8443, "tcp"}}
-	openedPorts := make(map[hostport]bool)
-	for hp, port := range portOpener.mem {
-		if !port.closed {
-			openedPorts[hp] = true
+		legacyIPTablesExpectedRulesV4 := []string{
+			"-A KUBE-HP-YJ3XFQDZHZ3NAUN2 -m comment --comment \"pod0_ns0 hostport 9090\" -m tcp -p tcp -j DNAT --to-destination 10.1.1.1:80",
+			"-A CRIO-MASQ-YJ3XFQDZHZ3NAUN2 -m comment --comment \"pod0_ns0 hostport 9090\" -m conntrack --ctorigdstport 9090 -m tcp -p tcp --dport 80 -s 10.1.1.1/32 -d 10.1.1.1/32 -j MASQUERADE",
+			"-A KUBE-HOSTPORTS -m comment --comment \"pod0_ns0 hostport 9090\" -m tcp -p tcp --dport 9090 -j KUBE-HP-YJ3XFQDZHZ3NAUN2",
+			"-A CRIO-HOSTPORTS-MASQ -m comment --comment \"pod0_ns0 hostport 9090\" -j CRIO-MASQ-YJ3XFQDZHZ3NAUN2",
 		}
-	}
-	assert.EqualValues(t, len(openedPorts), len(expectedPorts))
-	for _, hp := range expectedPorts {
-		_, ok := openedPorts[hp]
-		assert.EqualValues(t, true, ok)
-	}
-	// Check port opened IPv6
-	expectedv6Ports := []hostport{{IPv6, "", 8080, "tcp"}, {IPv6, "", 8081, "udp"}, {IPv6, "", 8443, "tcp"}}
-	openedv6Ports := make(map[hostport]bool)
-	for hp, port := range port6Opener.mem {
-		if !port.closed {
-			openedv6Ports[hp] = true
+		legacyIPTablesExpectedRulesV6 := []string{
+			"-A KUBE-HP-YJ3XFQDZHZ3NAUN2 -m comment --comment \"pod0_ns0 hostport 9090\" -m tcp -p tcp -j DNAT --to-destination [2001:beef::1]:80",
+			"-A CRIO-MASQ-YJ3XFQDZHZ3NAUN2 -m comment --comment \"pod0_ns0 hostport 9090\" -m conntrack --ctorigdstport 9090 -m tcp -p tcp --dport 80 -s 2001:beef::1/128 -d 2001:beef::1/128 -j MASQUERADE",
+			"-A KUBE-HOSTPORTS -m comment --comment \"pod0_ns0 hostport 9090\" -m tcp -p tcp --dport 9090 -j KUBE-HP-YJ3XFQDZHZ3NAUN2",
+			"-A CRIO-HOSTPORTS-MASQ -m comment --comment \"pod0_ns0 hostport 9090\" -j CRIO-MASQ-YJ3XFQDZHZ3NAUN2",
 		}
-	}
-	assert.EqualValues(t, len(openedv6Ports), len(expectedv6Ports))
-	for _, hp := range expectedv6Ports {
-		_, ok := openedv6Ports[hp]
-		assert.EqualValues(t, true, ok)
-	}
 
-	// Check IPv4 Iptables-save result after adding hostports
-	raw := bytes.NewBuffer(nil)
+		// Construct a metaHostportManager with only iptables support.
+		iptables := newFakeIPTables()
+		iptables.protocol = utiliptables.ProtocolIPv4
+		ip6tables := newFakeIPTables()
+		ip6tables.protocol = utiliptables.ProtocolIPv6
 
-	err := iptables.SaveInto(utiliptables.TableNAT, raw)
-	assert.NoError(t, err)
+		manager := newMetaHostportManagerInternal(
+			&hostportManagerIPTables{iptables: iptables},
+			&hostportManagerIPTables{iptables: ip6tables},
+			nil,
+			nil,
+		)
 
-	lines := strings.Split(raw.String(), "\n")
-	expectedLines := map[string]bool{
-		`*nat`:                                true,
-		`:KUBE-HOSTPORTS - [0:0]`:             true,
-		`:CRIO-HOSTPORTS-MASQ - [0:0]`:        true,
-		`:OUTPUT - [0:0]`:                     true,
-		`:PREROUTING - [0:0]`:                 true,
-		`:POSTROUTING - [0:0]`:                true,
-		`:KUBE-HP-IJHALPHTORMHHPPK - [0:0]`:   true,
-		`:CRIO-MASQ-IJHALPHTORMHHPPK - [0:0]`: true,
-		`:KUBE-HP-63UPIDJXVRSZGSUZ - [0:0]`:   true,
-		`:CRIO-MASQ-63UPIDJXVRSZGSUZ - [0:0]`: true,
-		`:KUBE-HP-WFBOALXEP42XEMJK - [0:0]`:   true,
-		`:CRIO-MASQ-WFBOALXEP42XEMJK - [0:0]`: true,
-		`:KUBE-HP-XU6AWMMJYOZOFTFZ - [0:0]`:   true,
-		`:CRIO-MASQ-XU6AWMMJYOZOFTFZ - [0:0]`: true,
-		`:KUBE-HP-CHN66X54O4WXZ5CW - [0:0]`:   true,
-		`:CRIO-MASQ-CHN66X54O4WXZ5CW - [0:0]`: true,
-		"-A KUBE-HOSTPORTS -m comment --comment \"pod1_ns1 hostport 8081\" -m udp -p udp --dport 8081 -j KUBE-HP-63UPIDJXVRSZGSUZ":                                                                     true,
-		"-A CRIO-HOSTPORTS-MASQ -m comment --comment \"pod1_ns1 hostport 8081\" -j CRIO-MASQ-63UPIDJXVRSZGSUZ":                                                                                         true,
-		"-A KUBE-HOSTPORTS -m comment --comment \"pod1_ns1 hostport 8080\" -m tcp -p tcp --dport 8080 -j KUBE-HP-IJHALPHTORMHHPPK":                                                                     true,
-		"-A CRIO-HOSTPORTS-MASQ -m comment --comment \"pod1_ns1 hostport 8080\" -j CRIO-MASQ-IJHALPHTORMHHPPK":                                                                                         true,
-		"-A KUBE-HOSTPORTS -m comment --comment \"pod1_ns1 hostport 8083\" -m sctp -p sctp --dport 8083 -j KUBE-HP-XU6AWMMJYOZOFTFZ":                                                                   true,
-		"-A CRIO-HOSTPORTS-MASQ -m comment --comment \"pod1_ns1 hostport 8083\" -j CRIO-MASQ-XU6AWMMJYOZOFTFZ":                                                                                         true,
-		"-A KUBE-HOSTPORTS -m comment --comment \"pod1_ns1 hostport 8084\" -m tcp -p tcp --dport 8084 -j KUBE-HP-CHN66X54O4WXZ5CW":                                                                     true,
-		"-A CRIO-HOSTPORTS-MASQ -m comment --comment \"pod1_ns1 hostport 8084\" -j CRIO-MASQ-CHN66X54O4WXZ5CW":                                                                                         true,
-		"-A KUBE-HOSTPORTS -m comment --comment \"pod4_ns2 hostport 8443\" -m tcp -p tcp --dport 8443 -j KUBE-HP-WFBOALXEP42XEMJK":                                                                     true,
-		"-A CRIO-HOSTPORTS-MASQ -m comment --comment \"pod4_ns2 hostport 8443\" -j CRIO-MASQ-WFBOALXEP42XEMJK":                                                                                         true,
-		"-A OUTPUT -m comment --comment \"kube hostport portals\" -m addrtype --dst-type LOCAL -j KUBE-HOSTPORTS":                                                                                      true,
-		"-A PREROUTING -m comment --comment \"kube hostport portals\" -m addrtype --dst-type LOCAL -j KUBE-HOSTPORTS":                                                                                  true,
-		"-A POSTROUTING -m comment --comment \"kube hostport masquerading\" -m conntrack --ctstate DNAT -j CRIO-HOSTPORTS-MASQ":                                                                        true,
-		"-A CRIO-HOSTPORTS-MASQ -m comment --comment \"SNAT for localhost access to hostports\" -o cbr0 -s ::1/128 -j MASQUERADE":                                                                      true,
-		"-A CRIO-MASQ-IJHALPHTORMHHPPK -m comment --comment \"pod1_ns1 hostport 8080\" -m conntrack --ctorigdstport 8080 -m tcp -p tcp --dport 80 -s 192.168.2.7/32 -d 192.168.2.7/32 -j MASQUERADE":   true,
-		"-A KUBE-HP-IJHALPHTORMHHPPK -m comment --comment \"pod1_ns1 hostport 8080\" -m tcp -p tcp -j DNAT --to-destination 192.168.2.7:80":                                                            true,
-		"-A CRIO-MASQ-63UPIDJXVRSZGSUZ -m comment --comment \"pod1_ns1 hostport 8081\" -m conntrack --ctorigdstport 8081 -m udp -p udp --dport 81 -s 192.168.2.7/32 -d 192.168.2.7/32 -j MASQUERADE":   true,
-		"-A KUBE-HP-63UPIDJXVRSZGSUZ -m comment --comment \"pod1_ns1 hostport 8081\" -m udp -p udp -j DNAT --to-destination 192.168.2.7:81":                                                            true,
-		"-A CRIO-MASQ-XU6AWMMJYOZOFTFZ -m comment --comment \"pod1_ns1 hostport 8083\" -m conntrack --ctorigdstport 8083 -m sctp -p sctp --dport 83 -s 192.168.2.7/32 -d 192.168.2.7/32 -j MASQUERADE": true,
-		"-A KUBE-HP-XU6AWMMJYOZOFTFZ -m comment --comment \"pod1_ns1 hostport 8083\" -m sctp -p sctp -j DNAT --to-destination 192.168.2.7:83":                                                          true,
-		"-A CRIO-MASQ-CHN66X54O4WXZ5CW -m comment --comment \"pod1_ns1 hostport 8084\" -m conntrack --ctorigdstport 8084 -m tcp -p tcp --dport 84 -s 192.168.2.7/32 -d 192.168.2.7/32 -j MASQUERADE":   true,
-		"-A KUBE-HP-CHN66X54O4WXZ5CW -m comment --comment \"pod1_ns1 hostport 8084\" -m tcp -p tcp -d 127.0.0.1/32 -j DNAT --to-destination 192.168.2.7:84":                                            true,
-		"-A CRIO-MASQ-WFBOALXEP42XEMJK -m comment --comment \"pod4_ns2 hostport 8443\" -m conntrack --ctorigdstport 8443 -m tcp -p tcp --dport 443 -s 192.168.2.2/32 -d 192.168.2.2/32 -j MASQUERADE":  true,
-		"-A KUBE-HP-WFBOALXEP42XEMJK -m comment --comment \"pod4_ns2 hostport 8443\" -m tcp -p tcp -j DNAT --to-destination 192.168.2.2:443":                                                           true,
-		`COMMIT`: true,
-	}
-	for _, line := range lines {
-		t.Logf("Line: %s", line)
-		if strings.TrimSpace(line) != "" {
-			_, ok := expectedLines[strings.TrimSpace(line)]
-			assert.EqualValues(t, true, ok)
+		// Add the legacy mappings.
+		for _, tc := range legacyIPTablesTestCases {
+			err := manager.Add(tc.id, tc.name, tc.podIP, tc.portMappings)
+			Expect(err).NotTo(HaveOccurred())
 		}
-	}
 
-	// Remove all added hostports
-	for _, tc := range testCases {
-		if !tc.expectError {
-			err := manager.Remove("id", tc.mapping)
-			assert.NoError(t, err)
+		checkIPTablesRules(iptables, legacyIPTablesExpectedRulesV4)
+		checkIPTablesRules(ip6tables, legacyIPTablesExpectedRulesV6)
+
+		// "Quit and restart cri-o", and create a new metaHostportManager with the
+		// existing fakeIPTables state, but now with nftables support as well.
+		nft4 := knftables.NewFake(knftables.IPv4Family, hostPortsTable)
+		nft6 := knftables.NewFake(knftables.IPv6Family, hostPortsTable)
+
+		manager = newMetaHostportManagerInternal(
+			&hostportManagerIPTables{iptables: iptables},
+			&hostportManagerIPTables{iptables: ip6tables},
+			&hostportManagerNFTables{nft: nft4, family: knftables.IPv4Family},
+			&hostportManagerNFTables{nft: nft6, family: knftables.IPv6Family},
+		)
+
+		// Add the remaining hostports.
+		for _, tc := range metaTestCases {
+			err := manager.Add(tc.id, tc.name, tc.podIP, tc.portMappings)
+			Expect(err).NotTo(HaveOccurred())
 		}
-	}
 
-	// Check IPv6 Iptables-save result after deleting hostports
-	raw.Reset()
-	err = iptables.SaveInto(utiliptables.TableNAT, raw)
-	assert.NoError(t, err)
-	lines = strings.Split(raw.String(), "\n")
-	remainingChains := make(map[string]bool)
-	for _, line := range lines {
-		if strings.HasPrefix(line, ":") {
-			remainingChains[strings.TrimSpace(line)] = true
+		// iptables mappings should not have changed; we should have added the new
+		// mappings to nftables.
+		checkIPTablesRules(iptables, legacyIPTablesExpectedRulesV4)
+		checkIPTablesRules(ip6tables, legacyIPTablesExpectedRulesV6)
+
+		checkNFTablesElements(nft4, expectedNFTablesElementsV4)
+		checkNFTablesElements(nft6, expectedNFTablesElementsV6)
+
+		// Remove all added hostports
+		for _, tc := range legacyIPTablesTestCases {
+			err := manager.Remove(tc.id, tc.portMappings)
+			Expect(err).NotTo(HaveOccurred())
 		}
-	}
-	expectDeletedChains := []string{"KUBE-HP-4YVONL46AKYWSKS3", "KUBE-HP-7THKRFSEH4GIIXK7", "KUBE-HP-5N7UH5JAXCVP5UJR", "KUBE-HP-CHN66X54O4WXZ5CW"}
-	for _, chain := range expectDeletedChains {
-		_, ok := remainingChains[chain]
-		assert.EqualValues(t, false, ok)
-	}
 
-	// Check Iptables-save result after adding hostports
-	rawv6 := bytes.NewBuffer(nil)
-
-	err = ip6tables.SaveInto(utiliptables.TableNAT, rawv6)
-	assert.NoError(t, err)
-
-	linesv6 := strings.Split(rawv6.String(), "\n")
-	expectedv6Lines := map[string]bool{
-		`*nat`:                                true,
-		`:KUBE-HOSTPORTS - [0:0]`:             true,
-		`:CRIO-HOSTPORTS-MASQ - [0:0]`:        true,
-		`:OUTPUT - [0:0]`:                     true,
-		`:PREROUTING - [0:0]`:                 true,
-		`:POSTROUTING - [0:0]`:                true,
-		`:KUBE-HP-IJHALPHTORMHHPPK - [0:0]`:   true,
-		`:CRIO-MASQ-IJHALPHTORMHHPPK - [0:0]`: true,
-		`:KUBE-HP-63UPIDJXVRSZGSUZ - [0:0]`:   true,
-		`:CRIO-MASQ-63UPIDJXVRSZGSUZ - [0:0]`: true,
-		`:KUBE-HP-WFBOALXEP42XEMJK - [0:0]`:   true,
-		`:CRIO-MASQ-WFBOALXEP42XEMJK - [0:0]`: true,
-		`:KUBE-HP-XU6AWMMJYOZOFTFZ - [0:0]`:   true,
-		`:CRIO-MASQ-XU6AWMMJYOZOFTFZ - [0:0]`: true,
-		"-A KUBE-HOSTPORTS -m comment --comment \"pod3_ns1 hostport 8443\" -m tcp -p tcp --dport 8443 -j KUBE-HP-WFBOALXEP42XEMJK":                                                                      true,
-		"-A CRIO-HOSTPORTS-MASQ -m comment --comment \"pod3_ns1 hostport 8443\" -j CRIO-MASQ-WFBOALXEP42XEMJK":                                                                                          true,
-		"-A KUBE-HOSTPORTS -m comment --comment \"pod1_ns1 hostport 8081\" -m udp -p udp --dport 8081 -j KUBE-HP-63UPIDJXVRSZGSUZ":                                                                      true,
-		"-A CRIO-HOSTPORTS-MASQ -m comment --comment \"pod1_ns1 hostport 8081\" -j CRIO-MASQ-63UPIDJXVRSZGSUZ":                                                                                          true,
-		"-A KUBE-HOSTPORTS -m comment --comment \"pod1_ns1 hostport 8080\" -m tcp -p tcp --dport 8080 -j KUBE-HP-IJHALPHTORMHHPPK":                                                                      true,
-		"-A CRIO-HOSTPORTS-MASQ -m comment --comment \"pod1_ns1 hostport 8080\" -j CRIO-MASQ-IJHALPHTORMHHPPK":                                                                                          true,
-		"-A KUBE-HOSTPORTS -m comment --comment \"pod1_ns1 hostport 8083\" -m sctp -p sctp --dport 8083 -j KUBE-HP-XU6AWMMJYOZOFTFZ":                                                                    true,
-		"-A CRIO-HOSTPORTS-MASQ -m comment --comment \"pod1_ns1 hostport 8083\" -j CRIO-MASQ-XU6AWMMJYOZOFTFZ":                                                                                          true,
-		"-A OUTPUT -m comment --comment \"kube hostport portals\" -m addrtype --dst-type LOCAL -j KUBE-HOSTPORTS":                                                                                       true,
-		"-A PREROUTING -m comment --comment \"kube hostport portals\" -m addrtype --dst-type LOCAL -j KUBE-HOSTPORTS":                                                                                   true,
-		"-A POSTROUTING -m comment --comment \"kube hostport masquerading\" -m conntrack --ctstate DNAT -j CRIO-HOSTPORTS-MASQ":                                                                         true,
-		"-A CRIO-HOSTPORTS-MASQ -m comment --comment \"SNAT for localhost access to hostports\" -o cbr0 -s ::1/128 -j MASQUERADE":                                                                       true,
-		"-A CRIO-MASQ-IJHALPHTORMHHPPK -m comment --comment \"pod1_ns1 hostport 8080\" -m conntrack --ctorigdstport 9999 -m tcp -p tcp --dport 443 -s 2001:beef::2/32 -d 2001:beef::2/32 -j MASQUERADE": true,
-		"-A KUBE-HP-IJHALPHTORMHHPPK -m comment --comment \"pod1_ns1 hostport 8080\" -m tcp -p tcp -j DNAT --to-destination [2001:beef::2]:80":                                                          true,
-		"-A CRIO-MASQ-63UPIDJXVRSZGSUZ -m comment --comment \"pod1_ns1 hostport 8081\" -m conntrack --ctorigdstport 9999 -m tcp -p tcp --dport 443 -s 2001:beef::2/32 -d 2001:beef::2/32 -j MASQUERADE": true,
-		"-A KUBE-HP-63UPIDJXVRSZGSUZ -m comment --comment \"pod1_ns1 hostport 8081\" -m udp -p udp -j DNAT --to-destination [2001:beef::2]:81":                                                          true,
-		"-A CRIO-MASQ-XU6AWMMJYOZOFTFZ -m comment --comment \"pod1_ns1 hostport 8083\" -m conntrack --ctorigdstport 9999 -m tcp -p tcp --dport 443 -s 2001:beef::2/32 -d 2001:beef::2/32 -j MASQUERADE": true,
-		"-A KUBE-HP-XU6AWMMJYOZOFTFZ -m comment --comment \"pod1_ns1 hostport 8083\" -m sctp -p sctp -j DNAT --to-destination [2001:beef::2]:83":                                                        true,
-		"-A CRIO-MASQ-WFBOALXEP42XEMJK -m comment --comment \"pod3_ns1 hostport 8443\" -m conntrack --ctorigdstport 9999 -m tcp -p tcp --dport 443 -s 2001:beef::4/32 -d 2001:beef::4/32 -j MASQUERADE": true,
-		"-A KUBE-HP-WFBOALXEP42XEMJK -m comment --comment \"pod3_ns1 hostport 8443\" -m tcp -p tcp -j DNAT --to-destination [2001:beef::4]:443":                                                         true,
-		`COMMIT`: true,
-	}
-	for _, line := range linesv6 {
-		if strings.TrimSpace(line) != "" {
-			_, ok := expectedv6Lines[strings.TrimSpace(line)]
-			assert.EqualValues(t, true, ok)
+		for _, tc := range metaTestCases {
+			err := manager.Remove(tc.id, tc.portMappings)
+			Expect(err).NotTo(HaveOccurred())
 		}
-	}
 
-	// Remove all added hostports
-	for _, tc := range testCases {
-		if !tc.expectError {
-			err := manager.Remove("id", tc.mapping)
-			assert.NoError(t, err)
+		// iptables and nftables should both have been removed.
+		checkIPTablesRules(iptables, nil)
+		checkIPTablesRules(ip6tables, nil)
+		checkNFTablesElements(nft4, nil)
+		checkNFTablesElements(nft6, nil)
+	})
+
+	It("should work with just IPv4", func() {
+		iptables := newFakeIPTables()
+		iptables.protocol = utiliptables.ProtocolIPv4
+		nft4 := knftables.NewFake(knftables.IPv4Family, hostPortsTable)
+
+		manager := newMetaHostportManagerInternal(
+			&hostportManagerIPTables{iptables: iptables},
+			nil,
+			&hostportManagerNFTables{nft: nft4, family: knftables.IPv4Family},
+			nil,
+		)
+
+		// Add Hostports
+		for _, tc := range metaTestCases {
+			err := manager.Add(tc.id, tc.name, tc.podIP, tc.portMappings)
+			// IPv6 mappings should fail because we don't have any IPv6
+			// HostPortManagers.
+			if utilnet.IsIPv6String(tc.podIP) {
+				Expect(err).To(HaveOccurred())
+			} else {
+				Expect(err).NotTo(HaveOccurred())
+			}
 		}
-	}
 
-	// Check Iptables-save result after deleting hostports
-	rawv6.Reset()
-	err = ip6tables.SaveInto(utiliptables.TableNAT, rawv6)
-	assert.NoError(t, err)
-	linesv6 = strings.Split(rawv6.String(), "\n")
-	remainingv6Chains := make(map[string]bool)
-	for _, line := range linesv6 {
-		if strings.HasPrefix(line, ":") {
-			remainingv6Chains[strings.TrimSpace(line)] = true
+		checkIPTablesRules(iptables, nil)
+		checkNFTablesElements(nft4, expectedNFTablesElementsV4)
+
+		// Remove all added hostports
+		for _, tc := range metaTestCases {
+			err := manager.Remove(tc.id, tc.portMappings)
+			// Remove is IP-family agnostic and should just ignore the missing
+			// IPv6 HostPortManagers.
+			Expect(err).NotTo(HaveOccurred())
 		}
-	}
-	expectv6DeletedChains := []string{"KUBE-HP-4YVONL46AKYWSKS3", "KUBE-HP-7THKRFSEH4GIIXK7", "KUBE-HP-5N7UH5JAXCVP5UJR"}
-	for _, chain := range expectv6DeletedChains {
-		_, ok := remainingv6Chains[chain]
-		assert.EqualValues(t, false, ok)
-	}
 
-	// check if all ports are closed
-	for _, port := range portOpener.mem {
-		assert.EqualValues(t, true, port.closed)
-	}
-}
+		checkIPTablesRules(iptables, nil)
+		checkNFTablesElements(nft4, nil)
+	})
+})

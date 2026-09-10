@@ -7,15 +7,19 @@ import (
 	"os/exec"
 	"time"
 
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
+	kwait "k8s.io/apimachinery/pkg/util/wait"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+	kclock "k8s.io/utils/clock"
+
 	"github.com/cri-o/cri-o/internal/oci"
+	"github.com/cri-o/cri-o/internal/storage"
+	"github.com/cri-o/cri-o/internal/storage/references"
 	libconfig "github.com/cri-o/cri-o/pkg/config"
 	runnerMock "github.com/cri-o/cri-o/test/mocks/cmdrunner"
 	"github.com/cri-o/cri-o/utils/cmdrunner"
-	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	kwait "k8s.io/apimachinery/pkg/util/wait"
-	kclock "k8s.io/utils/clock"
 )
 
 const (
@@ -24,7 +28,7 @@ const (
 	longTimeout   int64 = 15
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Oci", func() {
 	Context("StopContainer", func() {
 		var (
@@ -34,6 +38,7 @@ var _ = t.Describe("Oci", func() {
 			runtime      oci.RuntimeOCI
 			bm           kwait.BackoffManager
 		)
+
 		BeforeEach(func() {
 			sleepProcess = exec.Command("sleep", "100000")
 			Expect(sleepProcess.Start()).To(Succeed())
@@ -51,48 +56,38 @@ var _ = t.Describe("Oci", func() {
 
 			cfg, err := libconfig.DefaultConfig()
 			Expect(err).ToNot(HaveOccurred())
+
+			cfg.ContainerAttachSocketDir = t.MustTempDir("attach-socket")
 			r, err := oci.New(cfg)
 			Expect(err).ToNot(HaveOccurred())
+
 			runtime = oci.NewRuntimeOCI(r, &libconfig.RuntimeHandler{})
-			bm = kwait.NewExponentialBackoffManager( //nolint:staticcheck
-				1.0, // Initial backoff.
-				10,  // Maximum backoff.
-				10,  // Reset backoff.
+			bm = kwait.NewExponentialBackoffManager( //nolint:staticcheck // deprecated but still functional
+				1,   // Initial backoff (1 ns — intentionally tiny for test speed).
+				10,  // Maximum backoff (10 ns).
+				10,  // Reset duration (10 ns).
 				2.0, // Backoff factor.
 				0.0, // Backoff jitter.
-				kclock.RealClock{},
+				&kclock.RealClock{},
 			)
 		})
 		AfterEach(func() {
-			// nolint:errcheck
+			//nolint:errcheck // best-effort cleanup in test teardown
 			oci.Kill(sleepProcess.Process.Pid)
 			// make sure the entry in the process table is cleaned up
-			// nolint:errcheck
+			//nolint:errcheck // best-effort cleanup in test teardown
 			sleepProcess.Wait()
 			cmdrunner.ResetPrependedCmd()
 		})
 
-		It("should fail to stop if container paused", func() {
-			state := &oci.ContainerState{}
-			state.Status = oci.ContainerStatePaused
-			sut.SetState(state)
-
-			Expect(sut.ShouldBeStopped()).NotTo(Succeed())
-		})
-		It("should fail to stop if container stopped", func() {
-			state := &oci.ContainerState{}
-			state.Status = oci.ContainerStateStopped
-			sut.SetState(state)
-
-			Expect(sut.ShouldBeStopped()).To(Equal(oci.ErrContainerStopped))
-		})
 		It("should return early if runtime command fails and process stopped", func() {
 			// Given
 			gomock.InOrder(
 				runner.EXPECT().Command(gomock.Any(), gomock.Any()).DoAndReturn(
-					func(_ string, _ ...string) interface{} {
+					func(_ string, _ ...string) any {
 						Expect(oci.Kill(sleepProcess.Process.Pid)).To(Succeed())
 						waitForKillToComplete(sleepProcess)
+
 						return exec.Command("/bin/false")
 					},
 				),
@@ -100,7 +95,9 @@ var _ = t.Describe("Oci", func() {
 
 			// When
 			sut.SetAsStopping()
-			go runtime.StopLoopForContainer(sut, bm)
+
+			go runtime.StopLoopForContainer(context.Background(), sut, bm)
+
 			stoppedChan := stopTimeoutWithChannel(context.Background(), sut, shortTimeout)
 			<-stoppedChan
 
@@ -112,24 +109,27 @@ var _ = t.Describe("Oci", func() {
 			// Given
 			gomock.InOrder(
 				runner.EXPECT().Command(gomock.Any(), gomock.Any()).DoAndReturn(
-					func(_ string, _ ...string) interface{} {
+					func(_ string, _ ...string) any {
 						Expect(oci.Kill(sleepProcess.Process.Pid)).To(Succeed())
 						waitForKillToComplete(sleepProcess)
+
 						return exec.Command("/bin/true")
 					},
 				),
 			)
 			sut.SetAsStopping()
-			go runtime.StopLoopForContainer(sut, bm)
+
+			go runtime.StopLoopForContainer(context.Background(), sut, bm)
 
 			// Then
-			waitOnContainerTimeout(sut, longTimeout, mediumTimeout, sleepProcess)
+			waitOnContainerTimeout(sut, shortTimeout, mediumTimeout, sleepProcess)
 		})
 		It("should fall back to KILL after timeout", func() {
 			// Given
 			containerIgnoreSignalCmdrunnerMock(sleepProcess, runner)
 			sut.SetAsStopping()
-			go runtime.StopLoopForContainer(sut, bm)
+
+			go runtime.StopLoopForContainer(context.Background(), sut, bm)
 
 			// Then
 			waitOnContainerTimeout(sut, shortTimeout, mediumTimeout, sleepProcess)
@@ -138,7 +138,8 @@ var _ = t.Describe("Oci", func() {
 			// Given
 			containerIgnoreSignalCmdrunnerMock(sleepProcess, runner)
 			sut.SetAsStopping()
-			go runtime.StopLoopForContainer(sut, bm)
+
+			go runtime.StopLoopForContainer(context.Background(), sut, bm)
 			go sut.WaitOnStopTimeout(context.Background(), longTimeout)
 
 			// Then
@@ -149,7 +150,8 @@ var _ = t.Describe("Oci", func() {
 			// Given
 			containerIgnoreSignalCmdrunnerMock(sleepProcess, runner)
 			sut.SetAsStopping()
-			go runtime.StopLoopForContainer(sut, bm)
+
+			go runtime.StopLoopForContainer(context.Background(), sut, bm)
 
 			// When
 			shortStopChan := stopTimeoutWithChannel(context.Background(), sut, shortTimeout)
@@ -162,15 +164,18 @@ var _ = t.Describe("Oci", func() {
 			// Given
 			containerIgnoreSignalCmdrunnerMock(sleepProcess, runner)
 			sut.SetAsStopping()
-			go runtime.StopLoopForContainer(sut, bm)
+
+			go runtime.StopLoopForContainer(context.Background(), sut, bm)
 			// very long timeout
 			stoppedChan := stopTimeoutWithChannel(context.Background(), sut, longTimeout*10)
 
 			// When
-			for i := 0; i < 10; i++ {
+			for range 10 {
 				go sut.WaitOnStopTimeout(context.Background(), int64(rand.Intn(100)+20))
+
 				time.Sleep(time.Second)
 			}
+
 			sut.WaitOnStopTimeout(context.Background(), mediumTimeout)
 
 			// Then
@@ -219,7 +224,6 @@ var _ = t.Describe("Oci", func() {
 			},
 		}
 		for _, test := range tests {
-			test := test
 			It(test.title, func() {
 				fileName := t.MustTempFile("to-read")
 				Expect(os.WriteFile(fileName, test.contents, 0o644)).To(Succeed())
@@ -231,24 +235,152 @@ var _ = t.Describe("Oci", func() {
 	})
 })
 
-func containerIgnoreSignalCmdrunnerMock(sleepProcess *exec.Cmd, runner *runnerMock.MockCommandRunner) {
+var _ = t.Describe("UpdateContainerStatus", func() {
+	It("should wait for exit file when runtime state fails for fast-exiting container", func() {
+		// Set up a container with a temp directory for exit file.
+		containerDir := t.MustTempDir("container-dir")
+
+		imageName, err := references.ParseRegistryImageReferenceFromOutOfProcessData(
+			"docker.io/library/image-name:latest",
+		)
+		Expect(err).ToNot(HaveOccurred())
+		imageID, err := storage.ParseStorageImageIDFromOutOfProcessData(
+			"2a03a6059f21e150ae84b0973863609494aad70f0a80eaeb64bddd8d92465812",
+		)
+		Expect(err).ToNot(HaveOccurred())
+		sut, err := oci.NewContainer("test-fast-exit", "name", "bundlePath", "logPath",
+			map[string]string{}, map[string]string{}, map[string]string{},
+			"image", &imageName, &imageID, "", &types.ContainerMetadata{}, "sandbox",
+			false, false, false, "", containerDir, time.Now(), "")
+		Expect(err).ToNot(HaveOccurred())
+
+		state := &oci.ContainerState{}
+		state.Pid = 1
+		Expect(state.SetInitPid(1)).To(Succeed())
+		sut.SetState(state)
+
+		// Mock the runtime command to always fail (simulating container
+		// already cleaned up by the OCI runtime).
+		runner := runnerMock.NewMockCommandRunner(mockCtrl)
+		cmdrunner.SetMocked(runner)
+
+		defer cmdrunner.ResetPrependedCmd()
+
+		runner.EXPECT().Command(gomock.Any(), gomock.Any()).Return(
+			exec.Command("/bin/false"),
+		).AnyTimes()
+
+		// Set up the runtime.
+		cfg, err := libconfig.DefaultConfig()
+		Expect(err).ToNot(HaveOccurred())
+
+		cfg.ContainerAttachSocketDir = t.MustTempDir("attach-socket")
+		r, err := oci.New(cfg)
+		Expect(err).ToNot(HaveOccurred())
+
+		runtime := oci.NewRuntimeOCI(r, &libconfig.RuntimeHandler{})
+
+		// Write the exit file after a short delay, simulating conmon
+		// writing it after the first read attempt fails.
+		go func() {
+			time.Sleep(800 * time.Millisecond)
+			Expect(os.WriteFile(
+				containerDir+"/exit", []byte("0"), 0o644,
+			)).To(Succeed())
+		}()
+
+		// Call UpdateContainerStatus — without the fix this would
+		// default to exit code 255 immediately; with the fix it waits
+		// for the exit file and reads exit code 0.
+		Expect(runtime.UpdateContainerStatus(
+			context.Background(), sut,
+		)).To(Succeed())
+
+		Expect(sut.State().ExitCode).NotTo(BeNil())
+		Expect(*sut.State().ExitCode).To(Equal(int32(0)))
+		Expect(string(sut.State().Status)).To(Equal(oci.ContainerStateStopped))
+	})
+
+	It("should default to exit code 255 when exit file never appears", func() {
+		// Set up a container with a temp directory — no exit file will be created.
+		containerDir := t.MustTempDir("container-dir-no-exit")
+
+		imageName, err := references.ParseRegistryImageReferenceFromOutOfProcessData(
+			"docker.io/library/image-name:latest",
+		)
+		Expect(err).ToNot(HaveOccurred())
+		imageID, err := storage.ParseStorageImageIDFromOutOfProcessData(
+			"2a03a6059f21e150ae84b0973863609494aad70f0a80eaeb64bddd8d92465812",
+		)
+		Expect(err).ToNot(HaveOccurred())
+		sut, err := oci.NewContainer("test-no-exit", "name", "bundlePath", "logPath",
+			map[string]string{}, map[string]string{}, map[string]string{},
+			"image", &imageName, &imageID, "", &types.ContainerMetadata{}, "sandbox",
+			false, false, false, "", containerDir, time.Now(), "")
+		Expect(err).ToNot(HaveOccurred())
+
+		state := &oci.ContainerState{}
+		state.Pid = 1
+		Expect(state.SetInitPid(1)).To(Succeed())
+		sut.SetState(state)
+
+		// Mock the runtime command to always fail.
+		runner := runnerMock.NewMockCommandRunner(mockCtrl)
+		cmdrunner.SetMocked(runner)
+
+		defer cmdrunner.ResetPrependedCmd()
+
+		runner.EXPECT().Command(gomock.Any(), gomock.Any()).Return(
+			exec.Command("/bin/false"),
+		).AnyTimes()
+
+		// Set up the runtime.
+		cfg, err := libconfig.DefaultConfig()
+		Expect(err).ToNot(HaveOccurred())
+
+		cfg.ContainerAttachSocketDir = t.MustTempDir("attach-socket-2")
+		r, err := oci.New(cfg)
+		Expect(err).ToNot(HaveOccurred())
+
+		runtime := oci.NewRuntimeOCI(r, &libconfig.RuntimeHandler{})
+
+		// Call UpdateContainerStatus — exit file never appears, should
+		// fall back to 255 after exhausting retries.
+		Expect(runtime.UpdateContainerStatus(
+			context.Background(), sut,
+		)).To(Succeed())
+
+		Expect(sut.State().ExitCode).NotTo(BeNil())
+		Expect(*sut.State().ExitCode).To(Equal(int32(255)))
+	})
+})
+
+func containerIgnoreSignalCmdrunnerMock(
+	sleepProcess *exec.Cmd,
+	runner *runnerMock.MockCommandRunner,
+) {
 	gomock.InOrder(
 		runner.EXPECT().Command(gomock.Any(), gomock.Any()).DoAndReturn(
-			func(_ string, _ ...string) interface{} {
+			func(_ string, _ ...string) any {
 				return exec.Command("/bin/true")
 			},
 		),
 		runner.EXPECT().Command(gomock.Any(), gomock.Any()).DoAndReturn(
-			func(_ string, _ ...string) interface{} {
+			func(_ string, _ ...string) any {
 				Expect(oci.Kill(sleepProcess.Process.Pid)).To(Succeed())
 				waitForKillToComplete(sleepProcess)
+
 				return exec.Command("/bin/true")
 			},
 		),
 	)
 }
 
-func waitOnContainerTimeout(sut *oci.Container, stopTimeout, waitTimeout int64, sleepProcess *exec.Cmd) {
+func waitOnContainerTimeout(
+	sut *oci.Container,
+	stopTimeout, waitTimeout int64,
+	sleepProcess *exec.Cmd,
+) {
 	stoppedChan := stopTimeoutWithChannel(context.Background(), sut, stopTimeout)
 
 	select {
@@ -256,20 +388,24 @@ func waitOnContainerTimeout(sut *oci.Container, stopTimeout, waitTimeout int64, 
 	case <-time.After(time.Second * time.Duration(waitTimeout)):
 		Fail("did not timeout quickly enough")
 	}
+
 	verifyContainerStopped(sut, sleepProcess)
 }
 
 func stopTimeoutWithChannel(ctx context.Context, sut *oci.Container, timeout int64) chan struct{} {
 	stoppedChan := make(chan struct{}, 1)
+
 	go func() {
 		sut.WaitOnStopTimeout(ctx, timeout)
 		close(stoppedChan)
 	}()
+
 	return stoppedChan
 }
 
 func verifyContainerStopped(sut *oci.Container, sleepProcess *exec.Cmd) {
 	waitForKillToComplete(sleepProcess)
+
 	pid, err := sut.Pid()
 	Expect(pid).To(Equal(0))
 	Expect(err).To(HaveOccurred())

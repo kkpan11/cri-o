@@ -1,31 +1,28 @@
-//go:build !(linux && cgo)
-// +build !linux !cgo
+//go:build !(seccomp && linux && cgo)
 
 package seccomp
 
 import (
 	"context"
 
-	"github.com/containers/common/pkg/seccomp"
-	imagetypes "github.com/containers/image/v5/types"
 	"github.com/opencontainers/runtime-tools/generate"
+	"go.podman.io/common/pkg/seccomp"
+	imagetypes "go.podman.io/image/v5/types"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
-// Config is the global seccomp configuration type
+// Config is the global seccomp configuration type.
 type Config struct {
 	enabled bool
 }
 
 // Notifier wraps a seccomp notifier instance for a container.
-type Notifier struct {
-}
+type Notifier struct{}
 
 // Notification is a seccomp notification which gets sent to the CRI-O server.
-type Notification struct {
-}
+type Notification struct{}
 
-// New creates a new default seccomp configuration instance
+// New creates a new default seccomp configuration instance.
 func New() *Config {
 	return &Config{
 		enabled: false,
@@ -41,6 +38,7 @@ func (c *Config) Setup(
 	sandboxAnnotations, imageAnnotations map[string]string,
 	specGenerator *generate.Generator,
 	profileField *types.SecurityProfile,
+	graphRoot string,
 ) (*Notifier, string, error) {
 	return nil, "", nil
 }
@@ -110,10 +108,11 @@ func (c *Config) IsDisabled() bool {
 	return true
 }
 
-// Profile returns the currently loaded seccomp profile
+// Profile returns the currently loaded seccomp profile.
 func (c *Config) Profile() *seccomp.Seccomp {
 	return nil
 }
+
 func DefaultProfile() *seccomp.Seccomp {
 	return nil
 }

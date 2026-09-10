@@ -2,13 +2,17 @@ package oci
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
 
-	"github.com/containers/common/pkg/cgroups"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/cgroups"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
 	"github.com/cri-o/cri-o/internal/log"
-	"golang.org/x/net/context"
 )
 
 const (
@@ -30,18 +34,23 @@ const (
 func (c *Container) CleanupConmonCgroup(ctx context.Context) {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
+
 	if c.spoofed {
 		return
 	}
+
 	path := c.ConmonCgroupfsPath()
 	if path == "" {
 		return
 	}
+
 	cg, err := cgroups.Load(path)
 	if err != nil {
 		log.Infof(ctx, "Error loading conmon cgroup of container %s: %v", c.ID(), err)
+
 		return
 	}
+
 	if err := cg.Delete(); err != nil {
 		log.Infof(ctx, "Error deleting conmon cgroup of container %s: %v", c.ID(), err)
 	}
@@ -62,12 +71,14 @@ func (c *Container) SeccompProfilePath() string {
 // allow for unit testing.
 func GetPidStartTimeFromFile(file string) (string, error) {
 	_, startTime, err := getPidStatDataFromFile(file)
+
 	return startTime, err
 }
 
 // getPidStartTime returns the process start time for a given PID.
 func getPidStartTime(pid int) (string, error) {
 	_, startTime, err := getPidStatDataFromFile(fmt.Sprintf(procStatFile, pid))
+
 	return startTime, err
 }
 
@@ -78,7 +89,9 @@ func getPidStatData(pid int) (string, string, error) { //nolint:gocritic // Igno
 
 // getPidStatData parses the kernel's /proc/<PID>/stat file,
 // looking for the process state and start time for a given PID.
-func getPidStatDataFromFile(file string) (string, string, error) { //nolint:gocritic // Ignore unnamedResult.
+func getPidStatDataFromFile( //nolint:gocritic // unnamedResult
+	file string,
+) (string, string, error) {
 	f, err := os.Open(file)
 	if err != nil {
 		return "", "", err
@@ -103,4 +116,31 @@ func getPidStatDataFromFile(file string) (string, string, error) { //nolint:gocr
 	}
 
 	return string(statFields[stateFieldIndex]), string(statFields[startTimeFieldIndex]), nil
+}
+
+// SetRuntimeUser sets the runtime user for the container.
+func (c *Container) SetRuntimeUser(runtimeSpec *specs.Spec) {
+	if runtimeSpec.Process == nil {
+		logrus.Infof(
+			"Container %s is missing process attribute from the runtime specification",
+			c.ID(),
+		)
+
+		return
+	}
+
+	user := runtimeSpec.Process.User
+	supplementalGroups := make([]int64, 0, len(user.AdditionalGids))
+
+	for _, gid := range user.AdditionalGids {
+		supplementalGroups = append(supplementalGroups, int64(gid))
+	}
+
+	c.runtimeUser = &types.ContainerUser{
+		Linux: &types.LinuxContainerUser{
+			Uid:                int64(user.UID),
+			Gid:                int64(user.GID),
+			SupplementalGroups: supplementalGroups,
+		},
+	}
 }

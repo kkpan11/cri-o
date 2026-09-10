@@ -1,15 +1,15 @@
 //go:build linux
-// +build linux
 
 package nsmgr
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sync"
 
 	nspkg "github.com/containernetworking/plugins/pkg/ns"
-	"github.com/containers/storage/pkg/idtools"
+	"go.podman.io/storage/pkg/idtools"
 	"golang.org/x/sys/unix"
 )
 
@@ -35,6 +35,7 @@ type PodNamespaceConfig struct {
 // namespace is the internal implementation of the Namespace interface.
 type namespace struct {
 	sync.Mutex
+
 	ns     NS
 	closed bool
 	nsType NSType
@@ -50,9 +51,10 @@ type NS interface {
 
 // Path returns the bind mount path of the namespace.
 func (n *namespace) Path() string {
-	if n == nil || n.ns == nil {
+	if n == nil {
 		return ""
 	}
+
 	return n.nsPath
 }
 
@@ -66,28 +68,34 @@ func (n *namespace) Remove() error {
 	n.Lock()
 	defer n.Unlock()
 
-	if n.closed {
-		// Remove() can be called multiple
-		// times without returning an error.
-		return nil
+	// Close the namespace handle if not already closed and if we have a valid handle
+	if !n.closed && n.ns != nil {
+		if err := n.ns.Close(); err != nil {
+			return err
+		}
+
+		n.closed = true
 	}
 
-	if err := n.ns.Close(); err != nil {
-		return err
-	}
-
-	n.closed = true
-
+	// Always attempt to clean up the file, even if already closed or if ns is nil.
+	// This ensures that invalid namespace files (created by partial namespace objects)
+	// are properly cleaned up.
 	fp := n.Path()
 	if fp == "" {
 		return nil
 	}
 
-	// try to unmount, ignoring "not mounted" (EINVAL) error.
-	if err := unix.Unmount(fp, unix.MNT_DETACH); err != nil && err != unix.EINVAL {
-		return fmt.Errorf("unable to unmount %s: %w", fp, err)
+	// Don't run into unmount issues if the network namespace does not exist any more.
+	if _, err := os.Stat(fp); err == nil {
+		// try to unmount, ignoring "not mounted" (EINVAL) error.
+		if err := unix.Unmount(fp, unix.MNT_DETACH); err != nil && !errors.Is(err, unix.EINVAL) {
+			return fmt.Errorf("unable to unmount %s: %w", fp, err)
+		}
+
+		return os.RemoveAll(fp)
 	}
-	return os.Remove(fp)
+
+	return nil
 }
 
 // GetNamespace takes a path and type, checks if it is a namespace, and if so

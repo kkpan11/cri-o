@@ -10,11 +10,12 @@ import (
 	"time"
 
 	"github.com/blang/semver/v4"
-	"github.com/cri-o/cri-o/internal/version"
 	"github.com/sirupsen/logrus"
 	"sigs.k8s.io/release-sdk/git"
 	"sigs.k8s.io/release-utils/command"
-	"sigs.k8s.io/release-utils/util"
+	"sigs.k8s.io/release-utils/helpers"
+
+	"github.com/cri-o/cri-o/internal/version"
 )
 
 const (
@@ -51,6 +52,7 @@ func run() error {
 	}
 
 	logrus.Infof("Ensuring output path %s", outputPath)
+
 	if err := os.MkdirAll(outputPath, 0o755); err != nil {
 		return fmt.Errorf("create output path: %w", err)
 	}
@@ -65,6 +67,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("get repository HEAD: %w", err)
 	}
+
 	logrus.Infof("Using HEAD commit %s", head)
 
 	currentBranch, currentBranchSet := os.LookupEnv(currentBranchKey)
@@ -73,26 +76,31 @@ func run() error {
 			"%s environment variable is not set, using default branch `%s`",
 			currentBranchKey, defaultBranch,
 		)
+
 		currentBranch = defaultBranch
 	}
+
 	logrus.Infof("Using branch: %s", currentBranch)
 
 	templateFile, err := os.CreateTemp("", "")
 	if err != nil {
 		return fmt.Errorf("writing template file: %w", err)
 	}
+
 	defer func() { err = os.RemoveAll(templateFile.Name()) }()
 
 	// Check if we're on a tag and adapt variables if necessary
 	bundleVersion := head
 	shortHead := head[:7]
-	endRev := util.AddTagPrefix(version.Version)
+	endRev := helpers.AddTagPrefix(version.Version)
 
 	startVersion, err := startVersionFromCurrent(version.Version)
 	if err != nil {
 		return fmt.Errorf("parsing start version: %w", err)
 	}
-	startTag := util.AddTagPrefix(startVersion)
+
+	startTag := helpers.AddTagPrefix(startVersion)
+
 	if output, err := command.New(
 		"git", "describe", "--tags", "--exact-match",
 	).RunSilentSuccessOutput(); err == nil {
@@ -101,7 +109,7 @@ func run() error {
 		bundleVersion = foundTag
 		shortHead = foundTag
 		endRev = foundTag
-		startTag = util.AddTagPrefix(decVersion(foundTag))
+		startTag = helpers.AddTagPrefix(decVersion(foundTag))
 	} else {
 		logrus.Infof("Not using git tag because `git describe` failed: %v", err)
 	}
@@ -116,48 +124,60 @@ The release notes have been generated for the commit range
 
 ## Downloads
 
-Download one of our static release bundles via our Google Cloud Bucket:
+### Release Bundles
+
+Download one of our static release bundles via our Google Cloud Bucket.
+Each bundle includes a SHA-256 checksum, a [cosign](https://github.com/sigstore/cosign) signature (`+"`.bundle`"+`), and a [SPDX](https://spdx.org) bill of materials (`+"`.spdx`"+`) with its own signature:
 
 - [cri-o.amd64.%s.tar.gz](https://storage.googleapis.com/cri-o/artifacts/cri-o.amd64.%s.tar.gz)
   - [cri-o.amd64.%s.tar.gz.sha256sum](https://storage.googleapis.com/cri-o/artifacts/cri-o.amd64.%s.tar.gz.sha256sum)
-  - [cri-o.amd64.%s.tar.gz.sig](https://storage.googleapis.com/cri-o/artifacts/cri-o.amd64.%s.tar.gz.sig)
-  - [cri-o.amd64.%s.tar.gz.cert](https://storage.googleapis.com/cri-o/artifacts/cri-o.amd64.%s.tar.gz.cert)
+  - [cri-o.amd64.%s.tar.gz.bundle](https://storage.googleapis.com/cri-o/artifacts/cri-o.amd64.%s.tar.gz.bundle)
   - [cri-o.amd64.%s.tar.gz.spdx](https://storage.googleapis.com/cri-o/artifacts/cri-o.amd64.%s.tar.gz.spdx)
-  - [cri-o.amd64.%s.tar.gz.spdx.sig](https://storage.googleapis.com/cri-o/artifacts/cri-o.amd64.%s.tar.gz.spdx.sig)
-  - [cri-o.amd64.%s.tar.gz.spdx.cert](https://storage.googleapis.com/cri-o/artifacts/cri-o.amd64.%s.tar.gz.spdx.cert)
+  - [cri-o.amd64.%s.tar.gz.spdx.bundle](https://storage.googleapis.com/cri-o/artifacts/cri-o.amd64.%s.tar.gz.spdx.bundle)
 - [cri-o.arm64.%s.tar.gz](https://storage.googleapis.com/cri-o/artifacts/cri-o.arm64.%s.tar.gz)
   - [cri-o.arm64.%s.tar.gz.sha256sum](https://storage.googleapis.com/cri-o/artifacts/cri-o.arm64.%s.tar.gz.sha256sum)
-  - [cri-o.arm64.%s.tar.gz.sig](https://storage.googleapis.com/cri-o/artifacts/cri-o.arm64.%s.tar.gz.sig)
-  - [cri-o.arm64.%s.tar.gz.cert](https://storage.googleapis.com/cri-o/artifacts/cri-o.arm64.%s.tar.gz.cert)
+  - [cri-o.arm64.%s.tar.gz.bundle](https://storage.googleapis.com/cri-o/artifacts/cri-o.arm64.%s.tar.gz.bundle)
   - [cri-o.arm64.%s.tar.gz.spdx](https://storage.googleapis.com/cri-o/artifacts/cri-o.arm64.%s.tar.gz.spdx)
-  - [cri-o.arm64.%s.tar.gz.spdx.sig](https://storage.googleapis.com/cri-o/artifacts/cri-o.arm64.%s.tar.gz.spdx.sig)
-  - [cri-o.arm64.%s.tar.gz.spdx.cert](https://storage.googleapis.com/cri-o/artifacts/cri-o.arm64.%s.tar.gz.spdx.cert)
+  - [cri-o.arm64.%s.tar.gz.spdx.bundle](https://storage.googleapis.com/cri-o/artifacts/cri-o.arm64.%s.tar.gz.spdx.bundle)
 - [cri-o.ppc64le.%s.tar.gz](https://storage.googleapis.com/cri-o/artifacts/cri-o.ppc64le.%s.tar.gz)
   - [cri-o.ppc64le.%s.tar.gz.sha256sum](https://storage.googleapis.com/cri-o/artifacts/cri-o.ppc64le.%s.tar.gz.sha256sum)
-  - [cri-o.ppc64le.%s.tar.gz.sig](https://storage.googleapis.com/cri-o/artifacts/cri-o.ppc64le.%s.tar.gz.sig)
-  - [cri-o.ppc64le.%s.tar.gz.cert](https://storage.googleapis.com/cri-o/artifacts/cri-o.ppc64le.%s.tar.gz.cert)
+  - [cri-o.ppc64le.%s.tar.gz.bundle](https://storage.googleapis.com/cri-o/artifacts/cri-o.ppc64le.%s.tar.gz.bundle)
   - [cri-o.ppc64le.%s.tar.gz.spdx](https://storage.googleapis.com/cri-o/artifacts/cri-o.ppc64le.%s.tar.gz.spdx)
-  - [cri-o.ppc64le.%s.tar.gz.spdx.sig](https://storage.googleapis.com/cri-o/artifacts/cri-o.ppc64le.%s.tar.gz.spdx.sig)
-  - [cri-o.ppc64le.%s.tar.gz.spdx.cert](https://storage.googleapis.com/cri-o/artifacts/cri-o.ppc64le.%s.tar.gz.spdx.cert)
+  - [cri-o.ppc64le.%s.tar.gz.spdx.bundle](https://storage.googleapis.com/cri-o/artifacts/cri-o.ppc64le.%s.tar.gz.spdx.bundle)
 - [cri-o.s390x.%s.tar.gz](https://storage.googleapis.com/cri-o/artifacts/cri-o.s390x.%s.tar.gz)
   - [cri-o.s390x.%s.tar.gz.sha256sum](https://storage.googleapis.com/cri-o/artifacts/cri-o.s390x.%s.tar.gz.sha256sum)
-  - [cri-o.s390x.%s.tar.gz.sig](https://storage.googleapis.com/cri-o/artifacts/cri-o.s390x.%s.tar.gz.sig)
-  - [cri-o.s390x.%s.tar.gz.cert](https://storage.googleapis.com/cri-o/artifacts/cri-o.s390x.%s.tar.gz.cert)
+  - [cri-o.s390x.%s.tar.gz.bundle](https://storage.googleapis.com/cri-o/artifacts/cri-o.s390x.%s.tar.gz.bundle)
   - [cri-o.s390x.%s.tar.gz.spdx](https://storage.googleapis.com/cri-o/artifacts/cri-o.s390x.%s.tar.gz.spdx)
-  - [cri-o.s390x.%s.tar.gz.spdx.sig](https://storage.googleapis.com/cri-o/artifacts/cri-o.s390x.%s.tar.gz.spdx.sig)
-  - [cri-o.s390x.%s.tar.gz.spdx.cert](https://storage.googleapis.com/cri-o/artifacts/cri-o.s390x.%s.tar.gz.spdx.cert)
+  - [cri-o.s390x.%s.tar.gz.spdx.bundle](https://storage.googleapis.com/cri-o/artifacts/cri-o.s390x.%s.tar.gz.spdx.bundle)
+
+### Supply Chain Artifacts
+
+The [OpenVEX](https://openvex.dev) vulnerability report:
+
+- [cri-o.%s.openvex.json](https://storage.googleapis.com/cri-o/artifacts/cri-o.%s.openvex.json)
+  - [cri-o.%s.openvex.json.bundle](https://storage.googleapis.com/cri-o/artifacts/cri-o.%s.openvex.json.bundle)
+
+The [SLSA](https://slsa.dev) provenance attestation:
+
+- [cri-o.%s.provenance.json](https://storage.googleapis.com/cri-o/artifacts/cri-o.%s.provenance.json)
+  - [cri-o.%s.provenance.json.bundle](https://storage.googleapis.com/cri-o/artifacts/cri-o.%s.provenance.json.bundle)
+
+### OCI Distribution
+
+All release artifacts are also available as signed [OCI artifacts](https://github.com/opencontainers/image-spec/blob/main/manifest.md) at `+"`"+`ghcr.io/cri-o/bundle:%s`+"`"+`.
+
+### Verification
 
 To verify the artifact signatures via [cosign](https://github.com/sigstore/cosign), run:
 
 `+"```"+`console
 > export COSIGN_EXPERIMENTAL=1
 > cosign verify-blob cri-o.amd64.%s.tar.gz \
-    --certificate-identity https://github.com/cri-o/cri-o/.github/workflows/test.yml@refs/tags/%s \
+    --certificate-identity https://github.com/cri-o/packaging/.github/workflows/obs.yml@refs/heads/main \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-    --certificate-github-workflow-repository cri-o/cri-o \
-    --certificate-github-workflow-ref refs/tags/%s \
-    --signature cri-o.amd64.%s.tar.gz.sig \
-    --certificate cri-o.amd64.%s.tar.gz.cert
+    --certificate-github-workflow-repository cri-o/packaging \
+    --certificate-github-workflow-ref refs/heads/main \
+    --bundle cri-o.amd64.%s.tar.gz.bundle
 `+"```"+`
 
 To verify the bill of materials (SBOM) in [SPDX](https://spdx.org) format using the [bom](https://sigs.k8s.io/bom) tool, run:
@@ -165,6 +185,28 @@ To verify the bill of materials (SBOM) in [SPDX](https://spdx.org) format using 
 `+"```"+`console
 > tar xfz cri-o.amd64.%s.tar.gz
 > bom validate -e cri-o.amd64.%s.tar.gz.spdx -d cri-o
+`+"```"+`
+
+To verify the [OpenVEX](https://openvex.dev) vulnerability report, run:
+
+`+"```"+`console
+> cosign verify-blob cri-o.%s.openvex.json \
+    --certificate-identity https://github.com/cri-o/packaging/.github/workflows/obs.yml@refs/heads/main \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    --certificate-github-workflow-repository cri-o/packaging \
+    --certificate-github-workflow-ref refs/heads/main \
+    --bundle cri-o.%s.openvex.json.bundle
+`+"```"+`
+
+To verify the [SLSA](https://slsa.dev) provenance attestation, run:
+
+`+"```"+`console
+> cosign verify-blob cri-o.%s.provenance.json \
+    --certificate-identity https://github.com/cri-o/packaging/.github/workflows/obs.yml@refs/heads/main \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    --certificate-github-workflow-repository cri-o/packaging \
+    --certificate-github-workflow-ref refs/heads/main \
+    --bundle cri-o.%s.provenance.json.bundle
 `+"```"+`
 
 ## Changelog since %s
@@ -215,18 +257,18 @@ To verify the bill of materials (SBOM) in [SPDX](https://spdx.org) format using 
 		bundleVersion, bundleVersion,
 		bundleVersion, bundleVersion,
 		bundleVersion, bundleVersion,
-		bundleVersion, bundleVersion,
-		bundleVersion, bundleVersion, bundleVersion,
-		bundleVersion, bundleVersion,
+		bundleVersion,
 		startTag,
 	); err != nil {
-		return fmt.Errorf("writing tmplate to file: %w", err)
+		return fmt.Errorf("writing template to file: %w", err)
 	}
 
 	logrus.Infof("Generating release notes")
+
 	outputFile := endRev + ".md"
 	outputFilePath := filepath.Join(outputPath, outputFile)
 	os.RemoveAll(outputFilePath)
+
 	if err := command.Execute(
 		"./build/bin/release-notes",
 		"--org=cri-o",
@@ -235,9 +277,9 @@ To verify the bill of materials (SBOM) in [SPDX](https://spdx.org) format using 
 		"--repo-path=/tmp/cri-o-repo",
 		"--required-author=",
 		"--start-rev="+startTag,
+		"--skip-first-commit",
 		"--end-sha="+head,
 		"--output="+outputFilePath,
-		"--toc",
 		"--go-template=go-template:"+templateFile.Name(),
 	); err != nil {
 		return fmt.Errorf("generate release notes: %w", err)
@@ -249,9 +291,11 @@ To verify the bill of materials (SBOM) in [SPDX](https://spdx.org) format using 
 	}
 
 	logrus.Infof("Checking out branch %s", branch)
+
 	if err := repo.Checkout(branch); err != nil {
 		return fmt.Errorf("checkout %s branch: %w", branch, err)
 	}
+
 	defer func() { err = repo.Checkout(currentBranch) }()
 
 	// Write the target file
@@ -266,10 +310,12 @@ To verify the bill of materials (SBOM) in [SPDX](https://spdx.org) format using 
 	// Update the README
 	readmeFile := "README.md"
 	logrus.Infof("Updating %s", readmeFile)
+
 	readmeSlice, err := readLines(readmeFile)
 	if err != nil {
 		return fmt.Errorf("open %s file: %w", readmeFile, err)
 	}
+
 	link := fmt.Sprintf("- [%s](%s)", endRev, outputFile)
 
 	// Item not in list
@@ -290,11 +336,13 @@ To verify the bill of materials (SBOM) in [SPDX](https://spdx.org) format using 
 	} else {
 		readmeSlice[alreadyExistingIndex] = link
 	}
+
 	if err := os.WriteFile(
 		readmeFile, []byte(strings.Join(readmeSlice, "\n")), 0o644,
 	); err != nil {
 		return fmt.Errorf("write content to file: %w", err)
 	}
+
 	if err := repo.Add(readmeFile); err != nil {
 		return fmt.Errorf("add file to repo: %w", err)
 	}
@@ -309,7 +357,11 @@ To verify the bill of materials (SBOM) in [SPDX](https://spdx.org) format using 
 	const maxRetries = 10
 	for i := 0; i <= maxRetries; i++ {
 		if err := command.New("git", "pull", "--rebase").RunSuccess(); err != nil {
-			return fmt.Errorf("pull and rebase from remote: %w", err)
+			logrus.Errorf("Pull and rebase from remote failed (skipping): %v", err)
+			// A failed release notes GitHub pages update is not critical and
+			// we need the release notes as part of the next CI step to
+			// actually create the release.
+			return nil
 		}
 
 		err := repo.Push(branch)
@@ -336,10 +388,12 @@ func readLines(path string) ([]string, error) {
 	defer file.Close()
 
 	var lines []string
+
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		lines = append(lines, scanner.Text())
 	}
+
 	return lines, scanner.Err()
 }
 
@@ -349,11 +403,12 @@ func indexOfPrefix(prefix string, slice []string) int {
 			return k
 		}
 	}
+
 	return -1
 }
 
 func decVersion(tag string) string {
-	sv, err := util.TagStringToSemver(strings.TrimSpace(tag))
+	sv, err := helpers.TagStringToSemver(strings.TrimSpace(tag))
 	if err != nil {
 		panic(err)
 	}
@@ -361,7 +416,7 @@ func decVersion(tag string) string {
 	// clear any RC
 	sv.Pre = nil
 
-	if sv.Patch > 0 { // nolint: gocritic
+	if sv.Patch > 0 { //nolint: gocritic
 		sv.Patch-- // 1.17.2 -> 1.17.1
 	} else if sv.Minor > 0 {
 		sv.Minor-- // 1.18.0 -> 1.17.0
@@ -379,6 +434,7 @@ func startVersionFromCurrent(ver string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	if semVer.Patch == 0 {
 		// If we're looking at an unreleased (or recently released) branch,
 		// we compare against the last version.
@@ -387,5 +443,6 @@ func startVersionFromCurrent(ver string) (string, error) {
 		// Otherwise, we're comparing against the last patch version.
 		semVer.Patch--
 	}
+
 	return semVer.String(), nil
 }

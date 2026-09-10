@@ -5,19 +5,20 @@ describes the CRI-O governance.
 
 ## Maintainers
 
-| Maintainer        | GitHub ID                                         | Project Roles | Affiliation                               |
-| ----------------- | ------------------------------------------------- | ------------- | ----------------------------------------- |
-| Mrunal Patel      | [mrunalp](https://github.com/mrunalp)             | Approver      | [Red Hat](https://www.github.com/redhat/) |
-| Nalin Dahyabhai   | [nalind](https://github.com/nalind)               | Approver      | [Red Hat](https://www.github.com/redhat/) |
-| Giuseppe Scrivano | [giuseppe](https://github.com/giuseppe)           | Approver      | [Red Hat](https://www.github.com/redhat/) |
-| Urvashi Mohnani   | [umohnani8](https://github.com/umohnani8)         | Approver      | [Red Hat](https://www.github.com/redhat/) |
-| Sascha Grunert    | [saschagrunert](https://github.com/saschagrunert) | Approver      | [Red Hat](https://www.github.com/redhat/) |
-| Peter Hunt        | [pehunt](https://github.com/pehunt)               | Approver      | [Red Hat](https://www.github.com/redhat/) |
-| Fabiano Fidêncio  | [fidencio](https://github.com/fidencio)           | Approver      | [Intel](https://github.com/intel)         |
-| Kir Kolyshkin     | [kolyshkin](https://github.com/kolyshkin)         | Approver      | [Red Hat](https://www.github.com/redhat/) |
-| Skyler Clark      | [wgahnagl](https://github.com/wgahnagl)           | Reviewer      | [Red Hat](https://www.github.com/redhat/) |
-| Qi Wang           | [QiWang19](https://github.com/QiWang19)           | Reviewer      | [Red Hat](https://www.github.com/redhat/) |
-| Krisztian Litkey  | [klihub](https://github.com/klihub)               | Reviewer      | [Intel](https://github.com/intel)         |
+| Maintainer        | GitHub ID                                           | Project Roles | Affiliation                               |
+| ----------------- | --------------------------------------------------- | ------------- | ----------------------------------------- |
+| Mrunal Patel      | [mrunalp](https://github.com/mrunalp)               | Approver      | [Red Hat](https://www.github.com/redhat/) |
+| Nalin Dahyabhai   | [nalind](https://github.com/nalind)                 | Approver      | [Red Hat](https://www.github.com/redhat/) |
+| Giuseppe Scrivano | [giuseppe](https://github.com/giuseppe)             | Approver      | [Red Hat](https://www.github.com/redhat/) |
+| Urvashi Mohnani   | [umohnani8](https://github.com/umohnani8)           | Approver      | [Red Hat](https://www.github.com/redhat/) |
+| Sascha Grunert    | [saschagrunert](https://github.com/saschagrunert)   | Approver      | [Red Hat](https://www.github.com/redhat/) |
+| Peter Hunt        | [pehunt](https://github.com/pehunt)                 | Approver      | [Red Hat](https://www.github.com/redhat/) |
+| Fabiano Fidêncio  | [fidencio](https://github.com/fidencio)             | Approver      | [Intel](https://github.com/intel)         |
+| Sohan Kunkerkar   | [sohankunkerkar](https://github.com/sohankunkerkar) | Approver      | [Red Hat](https://www.github.com/redhat/) |
+| Ayato Tokubi      | [bitoku](https://github.com/bitoku)                 | Approver      | [Red Hat](https://www.github.com/redhat/) |
+| Skyler Clark      | [wgahnagl](https://github.com/wgahnagl)             | Reviewer      | [Red Hat](https://www.github.com/redhat/) |
+| Qi Wang           | [QiWang19](https://github.com/QiWang19)             | Reviewer      | [Red Hat](https://www.github.com/redhat/) |
+| Krisztian Litkey  | [klihub](https://github.com/klihub)                 | Reviewer      | [Intel](https://github.com/intel)         |
 
 ## Alumni
 
@@ -28,7 +29,15 @@ describes the CRI-O governance.
 | Antonio Murdaca   | [runcom](https://github.com/runcom)       | Approver      | [Red Hat](https://www.github.com/redhat/) |
 | Dan Walsh         | [rhatdan](https://github.com/rhatdan)     | Approver      | [Red Hat](https://github.com/redhat)      |
 | Valentin Rothberg | [vrothberg](https://github.com/vrothberg) | Approver      | [Red Hat](https://github.com/redhat)      |
+| Kir Kolyshkin     | [kolyshkin](https://github.com/kolyshkin) | Approver      | [Red Hat](https://www.github.com/redhat/) |
 
 ## Credits
 
-The structure of this document was based off of the equivalent one in the [Argo Project](https://github.com/argoproj/argoproj/blob/master/MAINTAINERS.md).
+The structure of this document was based off of the equivalent one
+in the [Argo Project][argo-maintainers].
+
+<!-- markdownlint-disable MD013 -->
+
+[argo-maintainers]: https://github.com/argoproj/argoproj/blob/master/MAINTAINERS.md
+
+<!-- markdownlint-enable MD013 -->
