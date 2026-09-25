@@ -4,14 +4,15 @@ import (
 	"context"
 	"os"
 
-	cstorage "github.com/containers/storage"
-	"github.com/cri-o/cri-o/server"
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	cstorage "go.podman.io/storage"
+	"go.uber.org/mock/gomock"
+
+	"github.com/cri-o/cri-o/server"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Server", func() {
 	// Prepare the sut
 	BeforeEach(beforeEach)
@@ -53,6 +54,7 @@ var _ = t.Describe("Server", func() {
 		It("should succeed with valid GID/UID mappings", func() {
 			// Given
 			mockNewServer()
+
 			serverConfig.UIDMappings = "1:1:1"
 			serverConfig.GIDMappings = "1:1:1"
 
@@ -67,6 +69,7 @@ var _ = t.Describe("Server", func() {
 		It("should succeed with enabled TLS", func() {
 			// Given
 			mockNewServer()
+
 			serverConfig.StreamEnableTLS = true
 			serverConfig.StreamTLSKey = "../test/testdata/key.pem"
 			serverConfig.StreamTLSCert = "../test/testdata/cert.pem"
@@ -81,10 +84,13 @@ var _ = t.Describe("Server", func() {
 
 		It("should succeed with container restore", func() {
 			// Given
+			graphroot := t.MustTempDir("graphroot")
 			gomock.InOrder(
+				cniPluginMock.EXPECT().StatusWithContext(gomock.Any()).Return(nil),
 				libMock.EXPECT().GetData().Times(2).Return(serverConfig),
 				libMock.EXPECT().GetStore().Return(storeMock, nil),
 				libMock.EXPECT().GetData().Return(serverConfig),
+				storeMock.EXPECT().GraphRoot().Return(graphroot),
 				storeMock.EXPECT().Containers().
 					Return([]cstorage.Container{
 						{
@@ -112,7 +118,10 @@ var _ = t.Describe("Server", func() {
 				storeMock.EXPECT().
 					FromContainerDirectory(gomock.Any(), gomock.Any()).
 					Return([]byte{}, nil),
+				cniPluginMock.EXPECT().GC(gomock.Any(), gomock.Len(0)).
+					Return(nil),
 			)
+			Expect(serverConfig.SetCNIPlugin(cniPluginMock)).To(Succeed())
 
 			// When
 			server, err := server.New(context.Background(), libMock)
@@ -188,6 +197,7 @@ var _ = t.Describe("Server", func() {
 		It("should fail with invalid stream address and port", func() {
 			// Given
 			mockNewServer()
+
 			serverConfig.StreamAddress = invalid
 			serverConfig.StreamPort = invalid
 
@@ -202,6 +212,7 @@ var _ = t.Describe("Server", func() {
 		It("should fail with invalid TLS certificates", func() {
 			// Given
 			mockNewServer()
+
 			serverConfig.StreamEnableTLS = true
 			serverConfig.StreamTLSCert = invalid
 			serverConfig.StreamTLSKey = invalid
@@ -215,6 +226,7 @@ var _ = t.Describe("Server", func() {
 		})
 		It("should fail with invalid timeout duration", func() {
 			mockNewServer()
+
 			serverConfig.StreamIdleTimeout = "invalid duration"
 
 			server, err := server.New(context.Background(), libMock)
@@ -223,6 +235,7 @@ var _ = t.Describe("Server", func() {
 		})
 		It("should succeed to set a valid timeout duration", func() {
 			mockNewServer()
+
 			serverConfig.StreamIdleTimeout = "200ms"
 
 			server, err := server.New(context.Background(), libMock)
@@ -231,7 +244,8 @@ var _ = t.Describe("Server", func() {
 		})
 		It("should succeed with hostport mapping disabled", func() {
 			mockNewServer()
-			serverConfig.RuntimeConfig.DisableHostPortMapping = true
+
+			serverConfig.DisableHostPortMapping = true
 
 			server, err := server.New(context.Background(), libMock)
 			Expect(err).ToNot(HaveOccurred())
@@ -246,6 +260,7 @@ var _ = t.Describe("Server", func() {
 		It("should succeed", func() {
 			// Given
 			go sut.StartExitMonitor(context.Background())
+
 			closeChan := sut.MonitorsCloseChan()
 			Expect(closeChan).NotTo(BeNil())
 

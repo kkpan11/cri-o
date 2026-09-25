@@ -3,15 +3,16 @@ package sandbox_test
 import (
 	"os"
 
-	"github.com/cri-o/cri-o/internal/config/nsmgr"
-	nsmgrtest "github.com/cri-o/cri-o/internal/config/nsmgr/test"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/cri-o/cri-o/internal/config/nsmgr"
+	nsmgrtest "github.com/cri-o/cri-o/internal/config/nsmgr/test"
 )
 
 const numNamespaces = 4
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("SandboxManagedNamespaces", func() {
 	// Setup the SUT
 	BeforeEach(beforeEach)
@@ -304,6 +305,7 @@ var _ = t.Describe("SandboxManagedNamespaces", func() {
 			for _, ns := range nsPaths {
 				Expect(ns.Path()).To(ContainSubstring("/proc"))
 			}
+
 			Expect(nsPaths).To(HaveLen(numNamespaces))
 			Expect(testSandbox.PidNsPath()).To(ContainSubstring("/proc"))
 		})
@@ -331,6 +333,7 @@ var _ = t.Describe("SandboxManagedNamespaces", func() {
 			for _, ns := range nsPaths {
 				Expect(ns.Path()).NotTo(ContainSubstring("/proc"))
 			}
+
 			Expect(nsPaths).To(HaveLen(numNamespaces))
 
 			Expect(testSandbox.PidNsPath()).To(ContainSubstring("/proc"))

@@ -8,11 +8,13 @@ import (
 	"github.com/opencontainers/runtime-tools/generate"
 	"github.com/sirupsen/logrus"
 	"k8s.io/utils/cpuset"
+
+	"github.com/cri-o/cri-o/internal/annotations"
 )
 
 const (
 	milliCPUToCPU = 1000
-	// 100000 microseconds is equivalent to 100ms
+	// 100000 microseconds is equivalent to 100ms.
 	defaultQuotaPeriod = 100000
 	// 1000 microseconds is equivalent to 1ms
 	// defined here:
@@ -75,6 +77,7 @@ func (w Workloads) Validate() error {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -82,9 +85,11 @@ func (w *WorkloadConfig) Validate(workloadName string) error {
 	if w.ActivationAnnotation == "" {
 		return fmt.Errorf("annotation shouldn't be empty for workload %q", workloadName)
 	}
+
 	if err := w.ValidateWorkloadAllowedAnnotations(); err != nil {
 		return err
 	}
+
 	return w.Resources.ValidateDefaults()
 }
 
@@ -93,10 +98,13 @@ func (w *WorkloadConfig) ValidateWorkloadAllowedAnnotations() error {
 	if err != nil {
 		return err
 	}
+
 	logrus.Debugf(
 		"Allowed annotations for workload: %v", w.AllowedAnnotations,
 	)
+
 	w.DisallowedAnnotations = disallowed
+
 	return nil
 }
 
@@ -105,19 +113,28 @@ func (w Workloads) AllowedAnnotations(toFind map[string]string) []string {
 	if workload == nil {
 		return []string{}
 	}
+
 	return workload.AllowedAnnotations
 }
 
 // FilterDisallowedAnnotations filters annotations that are not specified in the allowed_annotations map
-// for a given handler.
+// for a given handler. Internal CRI-O annotations are also stripped.
 // This function returns an error if the runtime handler can't be found.
 // The annotations map is mutated in-place.
 func (w Workloads) FilterDisallowedAnnotations(allowed []string, toFilter map[string]string) error {
+	for k := range toFilter {
+		if annotations.IsInternal(k) {
+			logrus.Warnf("Dropping CRI-O internal annotation from request: %s", k)
+			delete(toFilter, k)
+		}
+	}
+
 	disallowed, err := validateAllowedAndGenerateDisallowedAnnotations(allowed)
 	if err != nil {
 		return err
 	}
-	logrus.Warnf("Allowed annotations are specified for workload %v", allowed)
+
+	logrus.Infof("Allowed annotations are specified for workload %v", allowed)
 
 	for ann := range toFilter {
 		for _, d := range disallowed {
@@ -126,24 +143,38 @@ func (w Workloads) FilterDisallowedAnnotations(allowed []string, toFilter map[st
 			}
 		}
 	}
+
 	return nil
 }
 
-func (w Workloads) MutateSpecGivenAnnotations(ctrName string, specgen *generate.Generator, sboxAnnotations map[string]string) error {
+func (w Workloads) MutateSpecGivenAnnotations(
+	ctrName string,
+	specgen *generate.Generator,
+	sboxAnnotations map[string]string,
+) error {
 	workload := w.workloadGivenActivationAnnotation(sboxAnnotations)
 	if workload == nil {
 		return nil
 	}
-	resources, err := resourcesFromAnnotation(workload.AnnotationPrefix, ctrName, sboxAnnotations, workload.Resources)
+
+	resources, err := resourcesFromAnnotation(
+		workload.AnnotationPrefix,
+		ctrName,
+		sboxAnnotations,
+		workload.Resources,
+	)
 	if err != nil {
 		return err
 	}
+
 	resources.MutateSpec(specgen)
 
 	return nil
 }
 
-func (w Workloads) workloadGivenActivationAnnotation(sboxAnnotations map[string]string) *WorkloadConfig {
+func (w Workloads) workloadGivenActivationAnnotation(
+	sboxAnnotations map[string]string,
+) *WorkloadConfig {
 	for _, wc := range w {
 		for annotation := range sboxAnnotations {
 			if wc.ActivationAnnotation == annotation {
@@ -151,11 +182,17 @@ func (w Workloads) workloadGivenActivationAnnotation(sboxAnnotations map[string]
 			}
 		}
 	}
+
 	return nil
 }
 
-func resourcesFromAnnotation(prefix, ctrName string, allAnnotations map[string]string, defaultResources *Resources) (*Resources, error) {
+func resourcesFromAnnotation(
+	prefix, ctrName string,
+	allAnnotations map[string]string,
+	defaultResources *Resources,
+) (*Resources, error) {
 	annotationKey := prefix + "/" + ctrName
+
 	value, ok := allAnnotations[annotationKey]
 	if !ok {
 		return defaultResources, nil
@@ -165,6 +202,7 @@ func resourcesFromAnnotation(prefix, ctrName string, allAnnotations map[string]s
 	if err := json.Unmarshal([]byte(value), &resources); err != nil {
 		return nil, err
 	}
+
 	if resources == nil {
 		return nil, nil
 	}
@@ -172,15 +210,19 @@ func resourcesFromAnnotation(prefix, ctrName string, allAnnotations map[string]s
 	if resources.CPUSet == "" {
 		resources.CPUSet = defaultResources.CPUSet
 	}
+
 	if resources.CPUShares == 0 {
 		resources.CPUShares = defaultResources.CPUShares
 	}
+
 	if resources.CPUQuota == 0 {
 		resources.CPUQuota = defaultResources.CPUQuota
 	}
+
 	if resources.CPUPeriod == 0 {
 		resources.CPUPeriod = defaultResources.CPUPeriod
 	}
+
 	if resources.CPULimit == 0 {
 		resources.CPULimit = defaultResources.CPULimit
 	}
@@ -205,12 +247,10 @@ func milliCPUToQuota(milliCPU, period int64) (quota int64) {
 	}
 
 	// We then convert the milliCPU to a value normalized over a period.
-	quota = (milliCPU * period) / milliCPUToCPU
+	quota = max(
+		// quota needs to be a minimum of 1ms.
+		(milliCPU*period)/milliCPUToCPU, minQuotaPeriod)
 
-	// quota needs to be a minimum of 1ms.
-	if quota < minQuotaPeriod {
-		quota = minQuotaPeriod
-	}
 	return quota
 }
 
@@ -222,9 +262,11 @@ func (r *Resources) ValidateDefaults() error {
 	if _, err := cpuset.Parse(r.CPUSet); err != nil {
 		return fmt.Errorf("unable to parse cpuset %q: %w", r.CPUSet, err)
 	}
+
 	if r.CPUQuota != 0 && r.CPUQuota < int64(r.CPUShares) {
 		return fmt.Errorf("cpuquota %d cannot be less than cpushares %d", r.CPUQuota, r.CPUShares)
 	}
+
 	if r.CPUPeriod != 0 && r.CPUPeriod < minQuotaPeriod {
 		return fmt.Errorf("cpuperiod %d cannot be less than 1000 microseconds", r.CPUPeriod)
 	}
@@ -236,15 +278,19 @@ func (r *Resources) MutateSpec(specgen *generate.Generator) {
 	if r == nil {
 		return
 	}
+
 	if r.CPUSet != "" {
 		specgen.SetLinuxResourcesCPUCpus(r.CPUSet)
 	}
+
 	if r.CPUShares != 0 {
 		specgen.SetLinuxResourcesCPUShares(r.CPUShares)
 	}
+
 	if r.CPUQuota != 0 {
 		specgen.SetLinuxResourcesCPUQuota(r.CPUQuota)
 	}
+
 	if r.CPUPeriod != 0 {
 		specgen.SetLinuxResourcesCPUPeriod(r.CPUPeriod)
 	}

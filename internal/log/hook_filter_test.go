@@ -3,10 +3,11 @@ package log_test
 import (
 	"fmt"
 
-	"github.com/cri-o/cri-o/internal/log"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/sirupsen/logrus"
+
+	"github.com/cri-o/cri-o/internal/log"
 )
 
 var _ = t.Describe("HookFilter", func() {
@@ -51,9 +52,9 @@ var _ = t.Describe("HookFilter", func() {
 			// Given
 			hook, err := log.NewFilterHook("none")
 			Expect(err).ToNot(HaveOccurred())
-			entry := &logrus.Entry{
-				Message: "This message will be filtered out",
-			}
+
+			entry := logrus.NewEntry(logrus.New())
+			entry.Message = "This message will be filtered out"
 
 			// When
 			res := hook.Fire(entry)
@@ -67,10 +68,10 @@ var _ = t.Describe("HookFilter", func() {
 			// Given
 			hook, err := log.NewFilterHook("")
 			Expect(err).ToNot(HaveOccurred())
-			entry := &logrus.Entry{
-				Message: fmt.Sprintf("A slice: %v", []byte{1, 2, 3, 4}),
-				Level:   logrus.DebugLevel,
-			}
+
+			entry := logrus.NewEntry(logrus.New())
+			entry.Message = fmt.Sprintf("A slice: %v", []byte{1, 2, 3, 4})
+			entry.Level = logrus.DebugLevel
 
 			// When
 			res := hook.Fire(entry)

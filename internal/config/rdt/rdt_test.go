@@ -10,10 +10,11 @@ import (
 func tempFileWithData(data string) string {
 	f := t.MustTempFile("")
 	Expect(os.WriteFile(f, []byte(data), 0o644)).To(Succeed())
+
 	return f
 }
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("When parsing RDT config file", func() {
 	t.Describe("non-existent file", func() {
 		It("should return an error", func() {

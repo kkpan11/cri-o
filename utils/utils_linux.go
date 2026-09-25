@@ -1,30 +1,38 @@
 package utils
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"time"
 
-	"github.com/cri-o/cri-o/internal/dbusmgr"
-	"golang.org/x/net/context"
+	systemdDbus "github.com/coreos/go-systemd/v22/dbus"
 	"golang.org/x/sys/unix"
 
-	systemdDbus "github.com/coreos/go-systemd/v22/dbus"
+	"github.com/cri-o/cri-o/internal/dbusmgr"
 )
 
-// RunUnderSystemdScope adds the specified pid to a systemd scope
-func RunUnderSystemdScope(mgr *dbusmgr.DbusConnManager, pid int, slice, unitName string, properties ...systemdDbus.Property) (err error) {
+// RunUnderSystemdScope adds the specified pid to a systemd scope.
+func RunUnderSystemdScope(
+	mgr *dbusmgr.DbusConnManager,
+	pid int,
+	slice, unitName string,
+	properties ...systemdDbus.Property,
+) (err error) {
 	ctx := context.Background()
 	// sanity check
 	if mgr == nil {
 		return errors.New("dbus manager is nil")
 	}
-	defaultProperties := []systemdDbus.Property{
+
+	defaultProperties := make([]systemdDbus.Property, 0, 3+len(properties))
+	defaultProperties = append(defaultProperties,
 		newProp("PIDs", []uint32{uint32(pid)}),
 		newProp("Delegate", true),
 		newProp("DefaultDependencies", false),
-	}
+	)
+
 	properties = append(defaultProperties, properties...)
 	if slice != "" {
 		properties = append(properties, systemdDbus.PropSlice(slice))
@@ -33,8 +41,10 @@ func RunUnderSystemdScope(mgr *dbusmgr.DbusConnManager, pid int, slice, unitName
 	// won't be blocked on channel send while holding the jobListener lock
 	// (RHBZ#2082344).
 	ch := make(chan string, 1)
+
 	if err := mgr.RetryOnDisconnect(func(c *systemdDbus.Conn) error {
 		_, err = c.StartTransientUnitContext(ctx, unitName, "replace", properties, ch)
+
 		return err
 	}); err != nil {
 		return fmt.Errorf("start transient unit %q: %w", unitName, err)
@@ -44,8 +54,14 @@ func RunUnderSystemdScope(mgr *dbusmgr.DbusConnManager, pid int, slice, unitName
 	select {
 	case s := <-ch:
 		close(ch)
+
 		if s != "done" {
-			return fmt.Errorf("error moving conmon with pid %d to systemd unit %s: got %s", pid, unitName, s)
+			return fmt.Errorf(
+				"error moving conmon with pid %d to systemd unit %s: got %s",
+				pid,
+				unitName,
+				s,
+			)
 		}
 	case <-time.After(time.Minute * 6):
 		// This case is a work around to catch situations where the dbus library sends the
@@ -60,7 +76,7 @@ func RunUnderSystemdScope(mgr *dbusmgr.DbusConnManager, pid int, slice, unitName
 	return nil
 }
 
-// Syncfs ensures the file system at path is synced to disk
+// Syncfs ensures the file system at path is synced to disk.
 func Syncfs(path string) error {
 	f, err := os.OpenFile(path, os.O_RDONLY, 0o755)
 	if err != nil {
@@ -71,5 +87,6 @@ func Syncfs(path string) error {
 	if err := unix.Syncfs(int(f.Fd())); err != nil {
 		return err
 	}
+
 	return nil
 }

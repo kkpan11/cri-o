@@ -41,6 +41,14 @@ function setup_test() {
     CRIO_CNI_CONFIG="$TESTDIR/cni/net.d/"
     CRIO_LOG="$TESTDIR/crio.log"
 
+    # Override NRI socket to a testcase-specific location.
+    CRIO_NRI_CONFIG="$CRIO_CONFIG_DIR/10-crio-nri.conf"
+    NRI_SOCKET="$TESTDIR/nri.sock"
+    cat <<EOF >"$CRIO_NRI_CONFIG"
+[crio.nri]
+nri_listen = "$NRI_SOCKET"
+EOF
+
     # Copy all the CNI dependencies around to ensure encapsulated tests
     CRIO_CNI_PLUGIN="$TESTDIR/cni-bin"
     mkdir "$CRIO_CNI_PLUGIN"
@@ -76,7 +84,21 @@ function crio() {
 
 # Run crictl using the binary specified by $CRICTL_BINARY.
 function crictl() {
-    "$CRICTL_BINARY" -t 10m --config "$CRICTL_CONFIG_FILE" -r "unix://$CRIO_SOCKET" -i "unix://$CRIO_SOCKET" "$@"
+    "$CRICTL_BINARY" -t "$CRICTL_TIMEOUT" --config "$CRICTL_CONFIG_FILE" -r "unix://$CRIO_SOCKET" -i "unix://$CRIO_SOCKET" "$@"
+}
+
+# Pull an image, tolerating transient registry failures. copyimg already
+# retries for the preloaded images, but that only covers get_img(): a pull
+# issued inside a test goes through CRI-O and gets none. Fixed delay rather
+# than copyimg's backoff - neither jitters, and CRICTL_TIMEOUT dominates.
+#
+# Only for pulls expected to succeed: one expected to fail would be retried
+# three times first.
+# retry captures stdout, so re-emit it: callers parse the pulled reference out
+# of it, and it belongs in the log for a failing test either way.
+function crictl_pull() {
+    retry 3 5 crictl pull "$@" || return 1
+    printf '%s\n' "$output"
 }
 
 # Run the runtime binary with the specified RUNTIME_ROOT
@@ -169,8 +191,6 @@ function setup_crio() {
         --irqbalance-config-restore-file "$IRQBALANCE_CONFIG_RESTORE_FILE" \
         --signature-policy "$SIGNATURE_POLICY" \
         --signature-policy-dir "$SIGNATURE_POLICY_DIR" \
-        --registry "quay.io" \
-        --registry "docker.io" \
         -r "$TESTDIR/crio" \
         --runroot "$TESTDIR/crio-run" \
         --cni-default-network "$CNI_DEFAULT_NETWORK" \
@@ -206,6 +226,7 @@ function check_images() {
     eval "$(jq -r '.images[] |
         select(.repoTags[0] == "quay.io/crio/fedora-crio-ci:latest") |
         "REDIS_IMAGEID=" + .id + "\n" +
+        "REDIS_IMAGEDIGEST=" + .repoDigests[0] + "\n" +
 	"REDIS_IMAGEREF=" + .repoDigests[0]' <<<"$json")"
 }
 
@@ -240,7 +261,16 @@ function check_journald() {
 
 # get a random available port
 function free_port() {
-    python -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()'
+    local port
+    for _ in {1..5}; do
+        port=$((RANDOM % 22768 + 10000))
+        if ! host_and_port_listens ".*" "$port"; then
+            echo "$port"
+            return 0
+        fi
+    done
+    echo "ERROR: free_port: could not find a free port after 5 attempts" >&2
+    return 1
 }
 
 # Check whether a port is listening
@@ -254,6 +284,56 @@ function host_and_port_listens() {
     local port="$2"
 
     netstat -ln46 | grep -E -q "${host}:${port}\b"
+}
+
+function check_kernel_version() {
+    local version="$1"
+
+    required_major=${version%%.*}
+    required_minor=${version##*.}
+
+    [[ $(uname -r) =~ ([0-9]+)\.([0-9]+) ]]
+    major=${BASH_REMATCH[1]}
+    minor=${BASH_REMATCH[2]}
+
+    ((major > required_major)) || ((major == required_major && minor >= required_minor))
+}
+
+function check_crictl_version() {
+    local version="$1"
+
+    required_major=${version%%.*}
+    required_minor=${version##*.}
+
+    crictl_binary=${CRICTL_BINARY:-/usr/bin/crictl}
+
+    [[ $($crictl_binary --version) =~ ([0-9]+)\.([0-9]+) ]]
+    major=${BASH_REMATCH[1]}
+    minor=${BASH_REMATCH[2]}
+
+    ((major > required_major)) || ((major == required_major && minor >= required_minor))
+}
+
+function requires_kernel() {
+    check_kernel_version "$@" ||
+        skip "requires kernel version \"$1\" or newer"
+}
+
+function requires_crictl() {
+    check_crictl_version "$@" ||
+        skip "requires crictl version \"$1\" or newer"
+}
+
+function skip_if_selinux_disabled() {
+    if ! is_selinux_enabled; then
+        skip "selinux is disabled"
+    fi
+}
+
+function skip_if_vm_runtime() {
+    if [[ $RUNTIME_TYPE == vm ]]; then
+        skip "not applicable to vm runtime type"
+    fi
 }
 
 function cleanup_ctrs() {
@@ -295,14 +375,6 @@ function restart_crio() {
     fi
 }
 
-function cleanup_lvm() {
-    if [ -n "${LVM_DEVICE+x}" ]; then
-        lvm lvremove -y storage/thinpool
-        lvm vgremove -y storage
-        lvm pvremove -y "$LVM_DEVICE"
-    fi
-}
-
 function cleanup_testdir() {
     # shellcheck disable=SC2013
     # Note: By using 'sort -r' we're ensuring longer paths go first, which
@@ -339,8 +411,12 @@ function cleanup_test() {
         cleanup_ctrs
         cleanup_pods
         stop_crio
-        cleanup_lvm
         cleanup_testdir
+        if [ "$RUNTIME_TYPE" == "vm" ]; then
+            # cleanup left over kata processes
+            # don't fail if there is none
+            run killall containerd-shim-kata-v2
+        fi
     else
         echo >&3 "* Failed \"$BATS_TEST_DESCRIPTION\", TESTDIR=$TESTDIR, LVM_DEVICE=${LVM_DEVICE:-}"
     fi
@@ -358,27 +434,44 @@ function is_apparmor_enabled() {
     grep -q Y "$APPARMOR_PARAMETERS_FILE_PATH" 2>/dev/null
 }
 
+function is_selinux_enabled() {
+    selinuxenabled 2>/dev/null || false
+}
+
+function is_selinux_enforcing() {
+    command -v getenforce 1>/dev/null || false
+
+    [[ $(getenforce) == "Enforcing" ]]
+}
+
 function prepare_network_conf() {
     mkdir -p "$CRIO_CNI_CONFIG"
-    cat >"$CRIO_CNI_CONFIG/10-crio.conf" <<-EOF
+    cat >"$CRIO_CNI_CONFIG/10-crio.conflist" <<-EOF
 {
     "cniVersion": "0.3.1",
     "name": "$CNI_DEFAULT_NETWORK",
-    "type": "$CNI_TYPE",
-    "bridge": "cni0",
-    "isGateway": true,
-    "ipMasq": true,
-    "ipam": {
-        "type": "host-local",
-        "routes": [
-            { "dst": "$POD_IPV4_DEF_ROUTE" },
-            { "dst": "$POD_IPV6_DEF_ROUTE" }
-        ],
-        "ranges": [
-            [{ "subnet": "$POD_IPV4_CIDR" }],
-            [{ "subnet": "$POD_IPV6_CIDR" }]
-        ]
-    }
+    "disableGC": true,
+    "plugins": [
+        {
+            "cniVersion": "0.3.1",
+            "name": "$CNI_DEFAULT_NETWORK",
+            "type": "$CNI_TYPE",
+            "bridge": "cni0",
+            "isGateway": true,
+            "ipMasq": true,
+            "ipam": {
+                "type": "host-local",
+                "routes": [
+                    { "dst": "$POD_IPV4_DEF_ROUTE" },
+                    { "dst": "$POD_IPV6_DEF_ROUTE" }
+                ],
+                "ranges": [
+                    [{ "subnet": "$POD_IPV4_CIDR" }],
+                    [{ "subnet": "$POD_IPV6_CIDR" }]
+                ]
+            }
+        }
+    ]
 }
 EOF
 }
@@ -435,7 +528,28 @@ function reload_crio() {
     kill -HUP "$CRIO_PID"
 }
 
+# wait_for_log <log message> [line to skip]
+#
+# Wait for a given log message in crio log file.
+#
+# If a second parameter is given, the log will be truncated from start to the
+# first occurrence of the second parameter. This allow to catch messages after
+# the given string.
+#
+# The function registers the timestamp of the first occurrence it finds to an
+# environment variable "LAST_TIMESTAMP".
+# This variable can then be used as the second parameter to the function, making
+# sure that we can find repetitions of the same log messages over time.
+#
+# $1 : log message to wait for
+# $2 : previous string that needs to be skipped
+#
 function wait_for_log() {
+    export LAST_TIMESTAMP
+    local LOGFILE="$CRIO_LOG"
+    if [ "$2" != "" ]; then
+        LOGFILE=$(mktemp "$TESTDIR"/wait_for_log_XXXXXX)
+    fi
     CNT=0
     while true; do
         if [[ $CNT -gt 50 ]]; then
@@ -443,7 +557,18 @@ function wait_for_log() {
             exit 1
         fi
 
-        if grep -iq "$1" "$CRIO_LOG"; then
+        if [ "$2" != "" ]; then
+            # create a temp log file containing only the logs after the given string
+            sed -e "1,/$2/d" <"$CRIO_LOG" >"$LOGFILE"
+        fi
+        status=0 # initialize the variable to make shellcheck happy
+        run grep -i -m 1 "$1" "$LOGFILE"
+        if [ "$status" -eq 0 ]; then
+            # register only the time part of the timestamp
+            # this should be a string with no space in it, and that is unique in the log
+            # NOTE: log time format = 2006-01-02T15:04:05.999999999Z
+            TIMESTAMP_REGEXP="[[:digit:]]{4}-[[:digit:]]{2}-[[:digit:]]{2}.[[:digit:]]{2}:[[:digit:]]{2}:[[:digit:]]{2}.[[:digit:]]*."
+            LAST_TIMESTAMP=$(echo "$output" | grep -oE "time=\"$TIMESTAMP_REGEXP" | cut -d" " -f2)
             break
         fi
 
@@ -466,6 +591,8 @@ function is_cgroup_v2() {
 function create_runtime_with_allowed_annotation() {
     local NAME="$1"
     local ANNOTATION="$2"
+    unset CONTAINER_DEFAULT_RUNTIME
+    unset CONTAINER_RUNTIMES
     cat <<EOF >"$CRIO_CONFIG_DIR/01-$NAME.conf"
 [crio.runtime]
 default_runtime = "$NAME"
@@ -474,6 +601,24 @@ runtime_path = "$RUNTIME_BINARY_PATH"
 runtime_root = "$RUNTIME_ROOT"
 runtime_type = "$RUNTIME_TYPE"
 allowed_annotations = ["$ANNOTATION"]
+EOF
+}
+
+function create_runtime_with_seccomp_profile() {
+    local NAME="$1"
+    local RUNTIME_PROFILE="$2"
+    local HANDLER_PROFILE="$3"
+    unset CONTAINER_DEFAULT_RUNTIME
+    unset CONTAINER_RUNTIMES
+    cat <<EOF >"$CRIO_CONFIG_DIR/01-$NAME.conf"
+[crio.runtime]
+default_runtime = "$NAME"
+seccomp_profile = "$RUNTIME_PROFILE"
+[crio.runtime.runtimes.$NAME]
+runtime_path = "$RUNTIME_BINARY_PATH"
+runtime_root = "$RUNTIME_ROOT"
+runtime_type = "$RUNTIME_TYPE"
+seccomp_profile = "$HANDLER_PROFILE"
 EOF
 }
 
@@ -687,4 +832,30 @@ function annotations_equal() {
     contains "$expected" "$cni_plugin_received"
     received_contains_expected=$?
     [[ $expected_contains_received -eq 0 ]] && [[ $received_contains_expected -eq 0 ]]
+}
+
+function remove_random_storage_layer() {
+    find "$TESTDIR"/crio/overlay -maxdepth 1 | grep '.*/[a-f0-9\-]\{64\}.*' | head -1 | xargs rm -Rf
+}
+
+function is_using_crun() {
+    runtime --version | grep -q crun
+}
+
+function start_crio_with_websocket_stream_server() {
+    setup_crio
+
+    cat <<EOF >"$CRIO_CONFIG_DIR/99-websocket.conf"
+[crio.runtime]
+default_runtime = "websocket"
+[crio.runtime.runtimes.websocket]
+runtime_path = "$RUNTIME_BINARY_PATH"
+runtime_type = "pod"
+monitor_path = ""
+stream_websockets = true
+EOF
+    unset CONTAINER_DEFAULT_RUNTIME
+    unset CONTAINER_RUNTIMES
+
+    start_crio_no_setup
 }

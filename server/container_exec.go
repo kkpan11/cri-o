@@ -1,21 +1,46 @@
 package server
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"io"
 
-	"github.com/cri-o/cri-o/internal/log"
-	"github.com/cri-o/cri-o/internal/oci"
-	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"k8s.io/client-go/tools/remotecommand"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"k8s.io/cri-streaming/pkg/streaming/remotecommand"
+
+	"github.com/cri-o/cri-o/internal/log"
 )
 
 // Exec prepares a streaming endpoint to execute a command in the container.
 func (s *Server) Exec(ctx context.Context, req *types.ExecRequest) (*types.ExecResponse, error) {
+	c, err := s.GetContainerFromShortID(ctx, req.GetContainerId())
+	if err != nil {
+		return nil, fmt.Errorf("could not find container %q: %w", req.GetContainerId(), err)
+	}
+
+	runtimeHandler := s.getSandbox(ctx, c.Sandbox()).RuntimeHandler()
+	if streamWebsocket, err := s.Runtime().
+		RuntimeStreamWebsockets(runtimeHandler); err == nil &&
+		streamWebsocket {
+		log.Debugf(ctx, "Runtime handler %q is configured to use websockets", runtimeHandler)
+
+		url, err := s.Runtime().
+			ServeExecContainer(ctx, c, req.GetCmd(), req.GetTty(), req.GetStdin(), req.GetStdout(), req.GetStderr())
+		if err != nil {
+			return nil, fmt.Errorf(
+				"could not serve exec for container %q: %w",
+				req.GetContainerId(),
+				err,
+			)
+		}
+
+		log.Infof(ctx, "Using exec URL from container monitor")
+
+		return &types.ExecResponse{Url: url}, nil
+	}
+
 	resp, err := s.getExec(req)
 	if err != nil {
 		return nil, fmt.Errorf("unable to prepare exec endpoint: %w", err)
@@ -24,23 +49,28 @@ func (s *Server) Exec(ctx context.Context, req *types.ExecRequest) (*types.ExecR
 	return resp, nil
 }
 
-// Exec endpoint for streaming.Runtime
-func (s StreamService) Exec(ctx context.Context, containerID string, cmd []string, stdin io.Reader, stdout, stderr io.WriteCloser, tty bool, resizeChan <-chan remotecommand.TerminalSize) error {
+// Exec endpoint for streaming.Runtime.
+func (s *StreamService) Exec(
+	ctx context.Context,
+	containerID string,
+	cmd []string,
+	stdin io.Reader,
+	stdout, stderr io.WriteCloser,
+	tty bool,
+	resizeChan <-chan remotecommand.TerminalSize,
+) error {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
+
 	c, err := s.runtimeServer.GetContainerFromShortID(ctx, containerID)
 	if err != nil {
 		return status.Errorf(codes.NotFound, "could not find container %q: %v", containerID, err)
 	}
 
-	if err := s.runtimeServer.Runtime().UpdateContainerStatus(s.ctx, c); err != nil {
-		return err
+	if err := c.Living(); err != nil {
+		return status.Errorf(codes.NotFound, "container is not created or running: %v", err)
 	}
 
-	cState := c.State()
-	if !(cState.Status == oci.ContainerStateRunning || cState.Status == oci.ContainerStateCreated) {
-		return errors.New("container is not created or running")
-	}
-
-	return s.runtimeServer.Runtime().ExecContainer(s.ctx, c, cmd, stdin, stdout, stderr, tty, resizeChan)
+	return s.runtimeServer.ContainerServer.Runtime().
+		ExecContainer(s.ctx, c, cmd, stdin, stdout, stderr, tty, resizeChan)
 }

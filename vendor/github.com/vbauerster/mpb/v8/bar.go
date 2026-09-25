@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"math"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/acarl005/stripansi"
@@ -19,41 +19,38 @@ type Bar struct {
 	priority     int // used by heap
 	frameCh      chan *renderFrame
 	operateState chan func(*bState)
-	done         chan struct{}
 	container    *Progress
 	bs           *bState
+	bsOk         chan struct{}
+	ctx          context.Context
 	cancel       func()
 }
 
-type syncTable [2][]chan int
-type extenderFunc func([]io.Reader, decor.Statistics) ([]io.Reader, error)
+type decorSyncTable [2][]*decor.Sync
+type extenderFunc func(decor.Statistics, ...io.Reader) ([]io.Reader, error)
 
 // bState is actual bar's state.
 type bState struct {
-	id                int
-	priority          int
-	reqWidth          int
-	shutdown          int
-	total             int64
-	current           int64
-	refill            int64
-	trimSpace         bool
-	completed         bool
-	aborted           bool
-	triggerComplete   bool
-	rmOnComplete      bool
-	noPop             bool
-	autoRefresh       bool
-	aDecorators       []decor.Decorator
-	pDecorators       []decor.Decorator
-	averageDecorators []decor.AverageDecorator
-	ewmaDecorators    []decor.EwmaDecorator
-	shutdownListeners []decor.ShutdownListener
-	buffers           [3]*bytes.Buffer
-	filler            BarFiller
-	extender          extenderFunc
-	renderReq         chan<- time.Time
-	waitBar           *Bar // key for (*pState).queueBars
+	id              int
+	priority        int
+	reqWidth        int
+	shutdown        int
+	total           int64
+	current         int64
+	refill          int64
+	buffers         [3]*bytes.Buffer
+	decorGroups     [2][]decor.Decorator
+	ewmaDecorators  []decor.EwmaDecorator
+	filler          BarFiller
+	extender        extenderFunc
+	renderReq       chan<- time.Time
+	waitBar         *Bar // key for (*pState).queueBars
+	trimSpace       bool
+	aborted         bool
+	triggerComplete bool
+	rmOnComplete    bool
+	noPop           bool
+	autoRefresh     bool
 }
 
 type renderFrame struct {
@@ -62,23 +59,6 @@ type renderFrame struct {
 	rmOnComplete bool
 	noPop        bool
 	err          error
-}
-
-func newBar(ctx context.Context, container *Progress, bs *bState) *Bar {
-	ctx, cancel := context.WithCancel(ctx)
-
-	bar := &Bar{
-		priority:     bs.priority,
-		frameCh:      make(chan *renderFrame, 1),
-		operateState: make(chan func(*bState)),
-		done:         make(chan struct{}),
-		container:    container,
-		cancel:       cancel,
-	}
-
-	container.bwg.Add(1)
-	go bar.serve(ctx, bs)
-	return bar
 }
 
 // ProxyReader wraps io.Reader with metrics required for progress
@@ -90,11 +70,13 @@ func (b *Bar) ProxyReader(r io.Reader) io.ReadCloser {
 	if r == nil {
 		panic("expected non nil io.Reader")
 	}
-	result := make(chan bool)
+	result := make(chan io.ReadCloser, 1)
 	select {
-	case b.operateState <- func(s *bState) { result <- len(s.ewmaDecorators) != 0 }:
-		return newProxyReader(r, b, <-result)
-	case <-b.done:
+	case b.operateState <- func(s *bState) {
+		result <- newProxyReader(r, b, len(s.ewmaDecorators) != 0)
+	}:
+		return <-result
+	case <-b.ctx.Done():
 		return nil
 	}
 }
@@ -106,33 +88,35 @@ func (b *Bar) ProxyWriter(w io.Writer) io.WriteCloser {
 	if w == nil {
 		panic("expected non nil io.Writer")
 	}
-	result := make(chan bool)
+	result := make(chan io.WriteCloser, 1)
 	select {
-	case b.operateState <- func(s *bState) { result <- len(s.ewmaDecorators) != 0 }:
-		return newProxyWriter(w, b, <-result)
-	case <-b.done:
+	case b.operateState <- func(s *bState) {
+		result <- newProxyWriter(w, b, len(s.ewmaDecorators) != 0)
+	}:
+		return <-result
+	case <-b.ctx.Done():
 		return nil
 	}
 }
 
-// ID returs id of the bar.
+// ID returns id of the bar.
 func (b *Bar) ID() int {
-	result := make(chan int)
+	result := make(chan int, 1)
 	select {
 	case b.operateState <- func(s *bState) { result <- s.id }:
 		return <-result
-	case <-b.done:
+	case <-b.bsOk:
 		return b.bs.id
 	}
 }
 
 // Current returns bar's current value, in other words sum of all increments.
 func (b *Bar) Current() int64 {
-	result := make(chan int64)
+	result := make(chan int64, 1)
 	select {
 	case b.operateState <- func(s *bState) { result <- s.current }:
 		return <-result
-	case <-b.done:
+	case <-b.bsOk:
 		return b.bs.current
 	}
 }
@@ -143,67 +127,58 @@ func (b *Bar) Current() int64 {
 // operation for example.
 func (b *Bar) SetRefill(amount int64) {
 	select {
-	case b.operateState <- func(s *bState) {
-		if amount < s.current {
-			s.refill = amount
-		} else {
-			s.refill = s.current
-		}
-	}:
-	case <-b.done:
+	case b.operateState <- func(s *bState) { s.refill = min(amount, s.current) }:
+	case <-b.ctx.Done():
 	}
 }
 
-// TraverseDecorators traverses all available decorators and calls cb func on each.
-func (b *Bar) TraverseDecorators(cb func(decor.Decorator)) {
-	iter := make(chan decor.Decorator)
+// SetRefillCurrent sets refill to the current amount.
+func (b *Bar) SetRefillCurrent() {
+	b.SetRefill(math.MaxInt64)
+}
+
+// TraverseDecorators traverses available decorators and calls `cb`
+// on each unwrapped one.
+func (b *Bar) TraverseDecorators(cb func(decor.Decorator)) (ok bool) {
 	select {
 	case b.operateState <- func(s *bState) {
-		for _, decorators := range [][]decor.Decorator{
-			s.pDecorators,
-			s.aDecorators,
-		} {
-			for _, d := range decorators {
-				iter <- d
+		for _, group := range s.decorGroups {
+			for _, d := range group {
+				cb(unwrap(d))
 			}
 		}
-		close(iter)
 	}:
-		for d := range iter {
-			cb(unwrap(d))
-		}
-	case <-b.done:
+		return true
+	case <-b.ctx.Done():
+		return false
 	}
 }
 
 // EnableTriggerComplete enables triggering complete event. It's effective
-// only for bars which were constructed with `total <= 0` and after total
-// has been set with `(*Bar).SetTotal(int64, false)`. If `curren >= total`
+// only for bars which were constructed with `total <= 0`. If `current >= total`
 // at the moment of call, complete event is triggered right away.
 func (b *Bar) EnableTriggerComplete() {
 	select {
 	case b.operateState <- func(s *bState) {
-		if s.triggerComplete || s.total <= 0 {
+		if s.triggerComplete {
 			return
 		}
+		s.triggerComplete = true
 		if s.current >= s.total {
 			s.current = s.total
-			s.completed = true
-			b.triggerCompletion(s)
-		} else {
-			s.triggerComplete = true
+			b.done(s.renderReq, s.autoRefresh)
 		}
 	}:
-	case <-b.done:
+	case <-b.ctx.Done():
 	}
 }
 
 // SetTotal sets total to an arbitrary value. It's effective only for bar
 // which was constructed with `total <= 0`. Setting total to negative value
-// is equivalent to `(*Bar).SetTotal((*Bar).Current(), bool)` but faster. If
-// triggerCompletion is true, total value is set to current and complete
-// event is triggered right away.
-func (b *Bar) SetTotal(total int64, triggerCompletion bool) {
+// is equivalent to `(*Bar).SetTotal((*Bar).Current(), bool)` but faster.
+// If `complete` is true complete event is triggered right away.
+// Calling `(*Bar).EnableTriggerComplete` makes this one no operational.
+func (b *Bar) SetTotal(total int64, complete bool) {
 	select {
 	case b.operateState <- func(s *bState) {
 		if s.triggerComplete {
@@ -214,13 +189,13 @@ func (b *Bar) SetTotal(total int64, triggerCompletion bool) {
 		} else {
 			s.total = total
 		}
-		if triggerCompletion {
+		if complete {
 			s.current = s.total
-			s.completed = true
-			b.triggerCompletion(s)
+			s.triggerComplete = true
+			b.done(s.renderReq, s.autoRefresh)
 		}
 	}:
-	case <-b.done:
+	case <-b.ctx.Done():
 	}
 }
 
@@ -234,33 +209,10 @@ func (b *Bar) SetCurrent(current int64) {
 		s.current = current
 		if s.triggerComplete && s.current >= s.total {
 			s.current = s.total
-			s.completed = true
-			b.triggerCompletion(s)
+			b.done(s.renderReq, s.autoRefresh)
 		}
 	}:
-	case <-b.done:
-	}
-}
-
-// EwmaSetCurrent sets progress' current to an arbitrary value and updates
-// EWMA based decorators by dur of a single iteration.
-func (b *Bar) EwmaSetCurrent(current int64, iterDur time.Duration) {
-	if current < 0 {
-		return
-	}
-	select {
-	case b.operateState <- func(s *bState) {
-		if n := current - s.current; n > 0 {
-			s.decoratorEwmaUpdate(n, iterDur)
-		}
-		s.current = current
-		if s.triggerComplete && s.current >= s.total {
-			s.current = s.total
-			s.completed = true
-			b.triggerCompletion(s)
-		}
-	}:
-	case <-b.done:
+	case <-b.ctx.Done():
 	}
 }
 
@@ -276,19 +228,15 @@ func (b *Bar) IncrBy(n int) {
 
 // IncrInt64 increments progress by amount of n.
 func (b *Bar) IncrInt64(n int64) {
-	if n <= 0 {
-		return
-	}
 	select {
 	case b.operateState <- func(s *bState) {
 		s.current += n
 		if s.triggerComplete && s.current >= s.total {
 			s.current = s.total
-			s.completed = true
-			b.triggerCompletion(s)
+			b.done(s.renderReq, s.autoRefresh)
 		}
 	}:
-	case <-b.done:
+	case <-b.ctx.Done():
 	}
 }
 
@@ -305,31 +253,51 @@ func (b *Bar) EwmaIncrBy(n int, iterDur time.Duration) {
 // EwmaIncrInt64 increments progress by amount of n and updates EWMA based
 // decorators by dur of a single iteration.
 func (b *Bar) EwmaIncrInt64(n int64, iterDur time.Duration) {
-	if n <= 0 {
+	select {
+	case b.operateState <- func(s *bState) {
+		for _, d := range s.ewmaDecorators {
+			d.EwmaUpdate(n, iterDur)
+		}
+		s.current += n
+		if s.triggerComplete && s.current >= s.total {
+			s.current = s.total
+			b.done(s.renderReq, s.autoRefresh)
+		}
+	}:
+	case <-b.ctx.Done():
+	}
+}
+
+// EwmaSetCurrent sets progress' current to an arbitrary value and updates
+// EWMA based decorators by dur of a single iteration.
+func (b *Bar) EwmaSetCurrent(current int64, iterDur time.Duration) {
+	if current < 0 {
 		return
 	}
 	select {
 	case b.operateState <- func(s *bState) {
-		s.decoratorEwmaUpdate(n, iterDur)
-		s.current += n
+		n := current - s.current
+		for _, d := range s.ewmaDecorators {
+			d.EwmaUpdate(n, iterDur)
+		}
+		s.current = current
 		if s.triggerComplete && s.current >= s.total {
 			s.current = s.total
-			s.completed = true
-			b.triggerCompletion(s)
+			b.done(s.renderReq, s.autoRefresh)
 		}
 	}:
-	case <-b.done:
+	case <-b.ctx.Done():
 	}
 }
 
-// DecoratorAverageAdjust adjusts all average based decorators. Call
-// if you need to adjust start time of all average based decorators
-// or after progress resume.
+// DecoratorAverageAdjust adjusts decorators implementing decor.AverageDecorator interface.
+// Call if there is need to set start time after decorators have been constructed.
 func (b *Bar) DecoratorAverageAdjust(start time.Time) {
-	select {
-	case b.operateState <- func(s *bState) { s.decoratorAverageAdjust(start) }:
-	case <-b.done:
-	}
+	b.TraverseDecorators(func(d decor.Decorator) {
+		if d, ok := d.(decor.AverageDecorator); ok {
+			d.AverageAdjust(start)
+		}
+	})
 }
 
 // SetPriority changes bar's order among multiple bars. Zero is highest
@@ -346,67 +314,81 @@ func (b *Bar) SetPriority(priority int) {
 func (b *Bar) Abort(drop bool) {
 	select {
 	case b.operateState <- func(s *bState) {
-		if s.completed || s.aborted {
+		if s.aborted || s.completed() {
 			return
 		}
 		s.aborted = true
 		s.rmOnComplete = drop
-		b.triggerCompletion(s)
+		s.triggerComplete = true
+		b.done(s.renderReq, s.autoRefresh)
 	}:
-	case <-b.done:
+	case <-b.ctx.Done():
 	}
 }
 
 // Aborted reports whether the bar is in aborted state.
 func (b *Bar) Aborted() bool {
-	result := make(chan bool)
+	result := make(chan bool, 1)
 	select {
 	case b.operateState <- func(s *bState) { result <- s.aborted }:
 		return <-result
-	case <-b.done:
+	case <-b.bsOk:
 		return b.bs.aborted
 	}
 }
 
 // Completed reports whether the bar is in completed state.
 func (b *Bar) Completed() bool {
-	result := make(chan bool)
+	result := make(chan bool, 1)
 	select {
-	case b.operateState <- func(s *bState) { result <- s.completed }:
+	case b.operateState <- func(s *bState) { result <- s.completed() }:
 		return <-result
-	case <-b.done:
-		return b.bs.completed
+	case <-b.bsOk:
+		return b.bs.completed()
 	}
 }
 
-// IsRunning reports whether the bar is running, i.e. not yet completed
-// and not yet aborted.
-func (b *Bar) IsRunning() bool {
-	result := make(chan bool)
+// AbortedOrCompleted reports whether a bar is in aborted or completed state.
+// Faster and atomic version of `(*Bar).Aborted() || (*Bar).Completed()`.
+func (b *Bar) AbortedOrCompleted() bool {
+	result := make(chan bool, 1)
 	select {
-	case b.operateState <- func(s *bState) { result <- !s.completed && !s.aborted }:
+	case b.operateState <- func(s *bState) {
+		result <- s.aborted || s.completed()
+	}:
 		return <-result
-	case <-b.done:
-		return false
+	case <-b.bsOk:
+		return b.bs.aborted || b.bs.completed()
 	}
 }
 
 // Wait blocks until bar is completed or aborted.
 func (b *Bar) Wait() {
-	<-b.done
+	<-b.bsOk
 }
 
-func (b *Bar) serve(ctx context.Context, bs *bState) {
-	defer b.container.bwg.Done()
+func (b *Bar) serve(bs *bState) {
+	decoratorsOnShutdown := func(group []decor.Decorator) {
+		for _, d := range group {
+			if d, ok := unwrap(d).(decor.ShutdownListener); ok {
+				d.OnShutdown()
+			}
+		}
+	}
+	defer func() {
+		decoratorsOnShutdown(bs.decorGroups[0])
+		decoratorsOnShutdown(bs.decorGroups[1])
+		b.bs = bs
+		close(b.bsOk)
+		b.container.bwg.Done()
+	}()
 	for {
 		select {
 		case op := <-b.operateState:
 			op(bs)
-		case <-ctx.Done():
-			bs.aborted = !bs.completed
-			bs.decoratorShutdownNotify()
-			b.bs = bs
-			close(b.done)
+		case <-b.ctx.Done():
+			// bar can be aborted by canceling parent ctx without calling b.Abort
+			bs.aborted = bs.aborted || !bs.completed()
 			return
 		}
 	}
@@ -414,28 +396,22 @@ func (b *Bar) serve(ctx context.Context, bs *bState) {
 
 func (b *Bar) render(tw int) {
 	fn := func(s *bState) {
-		var rows []io.Reader
-		stat := newStatistics(tw, s)
+		frame := new(renderFrame)
+		stat := s.newStatistics(tw)
 		r, err := s.draw(stat)
 		if err != nil {
-			b.frameCh <- &renderFrame{err: err}
+			for _, buf := range s.buffers {
+				buf.Reset()
+			}
+			frame.err = err
+			b.frameCh <- frame
 			return
 		}
-		rows = append(rows, r)
-		if s.extender != nil {
-			rows, err = s.extender(rows, stat)
-			if err != nil {
-				b.frameCh <- &renderFrame{err: err}
-				return
-			}
-		}
-		frame := &renderFrame{
-			rows:         rows,
-			shutdown:     s.shutdown,
-			rmOnComplete: s.rmOnComplete,
-			noPop:        s.noPop,
-		}
-		if s.completed || s.aborted {
+		frame.rows, frame.err = s.extender(stat, r)
+		if s.aborted || s.completed() {
+			frame.shutdown = s.shutdown
+			frame.rmOnComplete = s.rmOnComplete
+			frame.noPop = s.noPop
 			// post increment makes sure OnComplete decorators are rendered
 			s.shutdown++
 		}
@@ -443,66 +419,27 @@ func (b *Bar) render(tw int) {
 	}
 	select {
 	case b.operateState <- fn:
-	case <-b.done:
+	case <-b.bsOk:
 		fn(b.bs)
 	}
 }
 
-func (b *Bar) triggerCompletion(s *bState) {
-	if s.autoRefresh {
-		// Technically this call isn't required, but if refresh rate is set to
-		// one hour for example and bar completes within a few minutes p.Wait()
-		// will wait for one hour. This call helps to avoid unnecessary waiting.
-		go b.tryEarlyRefresh(s.renderReq)
-	} else {
-		b.cancel()
-	}
-}
-
-func (b *Bar) tryEarlyRefresh(renderReq chan<- time.Time) {
-	var anyOtherRunning bool
-	b.container.traverseBars(func(bar *Bar) bool {
-		anyOtherRunning = b != bar && bar.IsRunning()
-		return anyOtherRunning
-	})
-	if !anyOtherRunning {
-		for {
-			select {
-			case renderReq <- time.Now():
-			case <-b.done:
-				return
-			}
-		}
-	}
-}
-
-func (b *Bar) wSyncTable() syncTable {
-	result := make(chan syncTable)
+func (b *Bar) wSyncTable() decorSyncTable {
+	result := make(chan decorSyncTable, 1)
 	select {
 	case b.operateState <- func(s *bState) { result <- s.wSyncTable() }:
 		return <-result
-	case <-b.done:
+	case <-b.bsOk:
 		return b.bs.wSyncTable()
 	}
 }
 
 func (s *bState) draw(stat decor.Statistics) (io.Reader, error) {
-	r, err := s.drawImpl(stat)
-	if err != nil {
-		for _, b := range s.buffers {
-			b.Reset()
-		}
-		return nil, err
-	}
-	return io.MultiReader(r, strings.NewReader("\n")), nil
-}
-
-func (s *bState) drawImpl(stat decor.Statistics) (io.Reader, error) {
-	decorFiller := func(buf *bytes.Buffer, decorators []decor.Decorator) (err error) {
-		for _, d := range decorators {
-			// need to call Decor in any case becase of width synchronization
+	decorFiller := func(buf *bytes.Buffer, group []decor.Decorator) (err error) {
+		for i, d := range group {
+			// need to call Decor in any case because of width synchronization
 			str, width := d.Decor(stat)
-			if err != nil {
+			if i != 0 && err != nil {
 				continue
 			}
 			if w := stat.AvailableWidth - width; w >= 0 {
@@ -517,113 +454,99 @@ func (s *bState) drawImpl(stat decor.Statistics) (io.Reader, error) {
 		return err
 	}
 
-	bufP, bufB, bufA := s.buffers[0], s.buffers[1], s.buffers[2]
-
-	err := eitherError(decorFiller(bufP, s.pDecorators), decorFiller(bufA, s.aDecorators))
-	if err != nil {
-		return nil, err
-	}
-
-	if !s.trimSpace && stat.AvailableWidth >= 2 {
-		stat.AvailableWidth -= 2
-		writeFiller := func(buf *bytes.Buffer) error {
-			return s.filler.Fill(buf, stat)
-		}
-		for _, fn := range []func(*bytes.Buffer) error{
-			writeSpace,
-			writeFiller,
-			writeSpace,
-		} {
-			if err := fn(bufB); err != nil {
-				return nil, err
-			}
-		}
-	} else {
-		err := s.filler.Fill(bufB, stat)
+	for i, buf := range s.buffers[1:] {
+		err := decorFiller(buf, s.decorGroups[i])
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	return io.MultiReader(bufP, bufB, bufA), nil
+	if s.trimSpace || stat.AvailableWidth < 2 {
+		err := s.filler.Fill(s.buffers[0], stat)
+		return io.MultiReader(
+			s.buffers[1],
+			s.buffers[0],
+			s.buffers[2],
+			strings.NewReader("\n"),
+		), err
+	}
+
+	stat.AvailableWidth -= 2
+	err := s.filler.Fill(s.buffers[0], stat)
+	return io.MultiReader(
+		s.buffers[1],
+		strings.NewReader(" "),
+		s.buffers[0],
+		strings.NewReader(" "),
+		s.buffers[2],
+		strings.NewReader("\n"),
+	), err
 }
 
-func (s *bState) wSyncTable() (table syncTable) {
-	var count int
-	var row []chan int
+func (s *bState) wSyncTable() (table decorSyncTable) {
+	var start int
+	var row []*decor.Sync
 
-	for i, decorators := range [][]decor.Decorator{
-		s.pDecorators,
-		s.aDecorators,
-	} {
-		for _, d := range decorators {
-			if ch, ok := d.Sync(); ok {
-				row = append(row, ch)
-				count++
+	for i, group := range s.decorGroups {
+		for _, d := range group {
+			if s, ok := d.Sync(); ok {
+				row = append(row, s)
 			}
 		}
-		switch i {
-		case 0:
-			table[i] = row[0:count]
-		default:
-			table[i] = row[len(table[i-1]):count]
-		}
+		table[i], start = row[start:], len(row)
 	}
 	return table
 }
 
-func (s bState) decoratorEwmaUpdate(n int64, dur time.Duration) {
-	var wg sync.WaitGroup
-	for i := 0; i < len(s.ewmaDecorators); i++ {
-		switch d := s.ewmaDecorators[i]; i {
-		case len(s.ewmaDecorators) - 1:
-			d.EwmaUpdate(n, dur)
-		default:
-			wg.Add(1)
-			go func() {
-				d.EwmaUpdate(n, dur)
-				wg.Done()
-			}()
-		}
+func (b *Bar) done(renderReq chan<- time.Time, autoRefresh bool) {
+	if autoRefresh {
+		// Technically this call isn't required, but if refresh rate is set to
+		// one hour for example and bar completes within a few minutes p.Wait()
+		// will wait for one hour. This call helps to avoid unnecessary waiting.
+		go b.tryEarlyRefresh(renderReq)
+	} else {
+		b.cancel()
 	}
-	wg.Wait()
 }
 
-func (s bState) decoratorAverageAdjust(start time.Time) {
-	var wg sync.WaitGroup
-	for i := 0; i < len(s.averageDecorators); i++ {
-		switch d := s.averageDecorators[i]; i {
-		case len(s.averageDecorators) - 1:
-			d.AverageAdjust(start)
+func (b *Bar) tryEarlyRefresh(renderReq chan<- time.Time) {
+	otherRunning := make(chan struct{})
+	ok := b.container.iterateBars(func(bar *Bar) bool {
+		if b != bar && bar.isRunning() {
+			close(otherRunning)
+			return false // stop traverse
+		}
+		return true // continue traverse
+	})
+	if ok {
+		select {
+		case <-otherRunning:
 		default:
-			wg.Add(1)
-			go func() {
-				d.AverageAdjust(start)
-				wg.Done()
-			}()
+			for {
+				select {
+				case renderReq <- time.Now():
+				case <-b.ctx.Done():
+					return
+				}
+			}
 		}
 	}
-	wg.Wait()
 }
 
-func (s bState) decoratorShutdownNotify() {
-	var wg sync.WaitGroup
-	for i := 0; i < len(s.shutdownListeners); i++ {
-		switch d := s.shutdownListeners[i]; i {
-		case len(s.shutdownListeners) - 1:
-			d.OnShutdown()
-		default:
-			wg.Add(1)
-			go func() {
-				d.OnShutdown()
-				wg.Done()
-			}()
-		}
+func (b *Bar) isRunning() bool {
+	select {
+	case <-b.ctx.Done():
+		return false
+	default:
+		return true
 	}
-	wg.Wait()
 }
 
-func newStatistics(tw int, s *bState) decor.Statistics {
+func (s *bState) completed() bool {
+	return s.triggerComplete && s.current == s.total
+}
+
+func (s *bState) newStatistics(tw int) decor.Statistics {
 	return decor.Statistics{
 		AvailableWidth: tw,
 		RequestedWidth: s.reqWidth,
@@ -631,7 +554,7 @@ func newStatistics(tw int, s *bState) decor.Statistics {
 		Total:          s.total,
 		Current:        s.current,
 		Refill:         s.refill,
-		Completed:      s.completed,
+		Completed:      s.completed(),
 		Aborted:        s.aborted,
 	}
 }
@@ -641,17 +564,4 @@ func unwrap(d decor.Decorator) decor.Decorator {
 		return unwrap(d.Unwrap())
 	}
 	return d
-}
-
-func writeSpace(buf *bytes.Buffer) error {
-	return buf.WriteByte(' ')
-}
-
-func eitherError(errors ...error) error {
-	for _, err := range errors {
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }

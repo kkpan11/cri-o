@@ -33,18 +33,19 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	utilversion "k8s.io/apimachinery/pkg/util/version"
 	utilwait "k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/klog/v2"
 	utilexec "k8s.io/utils/exec"
 	utiltrace "k8s.io/utils/trace"
+
+	"github.com/cri-o/cri-o/internal/log"
 )
 
-// RulePosition holds the -I/-A flags for iptable
+// RulePosition holds the -I/-A flags for iptable.
 type RulePosition string
 
 const (
-	// Prepend is the insert flag for iptable
+	// Prepend is the insert flag for iptable.
 	Prepend RulePosition = "-I"
-	// Append is the append flag for iptable
+	// Append is the append flag for iptable.
 	Append RulePosition = "-A"
 )
 
@@ -87,7 +88,13 @@ type Interface interface {
 	// rules. If it is unable to create the canary chains (either initially or after
 	// a reload) it will log an error and stop monitoring.
 	// (This function should be called from a goroutine.)
-	Monitor(canary Chain, tables []Table, reloadFunc func(), interval time.Duration, stopCh <-chan struct{})
+	Monitor(
+		canary Chain,
+		tables []Table,
+		reloadFunc func(),
+		interval time.Duration,
+		stopCh <-chan struct{},
+	)
 	// HasRandomFully reveals whether `-j MASQUERADE` takes the
 	// `--random-fully` option.  This is helpful to work around a
 	// Linux kernel bug that sometimes causes multiple flows to get
@@ -99,41 +106,41 @@ type Interface interface {
 	Present() bool
 }
 
-// Protocol defines the ip protocol either ipv4 or ipv6
+// Protocol defines the ip protocol either ipv4 or ipv6.
 type Protocol string
 
 const (
-	// ProtocolIPv4 represents ipv4 protocol in iptables
+	// ProtocolIPv4 represents ipv4 protocol in iptables.
 	ProtocolIPv4 Protocol = "IPv4"
-	// ProtocolIPv6 represents ipv6 protocol in iptables
+	// ProtocolIPv6 represents ipv6 protocol in iptables.
 	ProtocolIPv6 Protocol = "IPv6"
 )
 
-// Table represents different iptable like filter,nat, mangle and raw
+// Table represents different iptable like filter,nat, mangle and raw.
 type Table string
 
 const (
-	// TableNAT represents the built-in nat table
+	// TableNAT represents the built-in nat table.
 	TableNAT Table = "nat"
-	// TableFilter represents the built-in filter table
+	// TableFilter represents the built-in filter table.
 	TableFilter Table = "filter"
-	// TableMangle represents the built-in mangle table
+	// TableMangle represents the built-in mangle table.
 	TableMangle Table = "mangle"
 )
 
-// Chain represents the different rules
+// Chain represents the different rules.
 type Chain string
 
 const (
-	// ChainPostrouting used for source NAT in nat table
+	// ChainPostrouting used for source NAT in nat table.
 	ChainPostrouting Chain = "POSTROUTING"
-	// ChainPrerouting used for DNAT (destination NAT) in nat table
+	// ChainPrerouting used for DNAT (destination NAT) in nat table.
 	ChainPrerouting Chain = "PREROUTING"
-	// ChainOutput used for the packets going out from local
+	// ChainOutput used for the packets going out from local.
 	ChainOutput Chain = "OUTPUT"
-	// ChainInput used for incoming packets
+	// ChainInput used for incoming packets.
 	ChainInput Chain = "INPUT"
-	// ChainForward used for the packets for another NIC
+	// ChainForward used for the packets for another NIC.
 	ChainForward Chain = "FORWARD"
 )
 
@@ -146,22 +153,22 @@ const (
 	cmdIP6Tables        string = "ip6tables"
 )
 
-// RestoreCountersFlag is an option flag for Restore
+// RestoreCountersFlag is an option flag for Restore.
 type RestoreCountersFlag bool
 
-// RestoreCounters a boolean true constant for the option flag RestoreCountersFlag
+// RestoreCounters a boolean true constant for the option flag RestoreCountersFlag.
 const RestoreCounters RestoreCountersFlag = true
 
-// NoRestoreCounters a boolean false constant for the option flag RestoreCountersFlag
+// NoRestoreCounters a boolean false constant for the option flag RestoreCountersFlag.
 const NoRestoreCounters RestoreCountersFlag = false
 
-// FlushFlag an option flag for Flush
+// FlushFlag an option flag for Flush.
 type FlushFlag bool
 
-// FlushTables a boolean true constant for option flag FlushFlag
+// FlushTables a boolean true constant for option flag FlushFlag.
 const FlushTables FlushFlag = true
 
-// NoFlushTables a boolean false constant for option flag FlushFlag
+// NoFlushTables a boolean false constant for option flag FlushFlag.
 const NoFlushTables FlushFlag = false
 
 // MinCheckVersion minimum version to be checked
@@ -170,37 +177,37 @@ const NoFlushTables FlushFlag = false
 var MinCheckVersion = utilversion.MustParseGeneric("1.4.11")
 
 // RandomFullyMinVersion is the minimum version from which the --random-fully flag is supported,
-// used for port mapping to be fully randomized
+// used for port mapping to be fully randomized.
 var RandomFullyMinVersion = utilversion.MustParseGeneric("1.6.2")
 
-// WaitMinVersion a minimum iptables versions supporting the -w and -w<seconds> flags
+// WaitMinVersion a minimum iptables versions supporting the -w and -w<seconds> flags.
 var WaitMinVersion = utilversion.MustParseGeneric("1.4.20")
 
-// WaitIntervalMinVersion a minimum iptables versions supporting the wait interval useconds
+// WaitIntervalMinVersion a minimum iptables versions supporting the wait interval useconds.
 var WaitIntervalMinVersion = utilversion.MustParseGeneric("1.6.1")
 
-// WaitSecondsMinVersion a minimum iptables versions supporting the wait seconds
+// WaitSecondsMinVersion a minimum iptables versions supporting the wait seconds.
 var WaitSecondsMinVersion = utilversion.MustParseGeneric("1.4.22")
 
-// WaitRestoreMinVersion a minimum iptables versions supporting the wait restore seconds
+// WaitRestoreMinVersion a minimum iptables versions supporting the wait restore seconds.
 var WaitRestoreMinVersion = utilversion.MustParseGeneric("1.6.2")
 
-// WaitString a constant for specifying the wait flag
+// WaitString a constant for specifying the wait flag.
 const WaitString = "-w"
 
-// WaitSecondsValue a constant for specifying the default wait seconds
+// WaitSecondsValue a constant for specifying the default wait seconds.
 const WaitSecondsValue = "5"
 
-// WaitIntervalString a constant for specifying the wait interval flag
+// WaitIntervalString a constant for specifying the wait interval flag.
 const WaitIntervalString = "-W"
 
-// WaitIntervalUsecondsValue a constant for specifying the default wait interval useconds
+// WaitIntervalUsecondsValue a constant for specifying the default wait interval useconds.
 const WaitIntervalUsecondsValue = "100000"
 
-// LockfilePath16x is the iptables 1.6.x lock file acquired by any process that's making any change in the iptable rule
+// LockfilePath16x is the iptables 1.6.x lock file acquired by any process that's making any change in the iptable rule.
 const LockfilePath16x = "/run/xtables.lock"
 
-// LockfilePath14x is the iptables 1.4.x lock file acquired by any process that's making any change in the iptable rule
+// LockfilePath14x is the iptables 1.4.x lock file acquired by any process that's making any change in the iptable rule.
 const LockfilePath14x = "@xtables"
 
 // runner implements Interface in terms of exec("iptables").
@@ -217,17 +224,17 @@ type runner struct {
 }
 
 // newInternal returns a new Interface which will exec iptables, and allows the
-// caller to change the iptables-restore lockfile path
-func newInternal(exec utilexec.Interface, protocol Protocol, lockfilePath14x, lockfilePath16x string) Interface {
-	version, err := getIPTablesVersion(exec, protocol)
-	if err != nil {
-		klog.InfoS("Error checking iptables version, assuming version at least", "version", MinCheckVersion, "err", err)
-		version = MinCheckVersion
-	}
-
+// caller to change the iptables-restore lockfile path.
+func newInternal(
+	ctx context.Context,
+	exec utilexec.Interface,
+	protocol Protocol,
+	lockfilePath14x, lockfilePath16x string,
+) Interface {
 	if lockfilePath16x == "" {
 		lockfilePath16x = LockfilePath16x
 	}
+
 	if lockfilePath14x == "" {
 		lockfilePath14x = LockfilePath14x
 	}
@@ -235,19 +242,31 @@ func newInternal(exec utilexec.Interface, protocol Protocol, lockfilePath14x, lo
 	runner := &runner{
 		exec:            exec,
 		protocol:        protocol,
-		hasCheck:        version.AtLeast(MinCheckVersion),
-		hasRandomFully:  version.AtLeast(RandomFullyMinVersion),
-		waitFlag:        getIPTablesWaitFlag(version),
-		restoreWaitFlag: getIPTablesRestoreWaitFlag(version, exec, protocol),
 		lockfilePath14x: lockfilePath14x,
 		lockfilePath16x: lockfilePath16x,
 	}
+
+	version, err := getIPTablesVersion(exec, protocol)
+	if err != nil {
+		// The only likely error is "no such file or directory", in which case any
+		// further commands will fail the same way, so we don't need to do
+		// anything special here.
+		log.Debugf(ctx, "Error checking iptables version: %v", err)
+
+		return runner
+	}
+
+	runner.hasCheck = version.AtLeast(MinCheckVersion)
+	runner.hasRandomFully = version.AtLeast(RandomFullyMinVersion)
+	runner.waitFlag = getIPTablesWaitFlag(version)
+	runner.restoreWaitFlag = getIPTablesRestoreWaitFlag(version, exec, protocol)
+
 	return runner
 }
 
 // New returns a new Interface which will exec iptables.
-func New(exec utilexec.Interface, protocol Protocol) Interface {
-	return newInternal(exec, protocol, "", "")
+func New(ctx context.Context, exec utilexec.Interface, protocol Protocol) Interface {
+	return newInternal(ctx, exec, protocol, "", "")
 }
 
 // EnsureChain is part of Interface.
@@ -259,13 +278,15 @@ func (runner *runner) EnsureChain(table Table, chain Chain) (bool, error) {
 
 	out, err := runner.run(opCreateChain, fullArgs)
 	if err != nil {
-		if ee, ok := err.(utilexec.ExitError); ok {
+		if ee, ok := errors.AsType[utilexec.ExitError](err); ok {
 			if ee.Exited() && ee.ExitStatus() == 1 {
 				return true, nil
 			}
 		}
-		return false, fmt.Errorf("error creating chain %q: %v: %s", chain, err, out)
+
+		return false, fmt.Errorf("error creating chain %q: %w: %s", chain, err, out)
 	}
+
 	return false, nil
 }
 
@@ -278,8 +299,9 @@ func (runner *runner) FlushChain(table Table, chain Chain) error {
 
 	out, err := runner.run(opFlushChain, fullArgs)
 	if err != nil {
-		return fmt.Errorf("error flushing chain %q: %v: %s", chain, err, out)
+		return fmt.Errorf("error flushing chain %q: %w: %s", chain, err, out)
 	}
+
 	return nil
 }
 
@@ -292,13 +314,19 @@ func (runner *runner) DeleteChain(table Table, chain Chain) error {
 
 	out, err := runner.run(opDeleteChain, fullArgs)
 	if err != nil {
-		return fmt.Errorf("error deleting chain %q: %v: %s", chain, err, out)
+		return fmt.Errorf("error deleting chain %q: %w: %s", chain, err, out)
 	}
+
 	return nil
 }
 
 // EnsureRule is part of Interface.
-func (runner *runner) EnsureRule(position RulePosition, table Table, chain Chain, args ...string) (bool, error) {
+func (runner *runner) EnsureRule(
+	position RulePosition,
+	table Table,
+	chain Chain,
+	args ...string,
+) (bool, error) {
 	fullArgs := makeFullArgs(table, chain, args...)
 
 	runner.mu.Lock()
@@ -308,13 +336,16 @@ func (runner *runner) EnsureRule(position RulePosition, table Table, chain Chain
 	if err != nil {
 		return false, err
 	}
+
 	if exists {
 		return true, nil
 	}
+
 	out, err := runner.run(operation(position), fullArgs)
 	if err != nil {
-		return false, fmt.Errorf("error appending rule: %v: %s", err, out)
+		return false, fmt.Errorf("error appending rule: %w: %s", err, out)
 	}
+
 	return false, nil
 }
 
@@ -329,13 +360,16 @@ func (runner *runner) DeleteRule(table Table, chain Chain, args ...string) error
 	if err != nil {
 		return err
 	}
+
 	if !exists {
 		return nil
 	}
+
 	out, err := runner.run(opDeleteRule, fullArgs)
 	if err != nil {
-		return fmt.Errorf("error deleting rule: %v: %s", err, out)
+		return fmt.Errorf("error deleting rule: %w: %s", err, out)
 	}
+
 	return nil
 }
 
@@ -358,24 +392,33 @@ func (runner *runner) SaveInto(table Table, buffer *bytes.Buffer) error {
 	// run and return
 	iptablesSaveCmd := iptablesSaveCommand(runner.protocol)
 	args := []string{"-t", string(table)}
-	klog.V(4).InfoS("Running", "command", iptablesSaveCmd, "arguments", args)
+	log.Debugf(context.Background(), "Running (command=%q arguments=%+v)", iptablesSaveCmd, args)
 	cmd := runner.exec.Command(iptablesSaveCmd, args...)
 	cmd.SetStdout(buffer)
+
 	stderrBuffer := bytes.NewBuffer(nil)
 	cmd.SetStderr(stderrBuffer)
 
 	err := cmd.Run()
 	if err != nil {
-		//nolint:errcheck
-		stderrBuffer.WriteTo(buffer) // ignore error, since we need to return the original error
+		stderrBuffer.WriteTo( //nolint:errcheck // best effort
+			buffer,
+		)
 	}
+
 	return err
 }
 
 // Restore is part of Interface.
-func (runner *runner) Restore(table Table, data []byte, flush FlushFlag, counters RestoreCountersFlag) error {
+func (runner *runner) Restore(
+	table Table,
+	data []byte,
+	flush FlushFlag,
+	counters RestoreCountersFlag,
+) error {
 	// setup args
 	args := []string{"-T", string(table)}
+
 	return runner.restoreInternal(args, data, flush, counters)
 }
 
@@ -383,6 +426,7 @@ func (runner *runner) Restore(table Table, data []byte, flush FlushFlag, counter
 func (runner *runner) RestoreAll(data []byte, flush FlushFlag, counters RestoreCountersFlag) error {
 	// setup args
 	args := make([]string, 0)
+
 	return runner.restoreInternal(args, data, flush, counters)
 }
 
@@ -390,8 +434,13 @@ type iptablesLocker interface {
 	Close() error
 }
 
-// restoreInternal is the shared part of Restore/RestoreAll
-func (runner *runner) restoreInternal(args []string, data []byte, flush FlushFlag, counters RestoreCountersFlag) error {
+// restoreInternal is the shared part of Restore/RestoreAll.
+func (runner *runner) restoreInternal(
+	args []string,
+	data []byte,
+	flush FlushFlag,
+	counters RestoreCountersFlag,
+) error {
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
 
@@ -401,6 +450,7 @@ func (runner *runner) restoreInternal(args []string, data []byte, flush FlushFla
 	if !flush {
 		args = append(args, "--noflush")
 	}
+
 	if counters {
 		args = append(args, "--counters")
 	}
@@ -413,10 +463,12 @@ func (runner *runner) restoreInternal(args []string, data []byte, flush FlushFla
 		if err != nil {
 			return err
 		}
+
 		trace.Step("Locks grabbed")
+
 		defer func(locker iptablesLocker) {
 			if err := locker.Close(); err != nil {
-				klog.ErrorS(err, "Failed to close iptables locks")
+				log.Errorf(context.Background(), "Failed to close iptables locks: %s", err)
 			}
 		}(locker)
 	}
@@ -424,17 +476,25 @@ func (runner *runner) restoreInternal(args []string, data []byte, flush FlushFla
 	// run the command and return the output or an error including the output and error
 	fullArgs := append(runner.restoreWaitFlag, args...) //nolint:gocritic
 	iptablesRestoreCmd := iptablesRestoreCommand(runner.protocol)
-	klog.V(4).InfoS("Running", "command", iptablesRestoreCmd, "arguments", fullArgs)
+	log.Debugf(
+		context.Background(),
+		"Running (command=%q arguments=%q)",
+		iptablesRestoreCmd,
+		fullArgs,
+	)
 	cmd := runner.exec.Command(iptablesRestoreCmd, fullArgs...)
 	cmd.SetStdin(bytes.NewBuffer(data))
+
 	b, err := cmd.CombinedOutput()
 	if err != nil {
 		pErr, ok := parseRestoreError(string(b))
 		if ok {
 			return pErr
 		}
+
 		return fmt.Errorf("%w: %s", err, b)
 	}
+
 	return nil
 }
 
@@ -442,6 +502,7 @@ func iptablesSaveCommand(protocol Protocol) string {
 	if protocol == ProtocolIPv6 {
 		return cmdIP6TablesSave
 	}
+
 	return cmdIPTablesSave
 }
 
@@ -449,6 +510,7 @@ func iptablesRestoreCommand(protocol Protocol) string {
 	if protocol == ProtocolIPv6 {
 		return cmdIP6TablesRestore
 	}
+
 	return cmdIPTablesRestore
 }
 
@@ -456,6 +518,7 @@ func iptablesCommand(protocol Protocol) string {
 	if protocol == ProtocolIPv6 {
 		return cmdIP6Tables
 	}
+
 	return cmdIPTables
 }
 
@@ -467,12 +530,14 @@ func (runner *runner) runContext(ctx context.Context, op operation, args []strin
 	iptablesCmd := iptablesCommand(runner.protocol)
 	fullArgs := append(runner.waitFlag, string(op)) //nolint:gocritic
 	fullArgs = append(fullArgs, args...)
-	klog.V(5).InfoS("Running", "command", iptablesCmd, "arguments", fullArgs)
+	log.Debugf(context.Background(), "Running (command=%q arguments=%+v)", iptablesCmd, fullArgs)
+
 	if ctx == nil {
 		return runner.exec.Command(iptablesCmd, fullArgs...).CombinedOutput()
 	}
-	return runner.exec.CommandContext(ctx, iptablesCmd, fullArgs...).CombinedOutput()
+
 	// Don't log err here - callers might not think it is an error.
+	return runner.exec.CommandContext(ctx, iptablesCmd, fullArgs...).CombinedOutput()
 }
 
 // Returns (bool, nil) if it was able to check the existence of the rule, or
@@ -481,6 +546,7 @@ func (runner *runner) checkRule(table Table, chain Chain, args ...string) (bool,
 	if runner.hasCheck {
 		return runner.checkRuleUsingCheck(makeFullArgs(table, chain, args...))
 	}
+
 	return runner.checkRuleWithoutCheck(table, chain, args...)
 }
 
@@ -493,12 +559,22 @@ func trimhex(s string) string {
 // Executes the rule check without using the "-C" flag, instead parsing iptables-save.
 // Present for compatibility with <1.4.11 versions of iptables.  This is full
 // of hack and half-measures.  We should nix this ASAP.
-func (runner *runner) checkRuleWithoutCheck(table Table, chain Chain, args ...string) (bool, error) {
+func (runner *runner) checkRuleWithoutCheck(
+	table Table,
+	chain Chain,
+	args ...string,
+) (bool, error) {
 	iptablesSaveCmd := iptablesSaveCommand(runner.protocol)
-	klog.V(1).InfoS("Running", "command", iptablesSaveCmd, "table", string(table))
+	log.Debugf(
+		context.Background(),
+		"Running (command=%q table=%q)",
+		iptablesSaveCmd,
+		string(table),
+	)
+
 	out, err := runner.exec.Command(iptablesSaveCmd, "-t", string(table)).CombinedOutput()
 	if err != nil {
-		return false, fmt.Errorf("error checking rule: %v", err)
+		return false, fmt.Errorf("error checking rule: %w", err)
 	}
 
 	// Sadly, iptables has inconsistent quoting rules for comments. Just remove all quotes.
@@ -507,14 +583,16 @@ func (runner *runner) checkRuleWithoutCheck(table Table, chain Chain, args ...st
 	// in order to compare against iptables-save output (which will be split at whitespace boundary)
 	// e.g. a single arg('"this must be before the NodePort rules"') will be unquoted and unpacked into 7 args.
 	var argsCopy []string
+
 	for i := range args {
 		tmpField := strings.Trim(args[i], "\"")
 		tmpField = trimhex(tmpField)
 		argsCopy = append(argsCopy, strings.Fields(tmpField)...)
 	}
+
 	argset := sets.NewString(argsCopy...)
 
-	for _, line := range strings.Split(string(out), "\n") {
+	for line := range strings.SplitSeq(string(out), "\n") {
 		fields := strings.Fields(line)
 
 		// Check that this is a rule for the correct chain, and that it has
@@ -534,92 +612,150 @@ func (runner *runner) checkRuleWithoutCheck(table Table, chain Chain, args ...st
 		if sets.NewString(fields...).IsSuperset(argset) {
 			return true, nil
 		}
-		klog.V(5).InfoS("DBG: fields is not a superset of args", "fields", fields, "arguments", args)
+
+		log.Debugf(
+			context.Background(),
+			"fields is not a superset of args (fields=%+v arguments=%+v)",
+			fields,
+			args,
+		)
 	}
 
 	return false, nil
 }
 
-// Executes the rule check using the "-C" flag
+// Executes the rule check using the "-C" flag.
 func (runner *runner) checkRuleUsingCheck(args []string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	out, err := runner.runContext(ctx, opCheckRule, args)
-	if ctx.Err() == context.DeadlineExceeded {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return false, errors.New("timed out while checking rules")
 	}
+
 	if err == nil {
 		return true, nil
 	}
-	if ee, ok := err.(utilexec.ExitError); ok {
+
+	if ee, ok := errors.AsType[utilexec.ExitError](err); ok {
 		// iptables uses exit(1) to indicate a failure of the operation,
 		// as compared to a malformed commandline, for example.
 		if ee.Exited() && ee.ExitStatus() == 1 {
 			return false, nil
 		}
 	}
-	return false, fmt.Errorf("error checking rule: %v: %s", err, out)
+
+	return false, fmt.Errorf("error checking rule: %w: %s", err, out)
 }
 
 const (
-	// Max time we wait for an iptables flush to complete after we notice it has started
+	// Max time we wait for an iptables flush to complete after we notice it has started.
 	iptablesFlushTimeout = 5 * time.Second
-	// How often we poll while waiting for an iptables flush to complete
+	// How often we poll while waiting for an iptables flush to complete.
 	iptablesFlushPollTime = 100 * time.Millisecond
 )
 
-// Monitor is part of Interface
-func (runner *runner) Monitor(canary Chain, tables []Table, reloadFunc func(), interval time.Duration, stopCh <-chan struct{}) {
+// Monitor is part of Interface.
+func (runner *runner) Monitor(
+	canary Chain,
+	tables []Table,
+	reloadFunc func(),
+	interval time.Duration,
+	stopCh <-chan struct{},
+) {
 	for {
-		_ = utilwait.PollImmediateUntil(interval, func() (bool, error) { //nolint:errcheck,staticcheck
-			for _, table := range tables {
-				if _, err := runner.EnsureChain(table, canary); err != nil {
-					klog.ErrorS(err, "Could not set up iptables canary", "table", table, "chain", canary)
-					return false, nil
-				}
-			}
-			return true, nil
-		}, stopCh)
+		_ = utilwait.PollImmediateUntil( //nolint:errcheck,staticcheck // deprecated poll API, error intentionally ignored
+			interval,
+			func() (bool, error) {
+				for _, table := range tables {
+					if _, err := runner.EnsureChain(table, canary); err != nil {
+						log.Errorf(
+							context.Background(),
+							"Could not set up iptables canary: %s (table=%+v chain=%q)",
+							err,
+							table,
+							canary,
+						)
 
-		// Poll until stopCh is closed or iptables is flushed
-		err := utilwait.PollUntil(interval, func() (bool, error) { //nolint:staticcheck
-			if exists, err := runner.ChainExists(tables[0], canary); exists {
-				return false, nil
-			} else if isResourceError(err) {
-				klog.ErrorS(err, "Could not check for iptables canary", "table", tables[0], "chain", canary)
-				return false, nil
-			}
-			klog.V(2).InfoS("IPTables canary deleted", "table", tables[0], "chain", canary)
-			// Wait for the other canaries to be deleted too before returning
-			// so we don't start reloading too soon.
-			err := utilwait.PollImmediate(iptablesFlushPollTime, iptablesFlushTimeout, func() (bool, error) { //nolint:staticcheck
-				for i := 1; i < len(tables); i++ {
-					if exists, err := runner.ChainExists(tables[i], canary); exists || isResourceError(err) {
 						return false, nil
 					}
 				}
+
 				return true, nil
-			})
-			if err != nil {
-				klog.InfoS("Inconsistent iptables state detected")
-			}
-			return true, nil
-		}, stopCh)
+			},
+			stopCh,
+		)
+
+		// Poll until stopCh is closed or iptables is flushed
+		err := utilwait.PollUntil( //nolint:staticcheck // deprecated poll API
+			interval,
+			func() (bool, error) {
+				if exists, err := runner.ChainExists(tables[0], canary); exists {
+					return false, nil
+				} else if isResourceError(err) {
+					log.Errorf(
+						context.Background(),
+						"Could not check for iptables canary: %s (table=%q chain=%q)",
+						err,
+						tables[0],
+						canary,
+					)
+
+					return false, nil
+				}
+
+				log.Debugf(
+					context.Background(),
+					"IPTables canary deleted (table=%q chain=%q)",
+					tables[0],
+					canary,
+				)
+				// Wait for the other canaries to be deleted too before returning
+				// so we don't start reloading too soon.
+				err := utilwait.PollImmediate( //nolint:staticcheck // deprecated poll API
+					iptablesFlushPollTime,
+					iptablesFlushTimeout,
+					func() (bool, error) {
+						for i := 1; i < len(tables); i++ {
+							if exists, err := runner.ChainExists(
+								tables[i],
+								canary,
+							); exists ||
+								isResourceError(err) {
+								return false, nil
+							}
+						}
+
+						return true, nil
+					},
+				)
+				if err != nil {
+					log.Warnf(context.Background(), "Inconsistent iptables state detected: %s", err)
+				}
+
+				return true, nil
+			},
+			stopCh,
+		)
 		if err != nil {
 			// stopCh was closed
 			for _, table := range tables {
-				_ = runner.DeleteChain(table, canary) //nolint:errcheck
+				_ = runner.DeleteChain( //nolint:errcheck // best effort cleanup
+					table,
+					canary,
+				)
 			}
+
 			return
 		}
 
-		klog.V(2).InfoS("Reloading after iptables flush")
+		log.Debugf(context.Background(), "Reloading after iptables flush")
 		reloadFunc()
 	}
 }
 
-// ChainExists is part of Interface
+// ChainExists is part of Interface.
 func (runner *runner) ChainExists(table Table, chain Chain) (bool, error) {
 	fullArgs := makeFullArgs(table, chain)
 
@@ -630,6 +766,7 @@ func (runner *runner) ChainExists(table Table, chain Chain) (bool, error) {
 	defer trace.LogIfLong(2 * time.Second)
 
 	_, err := runner.run(opListChain, fullArgs)
+
 	return err == nil, err
 }
 
@@ -650,28 +787,36 @@ func makeFullArgs(table Table, chain Chain, args ...string) []string {
 
 const iptablesVersionPattern = `v([0-9]+(\.[0-9]+)+)`
 
-// getIPTablesVersion runs "iptables --version" and parses the returned version
+// getIPTablesVersion runs "iptables --version" and parses the returned version.
 func getIPTablesVersion(exec utilexec.Interface, protocol Protocol) (*utilversion.Version, error) {
 	// this doesn't access mutable state so we don't need to use the interface / runner
 	iptablesCmd := iptablesCommand(protocol)
+
 	b, err := exec.Command(iptablesCmd, "--version").CombinedOutput()
 	if err != nil {
 		return nil, err
 	}
+
 	versionMatcher := regexp.MustCompile(iptablesVersionPattern) //nolint:gocritic
+
 	match := versionMatcher.FindStringSubmatch(string(b))
 	if match == nil {
 		return nil, fmt.Errorf("no iptables version found in string: %s", b)
 	}
+
 	version, err := utilversion.ParseGeneric(match[1])
 	if err != nil {
-		return nil, fmt.Errorf("iptables version %q is not a valid version string: %v", match[1], err)
+		return nil, fmt.Errorf(
+			"iptables version %q is not a valid version string: %w",
+			match[1],
+			err,
+		)
 	}
 
 	return version, nil
 }
 
-// Checks if iptables version has a "wait" flag
+// Checks if iptables version has a "wait" flag.
 func getIPTablesWaitFlag(version *utilversion.Version) []string {
 	switch {
 	case version.AtLeast(WaitIntervalMinVersion):
@@ -685,8 +830,12 @@ func getIPTablesWaitFlag(version *utilversion.Version) []string {
 	}
 }
 
-// Checks if iptables-restore has a "wait" flag
-func getIPTablesRestoreWaitFlag(version *utilversion.Version, exec utilexec.Interface, protocol Protocol) []string {
+// Checks if iptables-restore has a "wait" flag.
+func getIPTablesRestoreWaitFlag(
+	version *utilversion.Version,
+	exec utilexec.Interface,
+	protocol Protocol,
+) []string {
 	if version.AtLeast(WaitRestoreMinVersion) {
 		return []string{WaitString, WaitSecondsValue, WaitIntervalString, WaitIntervalUsecondsValue}
 	}
@@ -695,36 +844,51 @@ func getIPTablesRestoreWaitFlag(version *utilversion.Version, exec utilexec.Inte
 	// --version, assume it also supports --wait
 	vstring, err := getIPTablesRestoreVersionString(exec, protocol)
 	if err != nil || vstring == "" {
-		klog.V(3).InfoS("Couldn't get iptables-restore version; assuming it doesn't support --wait")
+		log.Warnf(
+			context.Background(),
+			"Couldn't get iptables-restore version; assuming it doesn't support --wait: %q",
+			err,
+		)
+
 		return nil
 	}
+
 	if _, err := utilversion.ParseGeneric(vstring); err != nil {
-		klog.V(3).InfoS("Couldn't parse iptables-restore version; assuming it doesn't support --wait")
+		log.Warnf(
+			context.Background(),
+			"Couldn't parse iptables-restore version; assuming it doesn't support --wait: %q",
+			err,
+		)
+
 		return nil
 	}
+
 	return []string{WaitString}
 }
 
 // getIPTablesRestoreVersionString runs "iptables-restore --version" to get the version string
-// in the form "X.X.X"
+// in the form "X.X.X".
 func getIPTablesRestoreVersionString(exec utilexec.Interface, protocol Protocol) (string, error) {
 	// this doesn't access mutable state so we don't need to use the interface / runner
-
 	// iptables-restore hasn't always had --version, and worse complains
 	// about unrecognized commands but doesn't exit when it gets them.
 	// Work around that by setting stdin to nothing so it exits immediately.
 	iptablesRestoreCmd := iptablesRestoreCommand(protocol)
 	cmd := exec.Command(iptablesRestoreCmd, "--version")
 	cmd.SetStdin(bytes.NewReader([]byte{}))
+
 	b, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", err
 	}
+
 	versionMatcher := regexp.MustCompile(iptablesVersionPattern) //nolint:gocritic
+
 	match := versionMatcher.FindStringSubmatch(string(b))
 	if match == nil {
 		return "", fmt.Errorf("no iptables version found in string: %s", b)
 	}
+
 	return match[1], nil
 }
 
@@ -733,7 +897,7 @@ func (runner *runner) HasRandomFully() bool {
 }
 
 // Present tests if iptable is supported on current kernel by checking the existence
-// of default table and chain
+// of default table and chain.
 func (runner *runner) Present() bool {
 	if _, err := runner.ChainExists(TableNAT, ChainPostrouting); err != nil {
 		return false
@@ -776,6 +940,7 @@ func IsNotFoundError(err error) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -785,9 +950,10 @@ const iptablesStatusResourceProblem = 4
 // problem" and was unable to attempt the request. In particular, this will be true if it
 // times out trying to get the iptables lock.
 func isResourceError(err error) bool {
-	if ee, isExitError := err.(utilexec.ExitError); isExitError {
+	if ee, ok := errors.AsType[utilexec.ExitError](err); ok {
 		return ee.ExitStatus() == iptablesStatusResourceProblem
 	}
+
 	return false
 }
 
@@ -828,40 +994,47 @@ var regexpParseError = regexp.MustCompile("line ([1-9][0-9]*) failed$") //nolint
 // input: iptables-restore: line 51 failed
 // output: parseError:  cmd = iptables-restore, line = 51
 // NOTE: parseRestoreError depends on the error format of iptables, if it ever changes
-// we need to update this function
+// we need to update this function.
 func parseRestoreError(str string) (ParseError, bool) {
 	errs := strings.Split(str, ":")
 	if len(errs) != 2 {
 		return nil, false
 	}
+
 	cmd := errs[0]
+
 	matches := regexpParseError.FindStringSubmatch(errs[1])
 	if len(matches) != 2 {
 		return nil, false
 	}
+
 	line, errMsg := strconv.Atoi(matches[1])
 	if errMsg != nil {
 		return nil, false
 	}
+
 	return parseError{cmd: cmd, line: line}, true
 }
 
 // ExtractLines extracts the -count and +count data from the lineNum row of lines and return
-// NOTE: lines start from line 1
+// NOTE: lines start from line 1.
 func ExtractLines(lines []byte, line, count int) []LineData {
 	// first line is line 1, so line can't be smaller than 1
 	if line < 1 {
 		return nil
 	}
+
 	start := line - count
 	if start <= 0 {
 		start = 1
 	}
+
 	end := line + count + 1
 
 	offset := 1
 	scanner := bufio.NewScanner(bytes.NewBuffer(lines))
 	extractLines := make([]LineData, 0, count*2)
+
 	for scanner.Scan() {
 		if offset >= start && offset < end {
 			extractLines = append(extractLines, LineData{
@@ -869,10 +1042,13 @@ func ExtractLines(lines []byte, line, count int) []LineData {
 				Data: scanner.Text(),
 			})
 		}
+
 		if offset == end {
 			break
 		}
+
 		offset++
 	}
+
 	return extractLines
 }

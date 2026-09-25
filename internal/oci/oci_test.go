@@ -4,16 +4,17 @@ import (
 	"context"
 	"os"
 
-	criu "github.com/checkpoint-restore/go-criu/v7/utils"
-	"github.com/cri-o/cri-o/internal/oci"
-	"github.com/cri-o/cri-o/pkg/annotations"
-	libconfig "github.com/cri-o/cri-o/pkg/config"
+	criu "github.com/checkpoint-restore/go-criu/v8/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+
+	"github.com/cri-o/cri-o/internal/oci"
+	v2 "github.com/cri-o/cri-o/pkg/annotations/v2"
+	libconfig "github.com/cri-o/cri-o/pkg/config"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Oci", func() {
 	t.Describe("New", func() {
 		It("should succeed with default config", func() {
@@ -44,31 +45,32 @@ var _ = t.Describe("Oci", func() {
 			performanceRuntime = "high-performance"
 			vmRuntime          = "kata"
 		)
+
 		runtimes := libconfig.Runtimes{
-			defaultRuntime: {
+			defaultRuntime: &libconfig.RuntimeHandler{
 				RuntimePath: "/bin/sh",
 				RuntimeType: "",
 				RuntimeRoot: "/run/runc",
 			},
-			invalidRuntime: {},
-			usernsRuntime: {
+			invalidRuntime: &libconfig.RuntimeHandler{},
+			usernsRuntime: &libconfig.RuntimeHandler{
 				RuntimePath:        "/bin/sh",
 				RuntimeType:        "",
 				RuntimeRoot:        "/run/runc",
-				AllowedAnnotations: []string{annotations.UsernsModeAnnotation},
+				AllowedAnnotations: []string{v2.UsernsMode},
 			},
-			performanceRuntime: {
+			performanceRuntime: &libconfig.RuntimeHandler{
 				RuntimePath: "/bin/sh",
 				RuntimeType: "",
 				RuntimeRoot: "/run/runc",
 				AllowedAnnotations: []string{
-					annotations.CPULoadBalancingAnnotation,
-					annotations.IRQLoadBalancingAnnotation,
-					annotations.CPUQuotaAnnotation,
-					annotations.OCISeccompBPFHookAnnotation,
+					v2.CPULoadBalancing,
+					v2.IRQLoadBalancing,
+					v2.CPUQuota,
+					v2.OCISeccompBPFHook,
 				},
 			},
-			vmRuntime: {
+			vmRuntime: &libconfig.RuntimeHandler{
 				RuntimePath:                  "/usr/bin/containerd-shim-kata-v2",
 				RuntimeType:                  "vm",
 				RuntimeRoot:                  "/run/vc",
@@ -79,8 +81,10 @@ var _ = t.Describe("Oci", func() {
 
 		BeforeEach(func() {
 			var err error
+
 			config, err = libconfig.DefaultConfig()
 			Expect(err).ToNot(HaveOccurred())
+
 			config.DefaultRuntime = defaultRuntime
 			config.Runtimes = runtimes
 			// so we have permission to make a directory within it
@@ -127,18 +131,36 @@ var _ = t.Describe("Oci", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(runtimeType).To(Equal(libconfig.RuntimeTypeVM))
 		})
+		It("Seccomp should return the runtime seccomp config", func() {
+			// Given
+			// When
+			_, err := sut.Seccomp(defaultRuntime)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+		})
+		It("Seccomp should fail when runtime is not present", func() {
+			// Given
+			// When
+			_, err := sut.Seccomp(invalidRuntime)
+
+			// Then
+			Expect(err).To(HaveOccurred())
+		})
 		Context("AllowedAnnotations", func() {
 			It("should succeed to return allowed annotation", func() {
 				// Given
-				Expect(runtimes[performanceRuntime].ValidateRuntimeAllowedAnnotations()).To(Succeed())
+				Expect(
+					runtimes[performanceRuntime].ValidateRuntimeAllowedAnnotations(),
+				).To(Succeed())
 
 				// When
 				foundAnn, err := sut.AllowedAnnotations(performanceRuntime)
 
 				// Then
 				Expect(err).ToNot(HaveOccurred())
-				Expect(foundAnn).NotTo(ContainElement(annotations.DevicesAnnotation))
-				Expect(foundAnn).To(ContainElement(annotations.IRQLoadBalancingAnnotation))
+				Expect(foundAnn).NotTo(ContainElement(v2.Devices))
+				Expect(foundAnn).To(ContainElement(v2.IRQLoadBalancing))
 			})
 			It("should fail to return allowed annotation of unknown runtime", func() {
 				// Given
@@ -183,7 +205,9 @@ var _ = t.Describe("Oci", func() {
 			}
 			// Given
 			beforeEach()
+
 			defer os.RemoveAll("dump.log")
+
 			config.Runtimes["runc"] = &libconfig.RuntimeHandler{
 				RuntimePath: "/bin/true",
 			}
@@ -209,7 +233,9 @@ var _ = t.Describe("Oci", func() {
 			}
 			// Given
 			defer os.RemoveAll("dump.log")
+
 			beforeEach()
+
 			config.Runtimes["runc"] = &libconfig.RuntimeHandler{
 				RuntimePath: "/bin/false",
 			}
@@ -236,6 +262,7 @@ var _ = t.Describe("Oci", func() {
 			}
 			// Given
 			beforeEach()
+
 			config.Runtimes["runc"] = &libconfig.RuntimeHandler{
 				RuntimePath: "/bin/true",
 				MonitorPath: "/bin/true",
@@ -243,8 +270,14 @@ var _ = t.Describe("Oci", func() {
 
 			err := os.Mkdir("checkpoint", 0o700)
 			Expect(err).ToNot(HaveOccurred())
+
 			defer os.RemoveAll("checkpoint")
-			inventory, err := os.OpenFile("checkpoint/inventory.img", os.O_RDONLY|os.O_CREATE, 0o644)
+
+			inventory, err := os.OpenFile(
+				"checkpoint/inventory.img",
+				os.O_RDONLY|os.O_CREATE,
+				0o644,
+			)
 			Expect(err).ToNot(HaveOccurred())
 			inventory.Close()
 
@@ -261,7 +294,12 @@ var _ = t.Describe("Oci", func() {
 			myContainer.SetSpec(specgen)
 
 			// When
-			err = sut.RestoreContainer(context.Background(), myContainer, "no-parent-cgroup-exists", "label")
+			err = sut.RestoreContainer(
+				context.Background(),
+				myContainer,
+				"no-parent-cgroup-exists",
+				"label",
+			)
 
 			// Then
 			Expect(err).To(HaveOccurred())
@@ -273,6 +311,7 @@ var _ = t.Describe("Oci", func() {
 			}
 			// Given
 			beforeEach()
+
 			config.Runtimes["runc"] = &libconfig.RuntimeHandler{
 				RuntimePath: "/bin/true",
 				MonitorPath: "/bin/true",
@@ -292,8 +331,14 @@ var _ = t.Describe("Oci", func() {
 
 			err := os.Mkdir("checkpoint", 0o700)
 			Expect(err).ToNot(HaveOccurred())
+
 			defer os.RemoveAll("checkpoint")
-			inventory, err := os.OpenFile("checkpoint/inventory.img", os.O_RDONLY|os.O_CREATE, 0o644)
+
+			inventory, err := os.OpenFile(
+				"checkpoint/inventory.img",
+				os.O_RDONLY|os.O_CREATE,
+				0o644,
+			)
 			Expect(err).ToNot(HaveOccurred())
 			inventory.Close()
 
@@ -307,13 +352,19 @@ var _ = t.Describe("Oci", func() {
 				0o644,
 			)
 			Expect(err).ToNot(HaveOccurred())
+
 			defer os.RemoveAll("config.json")
 
 			config.Conmon = "/bin/true"
 
-			// When
-			err = sut.RestoreContainer(context.Background(), myContainer, "no-parent-cgroup-exists", "label")
 			defer os.RemoveAll("restore.log")
+			// When
+			err = sut.RestoreContainer(
+				context.Background(),
+				myContainer,
+				"no-parent-cgroup-exists",
+				"label",
+			)
 
 			// Then
 			Expect(err).To(HaveOccurred())
@@ -326,11 +377,18 @@ var _ = t.Describe("Oci", func() {
 			// Given
 			beforeEach()
 			// When
-			err := sut.RestoreContainer(context.Background(), myContainer, "no-parent-cgroup-exists", "label")
+			err := sut.RestoreContainer(
+				context.Background(),
+				myContainer,
+				"no-parent-cgroup-exists",
+				"label",
+			)
 
 			// Then
 			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(Equal("a complete checkpoint for this container cannot be found, cannot restore: stat checkpoint/inventory.img: no such file or directory"))
+			Expect(
+				err.Error(),
+			).To(Equal("a complete checkpoint for this container cannot be found, cannot restore: stat checkpoint/inventory.img: no such file or directory"))
 		})
 	})
 })

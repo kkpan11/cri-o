@@ -11,53 +11,122 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/containers/image/v5/signature"
-	imageTypes "github.com/containers/image/v5/types"
 	encconfig "github.com/containers/ocicrypt/config"
+	"github.com/cri-o/crio-credential-provider/pkg/auth"
+	"github.com/docker/distribution/registry/api/errcode"
+	"github.com/google/uuid"
+	"github.com/opencontainers/go-digest"
+	"go.podman.io/image/v5/docker/reference"
+	imageTypes "go.podman.io/image/v5/types"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+	crierrors "k8s.io/cri-api/pkg/errors"
+
+	libsandbox "github.com/cri-o/cri-o/internal/lib/sandbox"
 	"github.com/cri-o/cri-o/internal/log"
 	"github.com/cri-o/cri-o/internal/storage"
 	"github.com/cri-o/cri-o/server/metrics"
 	"github.com/cri-o/cri-o/utils"
-	"github.com/docker/distribution/registry/api/errcode"
-	"github.com/opencontainers/go-digest"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
-	crierrors "k8s.io/cri-api/pkg/errors"
 )
 
-var localRegistryHostname = "localhost"
-
 // PullImage pulls a image with authentication config.
-func (s *Server) PullImage(ctx context.Context, req *types.PullImageRequest) (*types.PullImageResponse, error) {
+func (s *Server) PullImage(
+	ctx context.Context,
+	req *types.PullImageRequest,
+) (*types.PullImageResponse, error) {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
 	// TODO: what else do we need here? (Signatures when the story isn't just pulling from docker://)
 	var err error
+
 	image := ""
-	img := req.Image
+	img := req.GetImage()
+
 	if img != nil {
-		image = img.Image
+		image = img.GetImage()
 	}
+
 	log.Infof(ctx, "Pulling image: %s", image)
 
 	pullArgs := pullArguments{image: image}
 
-	sc := req.SandboxConfig
+	// set the default imageServer. It will be replaced later if required
+	defaultImageServer, err := s.StorageImageServer(nil)
+	if err != nil {
+		return nil, err
+	}
+
+	pullArgs.imageServer = defaultImageServer
+
+	sc := req.GetSandboxConfig()
 	if sc != nil {
-		if sc.Linux != nil {
-			pullArgs.sandboxCgroup = sc.Linux.CgroupParent
+		if sc.GetLinux() != nil {
+			pullArgs.sandboxCgroup = sc.GetLinux().GetCgroupParent()
 		}
-		if sc.Metadata != nil {
-			pullArgs.namespace = sc.Metadata.Namespace
+
+		var name string
+
+		if sc.GetMetadata() != nil {
+			pullArgs.namespace = sc.GetMetadata().GetNamespace()
+			name = libsandbox.PodName(sc.GetMetadata())
+		}
+
+		var sbErr error
+
+		podID, err := s.PodIDForName(name)
+		if err != nil {
+			log.Debugf(
+				ctx,
+				"PodIDForName(%s) failed during image pull, falling back to host image store: %v",
+				name,
+				err,
+			)
+		} else {
+			var sb *libsandbox.Sandbox
+
+			sb, sbErr = s.LookupSandbox(podID)
+			if sbErr != nil {
+				log.Debugf(
+					ctx,
+					"Failed to retrieve sandbox for image %s (podID: %s): %v",
+					name,
+					podID,
+					sbErr,
+				)
+			} else {
+				pullArgs.imageServer, sbErr = s.StorageImageServer(sb)
+				if sbErr != nil {
+					log.Debugf(ctx, "Failed to get image server for sandbox %s: %v", podID, sbErr)
+				}
+			}
+		}
+
+		// Double-check the runtime handler from the image spec.
+		// Warn if we use the default ImageServer when we should have a runtimePulled one.
+		r, ok := s.config.Runtimes[img.GetRuntimeHandler()]
+		if ok && r.RuntimePullImage && (err != nil || sbErr != nil) {
+			log.Debugf(
+				ctx,
+				"Runtime handler for image %s is configured for runtime pull, but couldn't get the proper ImageServer",
+				name,
+			)
+
+			if err != nil {
+				return nil, err
+			}
+
+			return nil, sbErr
 		}
 	}
 
-	if req.Auth != nil {
-		username := req.Auth.Username
-		password := req.Auth.Password
-		if req.Auth.Auth != "" {
-			username, password, err = decodeDockerAuth(req.Auth.Auth)
+	if req.GetAuth() != nil {
+		username := req.GetAuth().GetUsername()
+		password := req.GetAuth().GetPassword()
+
+		if req.GetAuth().GetAuth() != "" {
+			username, password, err = decodeDockerAuth(req.GetAuth().GetAuth())
 			if err != nil {
 				log.Debugf(ctx, "Error decoding authentication for image %s: %v", image, err)
+
 				return nil, err
 			}
 		}
@@ -78,18 +147,22 @@ func (s *Server) PullImage(ctx context.Context, req *types.PullImageRequest) (*t
 	pullOp, pullInProcess := func() (pullOp *pullOperation, inProgress bool) {
 		s.pullOperationsLock.Lock()
 		defer s.pullOperationsLock.Unlock()
+
 		pullOp, inProgress = s.pullOperationsInProgress[pullArgs]
 		if !inProgress {
 			pullOp = &pullOperation{}
 			s.pullOperationsInProgress[pullArgs] = pullOp
+
 			storage.ImageBeingPulled.Store(pullArgs.image, true)
 			pullOp.wg.Add(1)
 		}
+
 		return pullOp, inProgress
 	}()
 
 	if !pullInProcess {
 		pullOp.err = errors.New("pullImage was aborted by a Go panic")
+
 		defer func() {
 			s.pullOperationsLock.Lock()
 			delete(s.pullOperationsInProgress, pullArgs)
@@ -97,6 +170,7 @@ func (s *Server) PullImage(ctx context.Context, req *types.PullImageRequest) (*t
 			pullOp.wg.Done()
 			s.pullOperationsLock.Unlock()
 		}()
+
 		pullOp.imageRef, pullOp.err = s.pullImage(ctx, &pullArgs)
 	} else {
 		// Wait for the pull operation to finish.
@@ -104,21 +178,15 @@ func (s *Server) PullImage(ctx context.Context, req *types.PullImageRequest) (*t
 	}
 
 	if pullOp.err != nil {
-		wrap := func(e error) error { return fmt.Errorf("%v: %w", e, pullOp.err) }
-
 		if errors.Is(pullOp.err, syscall.ECONNREFUSED) {
-			return nil, wrap(crierrors.ErrRegistryUnavailable)
+			return nil, fmt.Errorf("%w: %w", crierrors.ErrRegistryUnavailable, pullOp.err)
 		}
 
-		var policyErr signature.PolicyRequirementError
-		if errors.As(pullOp.err, &policyErr) {
-			return nil, wrap(crierrors.ErrSignatureValidationFailed)
-		}
-
-		return nil, pullOp.err
+		return nil, storage.WrapSignatureCRIErrorIfNeeded(pullOp.err)
 	}
 
-	log.Infof(ctx, "Pulled image: %v", pullOp.imageRef)
+	log.Infof(ctx, "Pulled image: %s", pullOp.imageRef)
+
 	return &types.PullImageResponse{
 		ImageRef: pullOp.imageRef,
 	}, nil
@@ -127,26 +195,42 @@ func (s *Server) PullImage(ctx context.Context, req *types.PullImageRequest) (*t
 // pullImage performs the actual pull operation of PullImage. Used to separate
 // the pull implementation from the pullCache logic in PullImage and improve
 // readability and maintainability.
+// It returns the image ID string suitable for PullImageResponse.ImageRef.
 func (s *Server) pullImage(ctx context.Context, pullArgs *pullArguments) (string, error) {
 	var err error
+
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
 
-	sourceCtx := *s.config.SystemContext   // A shallow copy we can modify
+	sourceCtx, err := s.contextForNamespace(pullArgs.namespace)
+	if err != nil {
+		return "", fmt.Errorf("get context for namespace: %w", err)
+	}
+
+	log.Debugf(
+		ctx,
+		"Using pull policy path for image %s: %q",
+		pullArgs.image,
+		sourceCtx.SignaturePolicyPath,
+	)
+
+	if pullArgs.namespace != "" {
+		authCleanup, err := s.prepareTempAuthFile(
+			ctx,
+			&sourceCtx,
+			pullArgs.image,
+			pullArgs.namespace,
+		)
+		if err != nil {
+			return "", fmt.Errorf("prepare temp auth file: %w", err)
+		}
+		defer authCleanup()
+	}
+
 	sourceCtx.DockerLogMirrorChoice = true // Add info level log of the pull source
 	if pullArgs.credentials.Username != "" {
 		sourceCtx.DockerAuthConfig = &pullArgs.credentials
 	}
-
-	if pullArgs.namespace != "" {
-		policyPath := filepath.Join(s.config.SignaturePolicyDir, pullArgs.namespace+".json")
-		if _, err := os.Stat(policyPath); err == nil {
-			sourceCtx.SignaturePolicyPath = policyPath
-		} else if !os.IsNotExist(err) {
-			return "", fmt.Errorf("read policy path %s: %w", policyPath, err)
-		}
-	}
-	log.Debugf(ctx, "Using pull policy path for image %s: %s", pullArgs.image, sourceCtx.SignaturePolicyPath)
 
 	decryptConfig, err := getDecryptionKeys(s.config.DecryptionKeysPath)
 	if err != nil {
@@ -154,10 +238,12 @@ func (s *Server) pullImage(ctx context.Context, pullArgs *pullArguments) (string
 	}
 
 	cgroup := ""
+
 	if s.config.SeparatePullCgroup != "" {
 		if !s.config.CgroupManager().IsSystemd() {
 			return "", errors.New("--separate-pull-cgroup is supported only with systemd")
 		}
+
 		if s.config.SeparatePullCgroup == utils.PodCgroupName {
 			cgroup = pullArgs.sandboxCgroup
 		} else {
@@ -168,126 +254,256 @@ func (s *Server) pullImage(ctx context.Context, pullArgs *pullArguments) (string
 		}
 	}
 
-	remoteCandidates, err := s.StorageImageServer().CandidatesForPotentiallyShortImageName(s.config.SystemContext, pullArgs.image)
+	remoteCandidates, err := pullArgs.imageServer.CandidatesForPotentiallyShortImageName(
+		s.config.SystemContext,
+		pullArgs.image,
+	)
 	if err != nil {
 		return "", err
 	}
 	// CandidatesForPotentiallyShortImageName is defined never to return an empty slice on success, so if the loop considers all candidates
 	// and they all fail, this error value should be overwritten by a real failure.
 	lastErr := errors.New("internal error: pullImage failed but reported no error reason")
+
 	for _, remoteCandidateName := range remoteCandidates {
-		err := s.pullImageCandidate(ctx, &sourceCtx, remoteCandidateName, decryptConfig, cgroup)
+		imageRef, err := s.pullImageCandidate(
+			ctx,
+			&sourceCtx,
+			remoteCandidateName,
+			decryptConfig,
+			cgroup,
+			pullArgs.imageServer,
+		)
 		if err == nil {
 			// Update metric for successful image pulls
 			metrics.Instance().MetricImagePullsSuccessesInc(remoteCandidateName)
 
-			status, err := s.StorageImageServer().ImageStatusByName(s.config.SystemContext, remoteCandidateName)
-			if err != nil {
-				return "", err
-			}
-			imageRef := status.ID.IDStringForOutOfProcessConsumptionOnly()
-			if len(status.RepoDigests) > 0 {
-				imageRef = status.RepoDigests[0]
-			}
-
-			return imageRef, nil
+			return s.resolveImageRefToID(ctx, imageRef, pullArgs.imageServer)
 		}
+
 		lastErr = err
 	}
+
 	return "", lastErr
 }
 
-func (s *Server) pullImageCandidate(ctx context.Context, sourceCtx *imageTypes.SystemContext, remoteCandidateName storage.RegistryImageReference, decryptConfig *encconfig.DecryptConfig, cgroup string) error {
-	tmpImg, err := s.StorageImageServer().PrepareImage(sourceCtx, remoteCandidateName)
+// contextForNamespace takes the provided namespace and returns a modifiable
+// copy of the servers system context.
+func (s *Server) contextForNamespace(namespace string) (imageTypes.SystemContext, error) {
+	sysCtx := *s.config.SystemContext // A shallow copy we can modify
+
+	if namespace != "" {
+		policyPath := filepath.Join(s.config.SignaturePolicyDir, namespace+".json")
+		if _, err := os.Stat(policyPath); err == nil {
+			sysCtx.SignaturePolicyPath = policyPath
+		} else if !os.IsNotExist(err) {
+			return sysCtx, fmt.Errorf("read policy path %s: %w", policyPath, err)
+		}
+	}
+
+	return sysCtx, nil
+}
+
+// prepareTempAuthFile checks is a namespaced auth file is available for the
+// provided imageRef and namespace. If that's the case, then it moves it to a
+// temporary location for singular usage, modifies the provided system context
+// and returns a cleanup function to remove the file if the pull has been done.
+func (s *Server) prepareTempAuthFile(
+	ctx context.Context,
+	sysCtx *imageTypes.SystemContext,
+	imageRef, namespace string,
+) (cleanup func(), err error) {
+	cleanup = func() {}
+
+	// Normalize the image ref to use the same format as the credential provider, see:
+	// https://github.com/kubernetes/kubernetes/blob/6070f5a/pkg/kubelet/images/image_manager.go#L192-L195
+	// which calls into:
+	// https://github.com/kubernetes/kubernetes/blob/6070f5a/pkg/util/parsers/parsers.go#L29-L37
+	//
+	// This can cause (for our use case acceptable) races, if multiple images
+	// with the same prefix are pulled on the same node, for example:
+	// registry.local/image:latest and registry.local/image:tag will both
+	// resolve to the image.Name(): registry.local/image
+	// This could lead into the credential provider writing just a single temp
+	// auth file instead of two, while CRI-O would be just able to take one
+	// during the pull, causing the other image pull to fail. If that happens,
+	// then the backoff of the kubelet should re-initiate the pull cycle by
+	// calling the credential provider again and writing a new auth file.
+	image, err := reference.ParseNormalizedNamed(imageRef)
 	if err != nil {
-		// We're not able to find the image remotely, check if it's
-		// available locally, but only for localhost ones.
-		// This allows pulling localhost images even if the
-		// `imagePullPolicy` is set to `Always`.
-		if remoteCandidateName.Registry() == localRegistryHostname {
-			if _, err := s.StorageImageServer().ImageStatusByName(s.config.SystemContext, remoteCandidateName); err == nil {
-				return nil
-			}
-		}
-		log.Debugf(ctx, "Error preparing image %s: %v", remoteCandidateName, err)
-		tryIncrementImagePullFailureMetric(remoteCandidateName, err)
-		return err
-	}
-	defer tmpImg.Close()
-
-	storedImage, err := s.StorageImageServer().ImageStatusByName(s.config.SystemContext, remoteCandidateName)
-	if err == nil {
-		tmpImgConfigDigest := tmpImg.ConfigInfo().Digest
-		if tmpImgConfigDigest.String() == "" {
-			// this means we are playing with a schema1 image, in which
-			// case, we're going to repull the image in any case
-			log.Debugf(ctx, "Image config digest is empty, re-pulling image")
-		} else if tmpImgConfigDigest.String() == storedImage.ConfigDigest.String() {
-			log.Debugf(ctx, "Image %s already in store, skipping pull", remoteCandidateName)
-
-			// Skipped digests metrics
-			tryRecordSkippedMetric(ctx, remoteCandidateName, tmpImgConfigDigest)
-
-			// Skipped bytes metrics
-			if storedImage.Size != nil {
-				// Metrics for image pull skipped bytes
-				metrics.Instance().MetricImagePullsSkippedBytesAdd(float64(*storedImage.Size))
-			}
-
-			return nil
-		}
-		log.Debugf(ctx, "Image in store has different ID, re-pulling %s", remoteCandidateName)
+		return cleanup, fmt.Errorf("parse image name: %w", err)
 	}
 
+	// Follow the strict format of <NAMESPACE>-<IMAGE_NAME_SHA256>.json to resolve possible auth files.
+	authFilePath, err := auth.FilePath(s.config.NamespacedAuthDir, namespace, image.Name())
+	if err != nil {
+		return cleanup, fmt.Errorf("get auth file path: %w", err)
+	}
+
+	log.Debugf(ctx, "Looking for namespaced auth JSON file in: %s", authFilePath)
+
+	if _, err := os.Stat(authFilePath); err != nil {
+		return cleanup, nil
+	}
+
+	log.Infof(ctx, "Using auth file for namespace %s: %s", namespace, authFilePath)
+
+	removeAuthFilePath := func() {
+		if err := os.RemoveAll(authFilePath); err != nil {
+			log.Errorf(
+				ctx,
+				"Unable to remove auth file path due to error in temp auth file prep: %v",
+				err,
+			)
+		}
+	}
+
+	inUseAuthDirPath := filepath.Join(s.config.NamespacedAuthDir, "in-use")
+	if err := os.MkdirAll(inUseAuthDirPath, 0o700); err != nil {
+		removeAuthFilePath()
+
+		return cleanup, fmt.Errorf("unable to ensure in-use auth dir: %w", err)
+	}
+
+	ext := filepath.Ext(authFilePath)
+	newAuthFileName := fmt.Sprintf(
+		"%s-%s%s",
+		strings.TrimSuffix(filepath.Base(authFilePath), ext),
+		uuid.New(),
+		ext,
+	)
+
+	tempAuthFilePath := filepath.Join(inUseAuthDirPath, newAuthFileName)
+	if err := os.Rename(authFilePath, tempAuthFilePath); err != nil {
+		removeAuthFilePath()
+
+		return cleanup, fmt.Errorf("unable to move auth file path to temporary location: %w", err)
+	}
+
+	sysCtx.AuthFilePath = tempAuthFilePath
+	cleanup = func() {
+		if err := os.RemoveAll(tempAuthFilePath); err != nil {
+			log.Warnf(ctx, "Unable to remove auth file: %s", tempAuthFilePath)
+		} else {
+			log.Debugf(ctx, "Removed temp auth file: %s", tempAuthFilePath)
+		}
+	}
+
+	return cleanup, nil
+}
+
+func (s *Server) pullImageCandidate(
+	ctx context.Context,
+	sourceCtx *imageTypes.SystemContext,
+	remoteCandidateName storage.RegistryImageReference,
+	decryptConfig *encconfig.DecryptConfig,
+	cgroup string,
+	is storage.ImageServer,
+) (storage.RegistryImageReference, error) {
 	// Collect pull progress metrics
 	progress := make(chan imageTypes.ProgressProperties)
-	defer close(progress) // nolint:gocritic
+	defer close(progress)
+
+	if deadline, ok := ctx.Deadline(); ok {
+		log.Debugf(ctx, "Pull timeout is: %s", time.Until(deadline))
+	}
 
 	// Cancel the pull if no progress is made
-	pullCtx, cancel := context.WithCancel(context.Background())
-	go consumeImagePullProgress(ctx, cancel, progress, remoteCandidateName)
+	pullCtx, cancel := context.WithCancel(ctx)
+	go consumeImagePullProgress(
+		ctx,
+		cancel,
+		s.ContainerServer.Config().PullProgressTimeout,
+		progress,
+		remoteCandidateName,
+	)
 
-	_, err = s.StorageImageServer().PullImage(pullCtx, remoteCandidateName, &storage.ImageCopyOptions{
+	repoDigest, err := is.PullImage(pullCtx, remoteCandidateName, &storage.ImageCopyOptions{
 		SourceCtx:        sourceCtx,
 		DestinationCtx:   s.config.SystemContext,
 		OciDecryptConfig: decryptConfig,
-		ProgressInterval: time.Second,
+		ProgressInterval: s.ContainerServer.Config().PullProgressTimeout / 10,
 		Progress:         progress,
 		CgroupPull: storage.CgroupPullConfiguration{
 			UseNewCgroup: s.config.SeparatePullCgroup != "",
 			ParentCgroup: cgroup,
 		},
+		AdditionalArtifactStores: s.config.AdditionalArtifactStores,
 	})
 	if err != nil {
 		log.Debugf(ctx, "Error pulling image %s: %v", remoteCandidateName, err)
 		tryIncrementImagePullFailureMetric(remoteCandidateName, err)
-		return err
+
+		return storage.RegistryImageReference{}, err
 	}
-	return nil
+
+	return repoDigest, nil
+}
+
+// resolveImageRefToID converts a pulled image reference (repo@digest) to a
+// storage image ID suitable for PullImageResponse.ImageRef. For regular
+// container images the ID is looked up via ImageStatusByName. For OCI artifacts
+// (which are not stored in container storage) it falls back to the artifact
+// store.
+func (s *Server) resolveImageRefToID(
+	ctx context.Context,
+	imageRef storage.RegistryImageReference,
+	is storage.ImageServer,
+) (string, error) {
+	// Try resolving as a regular container image first.
+	imageResult, err := is.ImageStatusByName(s.config.SystemContext, imageRef)
+	if err == nil {
+		return imageResult.ID.IDStringForOutOfProcessConsumptionOnly(), nil
+	}
+
+	// Fall back to the artifact store for OCI artifacts.
+	artifact, artifactErr := s.ArtifactStore().
+		Status(ctx, imageRef.StringForOutOfProcessConsumptionOnly())
+	if artifactErr != nil {
+		return "", fmt.Errorf(
+			"resolve pulled image %s: not found in container storage (%w) or artifact store (%w)",
+			imageRef,
+			err,
+			artifactErr,
+		)
+	}
+
+	return artifact.CRIImage().GetId(), nil
 }
 
 // consumeImagePullProgress consumes progress and turns it into metrics updates.
 // It also checks if progress is being made within a constant timeout.
 // If the timeout is reached because no progress updates have been made, then
 // the cancel function will be called.
-func consumeImagePullProgress(ctx context.Context, cancel context.CancelFunc, progress <-chan imageTypes.ProgressProperties, remoteCandidateName storage.RegistryImageReference) {
-	// The progress interval is 1s, but we give it a bit more time just in case
-	// that the connection revives.
-	const timeout = 10 * time.Second
-	timer := time.AfterFunc(timeout, func() {
-		log.Warnf(ctx, "Timed out on waiting up to %s for image pull progress updates", timeout)
-		cancel()
+func consumeImagePullProgress(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	pullProgressTimeout time.Duration,
+	progress <-chan imageTypes.ProgressProperties,
+	remoteCandidateName storage.RegistryImageReference,
+) {
+	timer := time.AfterFunc(pullProgressTimeout, func() {
+		if pullProgressTimeout != 0 {
+			log.Warnf(
+				ctx,
+				"Timed out on waiting up to %s for image pull progress updates",
+				pullProgressTimeout,
+			)
+			cancel()
+		}
 	})
+
 	timer.Stop()       // don't start the timer immediately
 	defer timer.Stop() // ensure that the timer is stopped when we exit the progress loop
 
 	for p := range progress {
-		timer.Reset(timeout)
+		timer.Reset(pullProgressTimeout)
 
 		if p.Event == imageTypes.ProgressEventSkipped {
 			// Skipped digests metrics
 			tryRecordSkippedMetric(ctx, remoteCandidateName, p.Artifact.Digest)
 		}
+
 		if p.Artifact.Size > 0 {
 			log.Debugf(ctx, "ImagePull (%v): %s (%s): %v bytes (%.2f%%)",
 				p.Event, remoteCandidateName, p.Artifact.Digest, p.Offset,
@@ -316,17 +532,20 @@ func consumeImagePullProgress(ctx context.Context, cancel context.CancelFunc, pr
 func tryIncrementImagePullFailureMetric(img storage.RegistryImageReference, err error) {
 	// We try to cover some basic use-cases
 	const labelUnknown = "UNKNOWN"
+
 	label := labelUnknown
 
 	// Docker registry errors
 	for _, desc := range errcode.GetErrorAllDescriptors() {
 		if strings.Contains(err.Error(), desc.Message) {
 			label = desc.Value
+
 			break
 		}
 	}
+
 	if label == labelUnknown {
-		if strings.Contains(err.Error(), "connection refused") { // nolint: gocritic
+		if strings.Contains(err.Error(), "connection refused") { //nolint:gocritic
 			label = "CONNECTION_REFUSED"
 		} else if strings.Contains(err.Error(), "connection timed out") {
 			label = "CONNECTION_TIMEOUT"
@@ -339,12 +558,20 @@ func tryIncrementImagePullFailureMetric(img storage.RegistryImageReference, err 
 	metrics.Instance().MetricImagePullsFailuresInc(img, label)
 }
 
-func tryRecordSkippedMetric(ctx context.Context, name storage.RegistryImageReference, someBlobDigest digest.Digest) {
+func tryRecordSkippedMetric(
+	ctx context.Context,
+	name storage.RegistryImageReference,
+	someBlobDigest digest.Digest,
+) {
 	// NOTE: This "layer" identification looks like a digested image reference, but
 	// it isn’t one:
 	// - the digest references a layer or config, not a manifest
 	// - "name" may contain a digest already, so this results in name@manifestDigest@someOtherdigest
-	layer := fmt.Sprintf("%s@%s", name.StringForOutOfProcessConsumptionOnly(), someBlobDigest.String())
+	layer := fmt.Sprintf(
+		"%s@%s",
+		name.StringForOutOfProcessConsumptionOnly(),
+		someBlobDigest.String(),
+	)
 	log.Debugf(ctx, "Skipped layer %s", layer)
 	metrics.Instance().MetricImageLayerReuseInc(layer)
 }
@@ -354,12 +581,15 @@ func decodeDockerAuth(s string) (user, password string, _ error) {
 	if err != nil {
 		return "", "", err
 	}
+
 	parts := strings.SplitN(string(decoded), ":", 2)
 	if len(parts) != 2 {
 		// if it's invalid just skip, as docker does
 		return "", "", nil
 	}
+
 	user = parts[0]
 	password = strings.Trim(parts[1], "\x00")
+
 	return user, password, nil
 }

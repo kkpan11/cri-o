@@ -3,15 +3,16 @@ package registrar
 
 import (
 	"errors"
+	"maps"
 	"sync"
 )
 
 var (
-	// ErrNameReserved is an error which is returned when a name is requested to be reserved that already is reserved
+	// ErrNameReserved is an error which is returned when a name is requested to be reserved that already is reserved.
 	ErrNameReserved = errors.New("name is reserved")
-	// ErrNameNotReserved is an error which is returned when trying to find a name that is not reserved
+	// ErrNameNotReserved is an error which is returned when trying to find a name that is not reserved.
 	ErrNameNotReserved = errors.New("name is not reserved")
-	// ErrNoSuchKey is returned when trying to find the names for a key which is not known
+	// ErrNoSuchKey is returned when trying to find the names for a key which is not known.
 	ErrNoSuchKey = errors.New("provided key does not exist")
 )
 
@@ -24,7 +25,7 @@ type Registrar struct {
 	mu    sync.Mutex
 }
 
-// NewRegistrar creates a new Registrar with the an empty index
+// NewRegistrar creates a new Registrar with the an empty index.
 func NewRegistrar() *Registrar {
 	return &Registrar{
 		idx:   make(map[string][]string),
@@ -35,7 +36,7 @@ func NewRegistrar() *Registrar {
 // Reserve registers a key to a name
 // Reserve is idempotent
 // Attempting to reserve a key to a name that already exists results in an `ErrNameReserved`
-// A name reservation is globally unique
+// A name reservation is globally unique.
 func (r *Registrar) Reserve(name, key string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -44,16 +45,18 @@ func (r *Registrar) Reserve(name, key string) error {
 		if k != key {
 			return ErrNameReserved
 		}
+
 		return nil
 	}
 
 	r.idx[key] = append(r.idx[key], name)
 	r.names[name] = key
+
 	return nil
 }
 
 // Release releases the reserved name
-// Once released, a name can be reserved again
+// Once released, a name can be reserved again.
 func (r *Registrar) Release(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -67,7 +70,9 @@ func (r *Registrar) Release(name string) {
 		if n != name {
 			continue
 		}
+
 		r.idx[key] = append(r.idx[key][:i], r.idx[key][i+1:]...)
+
 		break
 	}
 
@@ -82,14 +87,16 @@ func (r *Registrar) Release(name string) {
 // All names reserved to this key are released.
 func (r *Registrar) Delete(key string) {
 	r.mu.Lock()
+
 	for _, name := range r.idx[key] {
 		delete(r.names, name)
 	}
+
 	delete(r.idx, key)
 	r.mu.Unlock()
 }
 
-// GetNames lists all the reserved names for the given key
+// GetNames lists all the reserved names for the given key.
 func (r *Registrar) GetNames(key string) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -98,10 +105,11 @@ func (r *Registrar) GetNames(key string) ([]string, error) {
 	if !exists {
 		return nil, ErrNoSuchKey
 	}
+
 	return names, nil
 }
 
-// Get returns the key that the passed in name is reserved to
+// Get returns the key that the passed in name is reserved to.
 func (r *Registrar) Get(name string) (string, error) {
 	r.mu.Lock()
 	key, exists := r.names[name]
@@ -110,18 +118,19 @@ func (r *Registrar) Get(name string) (string, error) {
 	if !exists {
 		return "", ErrNameNotReserved
 	}
+
 	return key, nil
 }
 
-// GetAll returns all registered names
+// GetAll returns all registered names.
 func (r *Registrar) GetAll() map[string][]string {
 	out := make(map[string][]string)
 
 	r.mu.Lock()
 	// copy index into out
-	for id, names := range r.idx {
-		out[id] = names
-	}
+	maps.Copy(out, r.idx)
+
 	r.mu.Unlock()
+
 	return out
 }

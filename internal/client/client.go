@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -11,7 +12,6 @@ import (
 
 	"github.com/cri-o/cri-o/pkg/types"
 	"github.com/cri-o/cri-o/server"
-	json "github.com/json-iterator/go"
 )
 
 const (
@@ -20,9 +20,11 @@ const (
 
 // CrioClient is an interface to get information from crio daemon endpoint.
 type CrioClient interface {
-	DaemonInfo() (types.CrioInfo, error)
-	ContainerInfo(string) (*types.ContainerInfo, error)
-	ConfigInfo() (string, error)
+	DaemonInfo(context.Context) (types.CrioInfo, error)
+	ContainerInfo(context.Context, string) (*types.ContainerInfo, error)
+	ConfigInfo(context.Context) (string, error)
+	GoRoutinesInfo(context.Context) (string, error)
+	HeapInfo(context.Context) ([]byte, error)
 }
 
 type crioClientImpl struct {
@@ -39,26 +41,29 @@ func configureUnixTransport(tr *http.Transport, proto, addr string) error {
 	tr.DialContext = func(_ context.Context, _, _ string) (net.Conn, error) {
 		return net.DialTimeout(proto, addr, 32*time.Second)
 	}
+
 	return nil
 }
 
-// New returns a crio client
+// New returns a crio client.
 func New(crioSocketPath string) (CrioClient, error) {
 	tr := new(http.Transport)
 	if err := configureUnixTransport(tr, "unix", crioSocketPath); err != nil {
 		return nil, err
 	}
+
 	c := &http.Client{
 		Transport: tr,
 	}
+
 	return &crioClientImpl{
 		client:         c,
 		crioSocketPath: crioSocketPath,
 	}, nil
 }
 
-func (c *crioClientImpl) getRequest(path string) (*http.Request, error) {
-	req, err := http.NewRequest(http.MethodGet, path, http.NoBody)
+func (c *crioClientImpl) doGetRequest(ctx context.Context, path string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -67,59 +72,82 @@ func (c *crioClientImpl) getRequest(path string) (*http.Request, error) {
 	req.Host = "crio"
 	req.URL.Host = c.crioSocketPath
 	req.URL.Scheme = "http"
-	return req, nil
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("do get request: %w", err)
+	}
+
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+
+	return body, nil
 }
 
 // DaemonInfo return cri-o daemon info from the cri-o
 // info endpoint.
-func (c *crioClientImpl) DaemonInfo() (types.CrioInfo, error) {
+func (c *crioClientImpl) DaemonInfo(ctx context.Context) (types.CrioInfo, error) {
 	info := types.CrioInfo{}
-	req, err := c.getRequest(server.InspectInfoEndpoint)
+
+	body, err := c.doGetRequest(ctx, server.InspectInfoEndpoint)
 	if err != nil {
 		return info, err
 	}
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return info, err
-	}
-	defer resp.Body.Close()
-	err = json.NewDecoder(resp.Body).Decode(&info)
+
+	err = json.Unmarshal(body, &info)
+
 	return info, err
 }
 
 // ContainerInfo returns container info by querying
 // the cri-o container endpoint.
-func (c *crioClientImpl) ContainerInfo(id string) (*types.ContainerInfo, error) {
-	req, err := c.getRequest(server.InspectContainersEndpoint + "/" + id)
+func (c *crioClientImpl) ContainerInfo(
+	ctx context.Context,
+	id string,
+) (*types.ContainerInfo, error) {
+	body, err := c.doGetRequest(ctx, server.InspectContainersEndpoint+"/"+id)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+
 	cInfo := types.ContainerInfo{}
-	if err := json.NewDecoder(resp.Body).Decode(&cInfo); err != nil {
+	if err := json.Unmarshal(body, &cInfo); err != nil {
 		return nil, err
 	}
+
 	return &cInfo, nil
 }
 
-// ConfigInfo returns current config as TOML string
-func (c *crioClientImpl) ConfigInfo() (string, error) {
-	req, err := c.getRequest(server.InspectConfigEndpoint)
+// ConfigInfo returns current config as TOML string.
+func (c *crioClientImpl) ConfigInfo(ctx context.Context) (string, error) {
+	body, err := c.doGetRequest(ctx, server.InspectConfigEndpoint)
 	if err != nil {
 		return "", err
 	}
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
+
 	return string(body), nil
+}
+
+// GoRoutinesInfo returns go routine stack as string.
+func (c *crioClientImpl) GoRoutinesInfo(ctx context.Context) (string, error) {
+	body, err := c.doGetRequest(ctx, server.InspectGoRoutinesEndpoint)
+	if err != nil {
+		return "", err
+	}
+
+	return string(body), nil
+}
+
+// HeapInfo writes a heap dump.
+func (c *crioClientImpl) HeapInfo(ctx context.Context) ([]byte, error) {
+	body, err := c.doGetRequest(ctx, server.InspectHeapEndpoint)
+	if err != nil {
+		return nil, err
+	}
+
+	return body, nil
 }

@@ -1,4 +1,5 @@
 ---
+version: "2"
 run:
   build-tags:
     - apparmor
@@ -9,26 +10,28 @@ run:
     - test
     # needs btrfs headers installed
     - exclude_graphdriver_btrfs
-    # needs devmapper headers installed
-    - exclude_graphdriver_devicemapper
   concurrency: 6
-  deadline: 10m
 linters:
-  disable-all: true
+  default: none
   enable:
+    - arangolint
     - asasalint
     - asciicheck
     - bidichk
     - bodyclose
+    - canonicalheader
+    - copyloopvar
     - decorder
     - dogsled
     - dupl
     - dupword
     - durationcheck
+    - embeddedstructfieldcheck
     - errcheck
     - errchkjson
-    - execinquery
-    - exportloopref
+    - errorlint
+    - exptostd
+    - fatcontext
     - forcetypeassert
     - ginkgolinter
     - gocheckcompilerdirectives
@@ -37,203 +40,145 @@ linters:
     - goconst
     - gocritic
     - gocyclo
-    - gofmt
-    - gofumpt
+    - godot
     - goheader
-    - goimports
+    - gomoddirectives
+    - gomodguard_v2
     - goprintffuncname
-    - gosimple
     - gosmopolitan
     - govet
     - grouper
+    - iface
     - importas
     - ineffassign
-    - logrlint
+    - intrange
+    - iotamixing
+    - loggercheck
     - makezero
     - mirror
     - misspell
+    - modernize
     - musttag
     - nakedret
+    - nilnesserr
+    - nlreturn
+    - nolintlint
     - nosprintfhostport
     - perfsprint
     - prealloc
+    - predeclared
+    - promlinter
+    - protogetter
     - reassign
-    - rowserrcheck
+    - recvcheck
+    - revive
     - sloglint
+    - rowserrcheck
     - spancheck
-    - sqlclosecheck
     - staticcheck
-    - stylecheck
     - tagalign
-    - tenv
     - testableexamples
+    - testifylint
     - tparallel
-    - typecheck
     - unconvert
     - unparam
+    - unqueryvet
     - unused
     - usestdlibvars
+    - usetesting
+    - wastedassign
     - whitespace
+    - wsl_v5
     - zerologlint
+    # - clickhouselint
     # - containedctx
     # - contextcheck
     # - cyclop
     # - depguard
+    # - err113
     # - errname
-    # - errorlint
     # - exhaustive
-    # - exhaustruct
+    # - exhaustruct_v5
     # - forbidigo
+    # - funcorder
     # - funlen
-    # - gci
     # - gochecknoglobals
     # - gocognit
-    # - godot
+    # - godoclint
     # - godox
-    # - goerr113
-    # - gomnd
-    # - gomoddirectives
-    # - gomodguard
     # - gosec
     # - inamedparam
     # - interfacebloat
     # - ireturn
     # - lll
     # - maintidx
+    # - mnd
     # - nestif
     # - nilerr
     # - nilnil
-    # - nlreturn
     # - noctx
-    # - nolintlint
+    # - noinlineerr
     # - nonamedreturns
     # - paralleltest
-    # - predeclared
-    # - promlinter
-    # - protogetter
-    # - revive
+    # - sqlclosecheck
     # - tagliatelle
-    # - testifylint
     # - testpackage
     # - thelper
     # - varnamelen
-    # - wastedassign
     # - wrapcheck
-    # - wsl
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: true
-  gocritic:
-    enabled-checks:
-      - appendAssign
-      - appendCombine
-      - argOrder
-      - assignOp
-      - badCall
-      - badCond
-      - badLock
-      - badRegexp
-      - badSorting
-      - badSyncOnceFunc
-      - boolExprSimplify
-      - builtinShadow
-      - builtinShadowDecl
-      - captLocal
-      - caseOrder
-      - codegenComment
-      - commentFormatting
-      - commentedOutCode
-      - commentedOutImport
-      - defaultCaseOrder
-      - deferInLoop
-      - deferUnlambda
-      - deprecatedComment
-      - docStub
-      - dupArg
-      - dupBranchBody
-      - dupCase
-      - dupImport
-      - dupSubExpr
-      - dynamicFmtString
-      - elseif
-      - emptyDecl
-      - emptyFallthrough
-      - emptyStringTest
-      - equalFold
-      - evalOrder
-      - exitAfterDefer
-      - exposedSyncMutex
-      - externalErrorReassign
-      - flagDeref
-      - flagName
-      - hexLiteral
-      - httpNoBody
-      - hugeParam
-      - ifElseChain
-      - importShadow
-      - indexAlloc
-      - initClause
-      - mapKey
-      - methodExprCall
-      - nestingReduce
-      - newDeref
-      - nilValReturn
-      - octalLiteral
-      - offBy1
-      - paramTypeCombine
-      - preferDecodeRune
-      - preferFilepathJoin
-      - preferFprint
-      - preferStringWriter
-      - preferWriteByte
-      - ptrToRefParam
-      - rangeExprCopy
-      - rangeValCopy
-      - redundantSprint
-      - regexpMust
-      - regexpPattern
-      - regexpSimplify
-      - returnAfterHttpError
-      - ruleguard
-      - singleCaseSwitch
-      - sliceClear
-      - sloppyLen
-      - sloppyReassign
-      - sloppyTypeAssert
-      - sortSlice
-      - sprintfQuotedString
-      - sqlQuery
-      - stringConcatSimplify
-      - stringXbytes
-      - stringsCompare
-      - switchTrue
-      - syncMapLoadAndDelete
-      - timeExprSimplify
-      - todoCommentWithoutDetail
-      - tooManyResultsChecker
-      - truncateCmp
-      - typeAssertChain
-      - typeDefFirst
-      - typeSwitchVar
-      - typeUnparen
-      - uncheckedInlineErr
-      - underef
-      - unlabelStmt
-      - unlambda
-      - unnamedResult
-      - unnecessaryBlock
-      - unnecessaryDefer
-      - unslice
-      - valSwap
-      - weakCond
-      - wrapperFunc
-      - yodaStyleExpr
-      # - filepathJoin
-      # - whyNoLint
-  gocyclo:
-    min-complexity: 165
-  nakedret:
-    max-func-lines: 15
-  goconst:
-    min-occurrences: 6
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    goconst:
+      min-occurrences: 6
+      ignore-string-values:
+        - bind
+        - tmpfs
+        - cgroup
+        - nodev
+        - nosuid
+        - noexec
+        - rbind
+        - /sys
+    gocritic:
+      enable-all: true
+    gocyclo:
+      min-complexity: 60
+    nakedret:
+      max-func-lines: 15
+    revive:
+      rules:
+        - name: argument-limit
+          arguments:
+            - 22
+          disabled: false
+    wsl_v5:
+      allow-first-in-block: true
+      allow-whole-block: false
+      branch-max-lines: 2
+  exclusions:
+    generated: strict
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters:
+          - goconst
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+    - golines
+    - swaggo
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - localmodule
+  exclusions:
+    generated: strict

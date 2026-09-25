@@ -3,20 +3,21 @@ package server_test
 import (
 	"context"
 
-	"github.com/cri-o/cri-o/internal/oci"
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"go.uber.org/mock/gomock"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/oci"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("ContainerRemove", func() {
 	// Prepare the sut
 	BeforeEach(func() {
 		beforeEach()
-		mockRuncInLibConfig()
+		mockRuntimeInLibConfig()
 		setupSUT()
 	})
 
@@ -30,8 +31,6 @@ var _ = t.Describe("ContainerRemove", func() {
 				State: specs.State{Status: oci.ContainerStateStopped},
 			})
 			gomock.InOrder(
-				runtimeServerMock.EXPECT().StopContainer(gomock.Any(), gomock.Any()).
-					Return(nil),
 				runtimeServerMock.EXPECT().DeleteContainer(gomock.Any(), gomock.Any()).
 					Return(nil),
 			)
@@ -47,6 +46,16 @@ var _ = t.Describe("ContainerRemove", func() {
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should succeed if container is not found", func() {
+			// Given
+			// When
+			_, err := sut.RemoveContainer(context.Background(),
+				&types.RemoveContainerRequest{ContainerId: "id"})
+
+			// Then
+			Expect(err).NotTo(HaveOccurred())
 		})
 
 		It("should fail on container remove error", func() {

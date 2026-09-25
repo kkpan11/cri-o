@@ -3,14 +3,15 @@ package server_test
 import (
 	"context"
 
-	"github.com/cri-o/cri-o/internal/oci"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/oci"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("ListPodSandbox", func() {
 	ctx := context.TODO()
 	// Prepare the sut
@@ -38,7 +39,7 @@ var _ = t.Describe("ListPodSandbox", func() {
 			// Then
 			Expect(err).ToNot(HaveOccurred())
 			Expect(response).NotTo(BeNil())
-			Expect(len(response.Items)).To(BeEquivalentTo(1))
+			Expect(len(response.GetItems())).To(BeEquivalentTo(1))
 		})
 
 		It("should succeed without infra container", func() {
@@ -54,7 +55,7 @@ var _ = t.Describe("ListPodSandbox", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(response).NotTo(BeNil())
 			// the sandbox is created, and even though it has no infra container, it should be displayed
-			Expect(response.Items).To(HaveLen(1))
+			Expect(response.GetItems()).To(HaveLen(1))
 		})
 
 		It("should skip not created sandboxes", func() {
@@ -69,13 +70,14 @@ var _ = t.Describe("ListPodSandbox", func() {
 			// Then
 			Expect(err).ToNot(HaveOccurred())
 			Expect(response).NotTo(BeNil())
-			Expect(response.Items).To(BeEmpty())
+			Expect(response.GetItems()).To(BeEmpty())
 		})
 
 		It("should succeed with filter", func() {
 			// Given
 			mockDirs(testManifest)
 			createDummyState()
+
 			_, err := sut.LoadSandbox(context.Background(), sandboxID)
 			Expect(err).ToNot(HaveOccurred())
 
@@ -88,15 +90,18 @@ var _ = t.Describe("ListPodSandbox", func() {
 			// Then
 			Expect(err).ToNot(HaveOccurred())
 			Expect(response).NotTo(BeNil())
-			Expect(len(response.Items)).To(BeEquivalentTo(1))
+			Expect(len(response.GetItems())).To(BeEquivalentTo(1))
 		})
 
 		It("should succeed with filter for state", func() {
 			// Given
 			mockDirs(testManifest)
 			createDummyState()
-			_, err := sut.LoadSandbox(context.Background(), sandboxID)
+
+			sb, err := sut.LoadSandbox(context.Background(), sandboxID)
 			Expect(err).ToNot(HaveOccurred())
+			Expect(sb).ToNot(BeNil())
+			sb.SetStopped(context.Background(), false)
 
 			// When
 			response, err := sut.ListPodSandbox(context.Background(),
@@ -110,13 +115,14 @@ var _ = t.Describe("ListPodSandbox", func() {
 			// Then
 			Expect(err).ToNot(HaveOccurred())
 			Expect(response).NotTo(BeNil())
-			Expect(response.Items).To(BeEmpty())
+			Expect(response.GetItems()).To(BeEmpty())
 		})
 
 		It("should succeed with filter for label", func() {
 			// Given
 			mockDirs(testManifest)
 			createDummyState()
+
 			_, err := sut.LoadSandbox(context.Background(), sandboxID)
 			Expect(err).ToNot(HaveOccurred())
 
@@ -130,7 +136,7 @@ var _ = t.Describe("ListPodSandbox", func() {
 			// Then
 			Expect(err).ToNot(HaveOccurred())
 			Expect(response).NotTo(BeNil())
-			Expect(response.Items).To(BeEmpty())
+			Expect(response.GetItems()).To(BeEmpty())
 		})
 
 		It("should succeed with filter but when not finding id", func() {
@@ -146,7 +152,7 @@ var _ = t.Describe("ListPodSandbox", func() {
 			// Then
 			Expect(err).ToNot(HaveOccurred())
 			Expect(response).NotTo(BeNil())
-			Expect(response.Items).To(BeEmpty())
+			Expect(response.GetItems()).To(BeEmpty())
 		})
 	})
 })

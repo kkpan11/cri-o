@@ -9,12 +9,13 @@ import (
 	"syscall"
 
 	nspkg "github.com/containernetworking/plugins/pkg/ns"
-	"github.com/containers/storage/pkg/idtools"
-	"github.com/cri-o/cri-o/utils"
-	"github.com/cri-o/cri-o/utils/cmdrunner"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/storage/pkg/idtools"
 	"golang.org/x/sys/unix"
+
+	"github.com/cri-o/cri-o/utils"
+	"github.com/cri-o/cri-o/utils/cmdrunner"
 )
 
 // NamespaceManager manages the server's namespaces.
@@ -47,6 +48,7 @@ func (mgr *NamespaceManager) Initialize() error {
 				if err := os.Remove(nsDir); err != nil {
 					return fmt.Errorf("remove file to create namespaces sub-dir: %w", err)
 				}
+
 				logrus.Infof("Removed file %s to create directory in that path.", nsDir)
 			} else if !os.IsNotExist(err) {
 				// if it's neither an error because the file exists
@@ -54,11 +56,13 @@ func (mgr *NamespaceManager) Initialize() error {
 				// some other disk error.
 				return fmt.Errorf("checking whether namespaces sub-dir exists: %w", err)
 			}
+
 			if err := os.MkdirAll(nsDir, 0o755); err != nil {
 				return fmt.Errorf("invalid namespaces sub-dir: %w", err)
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -69,6 +73,7 @@ func (mgr *NamespaceManager) NewPodNamespaces(cfg *PodNamespacesConfig) ([]Names
 	if cfg == nil {
 		return nil, errors.New("PodNamespacesConfig cannot be nil")
 	}
+
 	if len(cfg.Namespaces) == 0 {
 		return []Namespace{}, nil
 	}
@@ -100,10 +105,13 @@ func (mgr *NamespaceManager) NewPodNamespaces(cfg *PodNamespacesConfig) ([]Names
 		if !ok {
 			return nil, fmt.Errorf("invalid namespace type: %s", ns.Type)
 		}
+
 		if ns.Host {
 			arg += "=host"
 		}
+
 		pinnsArgs = append(pinnsArgs, arg)
+
 		ns.Path = filepath.Join(mgr.namespacesDir, string(ns.Type)+"ns", pinnedNamespace)
 		if cfg.IDMappings != nil {
 			if err := chownDirToIDPair(ns.Path, rootPair); err != nil {
@@ -119,12 +127,17 @@ func (mgr *NamespaceManager) NewPodNamespaces(cfg *PodNamespacesConfig) ([]Names
 	}
 
 	logrus.Debugf("Calling pinns with %v", pinnsArgs)
+
 	output, err := cmdrunner.Command(mgr.pinnsPath, pinnsArgs...).CombinedOutput()
 	if err != nil {
 		logrus.Warnf("Pinns %v failed: %s (%v)", pinnsArgs, string(output), err)
 		// cleanup the mounts
 		for _, ns := range cfg.Namespaces {
-			if mErr := unix.Unmount(ns.Path, unix.MNT_DETACH); mErr != nil && mErr != unix.EINVAL {
+			if mErr := unix.Unmount(
+				ns.Path,
+				unix.MNT_DETACH,
+			); mErr != nil &&
+				!errors.Is(mErr, unix.EINVAL) {
 				logrus.Warnf("Failed to unmount %s: %v", ns.Path, mErr)
 			}
 		}
@@ -132,7 +145,10 @@ func (mgr *NamespaceManager) NewPodNamespaces(cfg *PodNamespacesConfig) ([]Names
 		return nil, fmt.Errorf("failed to pin namespaces %v: %s %w", cfg.Namespaces, output, err)
 	}
 
+	logrus.Debugf("Got output from pinns: %s", output)
+
 	returnedNamespaces := make([]Namespace, 0, len(cfg.Namespaces))
+
 	for _, ns := range cfg.Namespaces {
 		ns, err := GetNamespace(ns.Path, ns.Type)
 		if err != nil {
@@ -141,11 +157,13 @@ func (mgr *NamespaceManager) NewPodNamespaces(cfg *PodNamespacesConfig) ([]Names
 					logrus.Errorf("Failed to remove namespace after failed to create: %v", err2)
 				}
 			}
+
 			return nil, err
 		}
 
 		returnedNamespaces = append(returnedNamespaces, ns)
 	}
+
 	return returnedNamespaces, nil
 }
 
@@ -153,10 +171,12 @@ func chownDirToIDPair(pinPath string, rootPair idtools.IDPair) error {
 	if err := os.MkdirAll(filepath.Dir(pinPath), 0o755); err != nil {
 		return err
 	}
+
 	f, err := os.Create(pinPath)
 	if err != nil {
 		return err
 	}
+
 	f.Close()
 
 	return os.Chown(pinPath, rootPair.UID, rootPair.GID)
@@ -167,6 +187,7 @@ func getMappingsForPinns(mappings []idtools.IDMap) string {
 	for _, m := range mappings {
 		fmt.Fprintf(g, "%d-%d-%d@", m.ContainerID, m.HostID, m.Size)
 	}
+
 	return g.String()
 }
 
@@ -175,12 +196,16 @@ func getMappingsForPinns(mappings []idtools.IDMap) string {
 // This function is heavily based on containernetworking ns package found at:
 // https://github.com/containernetworking/plugins/blob/5c3c17164270150467498a32c71436c7cd5501be/pkg/ns/ns.go#L140
 // Credit goes to the CNI authors.
-func (mgr *NamespaceManager) NamespaceFromProcEntry(pid int, nsType NSType) (_ Namespace, retErr error) {
+func (mgr *NamespaceManager) NamespaceFromProcEntry(
+	pid int,
+	nsType NSType,
+) (_ Namespace, retErr error) {
 	// now create an empty file
 	f, err := os.CreateTemp(mgr.dirForType(PIDNS), string(PIDNS))
 	if err != nil {
 		return nil, fmt.Errorf("creating namespace path: %w", err)
 	}
+
 	pinnedNamespace := f.Name()
 	f.Close()
 
@@ -202,10 +227,19 @@ func (mgr *NamespaceManager) NamespaceFromProcEntry(pid int, nsType NSType) (_ N
 	if err := unix.Mount(podPidnsProc, pinnedNamespace, "none", unix.MS_BIND, ""); err != nil {
 		return nil, fmt.Errorf("error mounting %s namespace path: %w", string(nsType), err)
 	}
+
 	defer func() {
 		if retErr != nil {
-			if err := unix.Unmount(pinnedNamespace, unix.MNT_DETACH); err != nil && err != unix.EINVAL {
-				logrus.Errorf("Failed umount after failed to pin %s namespace: %v", string(nsType), err)
+			if err := unix.Unmount(
+				pinnedNamespace,
+				unix.MNT_DETACH,
+			); err != nil &&
+				!errors.Is(err, unix.EINVAL) {
+				logrus.Errorf(
+					"Failed umount after failed to pin %s namespace: %v",
+					string(nsType),
+					err,
+				)
 			}
 		}
 	}()
@@ -214,7 +248,7 @@ func (mgr *NamespaceManager) NamespaceFromProcEntry(pid int, nsType NSType) (_ N
 }
 
 // dirForType returns the sub-directory for that particular NSType
-// which is of the form `$namespaceDir/$nsType+"ns"`
+// which is of the form `$namespaceDir/$nsType+"ns"`.
 func (mgr *NamespaceManager) dirForType(ns NSType) string {
 	return filepath.Join(mgr.namespacesDir, string(ns)+"ns")
 }
@@ -232,5 +266,6 @@ func NamespacePathFromProc(nsType NSType, pid int) string {
 	if err := nspkg.IsNSorErr(nsPath); err != nil {
 		return ""
 	}
+
 	return nsPath
 }

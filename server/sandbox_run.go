@@ -1,13 +1,15 @@
 package server
 
 import (
+	"context"
 	"os"
 
-	"github.com/cri-o/cri-o/internal/hostport"
-	"github.com/cri-o/cri-o/internal/log"
-	"golang.org/x/net/context"
 	v1 "k8s.io/api/core/v1"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/hostport"
+	libsandbox "github.com/cri-o/cri-o/internal/lib/sandbox"
+	"github.com/cri-o/cri-o/internal/log"
 )
 
 const (
@@ -23,23 +25,23 @@ const (
 // privilegedSandbox returns true if the sandbox configuration
 // requires additional host privileges for the sandbox.
 func (s *Server) privilegedSandbox(req *types.RunPodSandboxRequest) bool {
-	securityContext := req.Config.Linux.SecurityContext
+	securityContext := req.GetConfig().GetLinux().GetSecurityContext()
 	if securityContext == nil {
 		return false
 	}
 
-	if securityContext.Privileged {
+	if securityContext.GetPrivileged() {
 		return true
 	}
 
-	namespaceOptions := securityContext.NamespaceOptions
+	namespaceOptions := securityContext.GetNamespaceOptions()
 	if namespaceOptions == nil {
 		return false
 	}
 
-	if namespaceOptions.Network == types.NamespaceMode_NODE ||
-		namespaceOptions.Pid == types.NamespaceMode_NODE ||
-		namespaceOptions.Ipc == types.NamespaceMode_NODE {
+	if namespaceOptions.GetNetwork() == types.NamespaceMode_NODE ||
+		namespaceOptions.GetPid() == types.NamespaceMode_NODE ||
+		namespaceOptions.GetIpc() == types.NamespaceMode_NODE {
 		return true
 	}
 
@@ -51,12 +53,12 @@ func (s *Server) privilegedSandbox(req *types.RunPodSandboxRequest) bool {
 // is nothing to do, and the empty key is returned. For every other case, this
 // function will return an empty string with the error associated.
 func (s *Server) runtimeHandler(req *types.RunPodSandboxRequest) (string, error) {
-	handler := req.RuntimeHandler
+	handler := req.GetRuntimeHandler()
 	if handler == "" {
 		return handler, nil
 	}
 
-	if _, err := s.Runtime().ValidateRuntimeHandler(handler); err != nil {
+	if _, err := s.ContainerServer.Runtime().ValidateRuntimeHandler(handler); err != nil {
 		return "", err
 	}
 
@@ -64,24 +66,30 @@ func (s *Server) runtimeHandler(req *types.RunPodSandboxRequest) (string, error)
 }
 
 // RunPodSandbox creates and runs a pod-level sandbox.
-func (s *Server) RunPodSandbox(ctx context.Context, req *types.RunPodSandboxRequest) (*types.RunPodSandboxResponse, error) {
+func (s *Server) RunPodSandbox(
+	ctx context.Context,
+	req *types.RunPodSandboxRequest,
+) (*types.RunPodSandboxResponse, error) {
 	// platform dependent call
 	return s.runPodSandbox(ctx, req)
 }
 
 func convertPortMappings(in []*types.PortMapping) []*hostport.PortMapping {
 	out := make([]*hostport.PortMapping, 0, len(in))
+
 	for _, v := range in {
-		if v.HostPort <= 0 {
+		if v.GetHostPort() <= 0 {
 			continue
 		}
+
 		out = append(out, &hostport.PortMapping{
-			HostPort:      v.HostPort,
-			ContainerPort: v.ContainerPort,
-			Protocol:      v1.Protocol(v.Protocol.String()),
-			HostIP:        v.HostIp,
+			HostPort:      v.GetHostPort(),
+			ContainerPort: v.GetContainerPort(),
+			Protocol:      v1.Protocol(v.GetProtocol().String()),
+			HostIP:        v.GetHostIp(),
 		})
 	}
+
 	return out
 }
 
@@ -92,6 +100,7 @@ func getHostname(id, hostname string, hostNetwork bool) (string, error) {
 			if err != nil {
 				return "", err
 			}
+
 			hostname = h
 		}
 	} else {
@@ -99,16 +108,29 @@ func getHostname(id, hostname string, hostNetwork bool) (string, error) {
 			hostname = id[:12]
 		}
 	}
+
 	return hostname, nil
 }
 
-func (s *Server) setPodSandboxMountLabel(ctx context.Context, id, mountLabel string) error {
+func (s *Server) setPodSandboxMountLabel(
+	ctx context.Context,
+	sbox libsandbox.Builder,
+	mountLabel string,
+) error {
 	_, span := log.StartSpan(ctx)
 	defer span.End()
-	storageMetadata, err := s.StorageRuntimeServer().GetContainerMetadata(id)
+
+	runtimeSvc, err := s.StorageRuntimeServer(sbox)
 	if err != nil {
 		return err
 	}
+
+	storageMetadata, err := runtimeSvc.GetContainerMetadata(sbox.ID())
+	if err != nil {
+		return err
+	}
+
 	storageMetadata.SetMountLabel(mountLabel)
-	return s.StorageRuntimeServer().SetContainerMetadata(id, &storageMetadata)
+
+	return runtimeSvc.SetContainerMetadata(sbox.ID(), &storageMetadata)
 }

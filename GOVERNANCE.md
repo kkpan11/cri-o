@@ -1,37 +1,36 @@
 # Project Governance
 
-<!-- TOC start -->
+<!-- toc -->
 
-- [Project Governance](#project-governance)
-  - [Values](#values)
-  - [Contribution Tiers](#contribution-tiers)
-    - [Community Member](#community-member)
-    - [CRI-O Organization Member](#cri-o-organization-member)
-      - [How to be come an org member](#how-to-be-come-an-org-member)
-      - [Organization member responsibilities](#organization-member-responsibilities)
-    - [Reviewer](#reviewer)
-      - [How to become a reviewer](#how-to-become-a-reviewer)
-      - [Reviewer responsibilities](#reviewer-responsibilities)
-    - [Approver](#approver)
-      - [How to become an approver](#how-to-become-an-approver)
-      - [Approver responsibilities](#approver-responsibilities)
-      - [Distinction between top-level approvers and sub-tree approvers](#distinction-between-top-level-approvers-and-sub-tree-approvers)
-    - [Emeritus Approver](#emeritus-approver)
-    - [Demotion](#demotion)
-  - [Meetings](#meetings)
-  - [CNCF Resources](#cncf-resources)
-  - [Code of Conduct](#code-of-conduct)
-  - [Security](#security)
-  - [Conflict resolution and voting](#conflict-resolution-and-voting)
-  - [Miscellaneous Administrivia](#miscellaneous-administrivia)
-    - [Cutting a release](#cutting-a-release)
-    - [Github Aliases](#github-aliases)
-    - [Adding new projects to the CRI-O GitHub organization](#adding-new-projects-to-the-cri-o-github-organization)
-    - [Feature addition policy](#feature-addition-policy)
-    - [Feature request policy](#feature-request-policy)
-  - [Credits](#credits)
+- [Values](#values)
+- [Contribution Tiers](#contribution-tiers)
+  - [Community Member](#community-member)
+  - [CRI-O Organization Member](#cri-o-organization-member)
+    - [How to be come an org member](#how-to-be-come-an-org-member)
+    - [Organization member responsibilities](#organization-member-responsibilities)
+  - [Reviewer](#reviewer)
+    - [How to become a reviewer](#how-to-become-a-reviewer)
+    - [Reviewer responsibilities](#reviewer-responsibilities)
+  - [Approver](#approver)
+    - [How to become an approver](#how-to-become-an-approver)
+    - [Approver responsibilities](#approver-responsibilities)
+    - [Distinction between top-level approvers and sub-tree approvers](#distinction-between-top-level-approvers-and-sub-tree-approvers)
+  - [Emeritus Approver](#emeritus-approver)
+  - [Demotion](#demotion)
+- [Meetings](#meetings)
+- [CNCF Resources](#cncf-resources)
+- [Code of Conduct](#code-of-conduct)
+- [Security](#security)
+- [Conflict resolution and voting](#conflict-resolution-and-voting)
+- [Miscellaneous Administrivia](#miscellaneous-administrivia)
+  - [Cutting a release](#cutting-a-release)
+  - [Github Aliases](#github-aliases)
+  - [Adding new projects to the CRI-O GitHub organization](#adding-new-projects-to-the-cri-o-github-organization)
+  - [Feature addition policy](#feature-addition-policy)
+  - [Feature request policy](#feature-request-policy)
+- [Credits](#credits)
 
-<!-- TOC end -->
+<!-- /toc -->
 
 ## Values
 
@@ -68,14 +67,17 @@ reviewers, approvers and emeritus approvers.
   organization, and can be considered to be a community member whose
   contributions have demonstrated they can be trusted with access to the CRI-O CI.
 - Reviewers are a set of people responsible for reviewing PRs and triaging
-  issues. In most cases, they're also responsible for fixing issues in the code base.
+  issues. In most cases, they're also responsible for fixing issues in
+  the code base.
 - Approvers are the set of people that have final say over the direction of the
   project. For any PR to merge, an approver must approve it.
 - Emeritus Approvers can be considered "retired" approver--while they don't have
   approval rights, they are listed in the OWNERS file to
   indicate their expertise in the area.
-The current list of reviewers and approvers can be found in the [CRI-O OWNERS file](https://github.com/cri-o/cri-o/blob/main/OWNERS).
-Further, some more detailed information can be found in the [CRI-O Maintainers file](https://github.com/cri-o/cri-o/blob/main/MAINTAINERS.md).
+  The current list of reviewers and approvers can be found in the [CRI-O OWNERS
+  file](https://github.com/cri-o/cri-o/blob/main/OWNERS). Further, some more
+  detailed information can be found in the [CRI-O Maintainers
+  file](https://github.com/cri-o/cri-o/blob/main/MAINTAINERS.md).
 
 ### Community Member
 
@@ -127,7 +129,7 @@ Further, some more detailed information can be found in the [CRI-O Maintainers f
 - Monitor our channel [#crio](https://kubernetes.slack.com/archives/crio) on the
   Kubernetes Slack instance and answer questions where possible.
 - Triage GitHub issues and review pull requests. The areas of specialization
-  listed in [OWNERS.md](OWNERS.md) can be used to help with routing an issue/question
+  listed in [OWNERS](OWNERS) can be used to help with routing an issue/question
   to the right person.
 - Triage CI issues - file issues for known flaky CI runs or bugs, and either fix
   or find someone to fix any breakages.
@@ -135,12 +137,12 @@ Further, some more detailed information can be found in the [CRI-O Maintainers f
   to each new issue. Labels are extremely useful for future issue follow up.
   A few of the most important labels that are not self explanatory are:
   - **good first issue**: Mark any issue that can reasonably be accomplished by
-  a new contributor with this label.
+    a new contributor with this label.
   - **help wanted**: Unless it is immediately obvious that someone is going to
-  work on an issue (and if so assign it), mark it as help wanted.
+    work on an issue (and if so assign it), mark it as help wanted.
   - **CRI change**: If sufficiently fixing the issue involves a change to the CRI,
-  this label is given. These changes require consensus from the Kubernetes
-  SIG-Node community, and thus may be more complex than an internal CRI-O change.
+    this label is given. These changes require consensus from the Kubernetes
+    SIG-Node community, and thus may be more complex than an internal CRI-O change.
 - Make sure that ongoing PRs are moving forward at the right pace or closing them.
 - Reviewers are granted approver rights to dependency bumps and are expected to
   focus their attention on them.
@@ -151,28 +153,28 @@ Further, some more detailed information can be found in the [CRI-O Maintainers f
 
 - Becoming an approver is considered both a privilege and a responsibility.
   - The barrier to become an approver is naturally higher than that of becoming
-  a reviewer, and thus further encompasses all of the requirements of a reviewer.
+    a reviewer, and thus further encompasses all of the requirements of a reviewer.
   - Approvers should serve as a reviewer for at least three months, though this
-  alone does not necessarily qualify a reviewer to be an approver.
+    alone does not necessarily qualify a reviewer to be an approver.
   - Approvers are community members with a vested interest (which need not be
-  professional) in the future direction of CRI-O.
+    professional) in the future direction of CRI-O.
   - An approver is not just someone who can make changes, but someone who has
-  demonstrated their ability to collaborate with the team, get the most knowledgeable
-  people to review code and docs, contribute high-quality code, and follow through
-  to fix issues (in code or tests).
+    demonstrated their ability to collaborate with the team, get the most knowledgeable
+    people to review code and docs, contribute high-quality code, and follow through
+    to fix issues (in code or tests).
   - They are expected to have a deep understanding of various pieces of CRI-O and
-  how they work together.
+    how they work together.
   - They are expected to be able to participate in the management of the project.
-  Joining in the discussion of technical questions and aiding in resolving
-  technical challenges.
+    Joining in the discussion of technical questions and aiding in resolving
+    technical challenges.
 - The person in question for approvership can nominate themselves, or be nominated
   by someone else.
   - A contributor is nominated by someone submitting a PR to add their github
-  handle to the approvers section of the [OWNERS](OWNERS.md) file.
+    handle to the approvers section of the [OWNERS](OWNERS) file.
 - To become an approver, a simple majority vote among the current approvers
   should be performed.
   - See [conflict resolution](#conflict-resolution-and-voting) for more information
-  on how to handle disputes.
+    on how to handle disputes.
 
 #### Approver responsibilities
 
@@ -216,12 +218,12 @@ mentioned, sub-tree approvers are not necessarily included, though they may be.
   they become an emeritus approver.
 - The demotion process works by:
   - Someone opening a PR on the person's behalf making the appropriate
-  OWNERS file adjustment.
+    OWNERS file adjustment.
   - They also give justification by showing contribution and reviewing history.
   - The person is given a week to respond, giving justification for or against
-  their demotion.
+    their demotion.
   - If they fail to do so, or are in favor of the demotion, then the PR can be
-  merged as any other would be.
+    merged as any other would be.
 
 ## Meetings
 
@@ -230,8 +232,8 @@ in the public community meeting, the details of which are described on the
 [CRI-O wiki](https://github.com/cri-o/cri-o/wiki/CRI-O-Weekly-Meeting).
 
 Approvers will also have closed meetings in order to discuss security reports or
-Code of Conduct violations.  Such meetings should be scheduled by any approver on
-receipt of a security issue or CoC report.  All current approvers must be invited
+Code of Conduct violations. Such meetings should be scheduled by any approver on
+receipt of a security issue or CoC report. All current approvers must be invited
 to such closed meetings, except for any approver who is accused of a CoC violation.
 
 ## CNCF Resources
@@ -245,7 +247,7 @@ The approvers may also choose to delegate working with the CNCF to community mem
 
 [Code of Conduct](./code-of-conduct.md) violations by community members will be
 discussed and resolved privately in a slack conversation on the
-Kubernetes slack instance with the approvers.  If the reported CoC violator is an
+Kubernetes slack instance with the approvers. If the reported CoC violator is an
 approver, the approvers will instead designate two other approvers to work
 with CNCF staff in resolving the report.
 
@@ -281,15 +283,15 @@ more than one organization.
 
 - CRI-O cuts releases in line with Kubernetes minor releases (1.x bump). The CRI-O
   community attempts to release a minor version of CRI-O
-  *within three days ofthe corresponding Kubernetes release*.
+  _within three days ofthe corresponding Kubernetes release_.
 - For Patch releases (1.1.z bump), releases are cut intermittently, when there
   are sufficient bug fixes backported to the branch. End-users can request
   releases be cut, and approvers can choose to accept that request at their discretion.
 - Release notes are compiled by our [release-notes generator](https://github.com/cri-o/cri-o/blob/main/scripts/release-notes/release_notes.go).
 - A release can be cut with our [release script](https://github.com/cri-o/cri-o/blob/main/scripts/release/release.go).
 - Finally, create a [tagged release](https://github.com/cri-o/cri-o/releases).
-  The release should  start with "v" and be followed by the version number.
-  E.g., "v1.18.0". *This must match the corresponding Kubernetes release number.*
+  The release should start with "v" and be followed by the version number.
+  E.g., "v1.18.0". _This must match the corresponding Kubernetes release number._
 
 ### Github Aliases
 

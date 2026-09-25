@@ -9,9 +9,17 @@ import (
 	"testing"
 	"time"
 
-	cstorage "github.com/containers/storage"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	"github.com/sirupsen/logrus"
+	cstorage "go.podman.io/storage"
+	"go.uber.org/mock/gomock"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"k8s.io/cri-streaming/pkg/streaming"
+
 	"github.com/cri-o/cri-o/internal/hostport"
 	"github.com/cri-o/cri-o/internal/lib/sandbox"
+	"github.com/cri-o/cri-o/internal/memorystore"
 	"github.com/cri-o/cri-o/internal/oci"
 	"github.com/cri-o/cri-o/pkg/config"
 	"github.com/cri-o/cri-o/server"
@@ -22,15 +30,9 @@ import (
 	libmock "github.com/cri-o/cri-o/test/mocks/lib"
 	ocimock "github.com/cri-o/cri-o/test/mocks/oci"
 	ocicnitypesmock "github.com/cri-o/cri-o/test/mocks/ocicni"
-	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"github.com/sirupsen/logrus"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
-	"k8s.io/kubelet/pkg/cri/streaming"
 )
 
-// TestServer runs the created specs
+// TestServer runs the created specs.
 func TestServer(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunFrameworkSpecs(t, "Server")
@@ -52,7 +54,7 @@ var (
 	testManifest      []byte
 	testPath          string
 	testSandbox       *sandbox.Sandbox
-	testStreamService server.StreamService
+	testStreamService *server.StreamService
 
 	emptyDir string
 )
@@ -66,6 +68,17 @@ var _ = BeforeSuite(func() {
 	t = NewTestFramework(NilFunc, NilFunc)
 	t.Setup()
 
+	emptyDir = t.MustTempDir("crio-empty")
+})
+
+var _ = AfterSuite(func() {
+	t.Teardown()
+})
+
+var beforeEach = func() {
+	// Only log panics for now
+	logrus.SetLevel(logrus.PanicLevel)
+
 	// Setup the mocks
 	mockCtrl = gomock.NewController(GinkgoT())
 	libMock = libmock.NewMockIface(mockCtrl)
@@ -75,18 +88,6 @@ var _ = BeforeSuite(func() {
 	imageCloserMock = imagetypesmock.NewMockImageCloser(mockCtrl)
 	cniPluginMock = ocicnitypesmock.NewMockCNIPlugin(mockCtrl)
 	ociRuntimeMock = ocimock.NewMockRuntimeImpl(mockCtrl)
-
-	emptyDir = t.MustTempDir("crio-empty")
-})
-
-var _ = AfterSuite(func() {
-	t.Teardown()
-	mockCtrl.Finish()
-})
-
-var beforeEach = func() {
-	// Only log panics for now
-	logrus.SetLevel(logrus.PanicLevel)
 
 	// Setup test data
 	testManifest = []byte(`{
@@ -108,7 +109,7 @@ var beforeEach = func() {
 			"io.kubernetes.cri-o.PortMappings": "[]",
 			"io.kubernetes.cri-o.Labels": "{}",
 			"io.kubernetes.cri-o.LogPath": "{}",
-			"io.kubernetes.cri-o.Metadata": "{}",
+			"io.kubernetes.cri-o.Metadata": "{\"name\":\"testpod\",\"namespace\":\"default\",\"uid\":\"test-uid-123\",\"attempt\":0}",
 			"io.kubernetes.cri-o.Name": "name",
 			"io.kubernetes.cri-o.Namespace": "default",
 			"io.kubernetes.cri-o.PrivilegedRuntime": "{}",
@@ -136,15 +137,23 @@ var beforeEach = func() {
 
 	// Prepare the server config
 	var err error
+
 	testPath, err = filepath.Abs("test")
 	Expect(err).ToNot(HaveOccurred())
 	serverConfig, err = config.DefaultConfig()
 	Expect(err).ToNot(HaveOccurred())
+
 	serverConfig.ContainerAttachSocketDir = testPath
 	serverConfig.ContainerExitsDir = path.Join(testPath, "exits")
 	serverConfig.LogDir = path.Join(testPath, "log")
 	serverConfig.CleanShutdownFile = path.Join(testPath, "clean.shutdown")
 	serverConfig.EnablePodEvents = true
+	serverConfig.Seccomp().SetNotifierPath(t.MustTempDir("seccomp-notifier"))
+	serverConfig.NRI.SocketPath = t.MustTempDir("nri")
+
+	// Nothing here tests hostport mapping, and hostport.NewMetaHostPortManager
+	// will fail if non-root
+	serverConfig.DisableHostPortMapping = true
 
 	// We want a directory that is guaranteed to exist, but it must
 	// be empty so we don't erroneously load anything and make tests
@@ -153,10 +162,38 @@ var beforeEach = func() {
 	serverConfig.PluginDirs = []string{emptyDir}
 	serverConfig.HooksDir = []string{emptyDir}
 	// Initialize test container and sandbox
-	testSandbox, err = sandbox.New(sandboxID, "", "", "", ".",
-		make(map[string]string), make(map[string]string), "", "",
-		&types.PodSandboxMetadata{}, "", "", false, "", "", "",
-		[]*hostport.PortMapping{}, false, time.Now(), "", nil, nil)
+
+	sbox := sandbox.NewBuilder()
+	sbox.SetID("sandboxID")
+	sbox.SetName("sandboxName")
+	sbox.SetLogDir("test")
+	sbox.SetShmPath("test")
+	sbox.SetNamespace("")
+	sbox.SetKubeName("")
+	sbox.SetMountLabel("")
+	sbox.SetProcessLabel("")
+	sbox.SetCgroupParent("")
+	sbox.SetRuntimeHandler("")
+	sbox.SetResolvPath("")
+	sbox.SetHostname("")
+	sbox.SetPortMappings([]*hostport.PortMapping{})
+	sbox.SetHostNetwork(false)
+	sbox.SetUsernsMode("")
+	sbox.SetPodLinuxOverhead(nil)
+	sbox.SetPodLinuxResources(nil)
+	sbox.SetCreatedAt(time.Now())
+	err = sbox.SetCRISandbox(
+		sbox.ID(),
+		make(map[string]string),
+		make(map[string]string),
+		&types.PodSandboxMetadata{},
+	)
+	Expect(err).ToNot(HaveOccurred())
+	sbox.SetPrivileged(false)
+	sbox.SetPortMappings([]*hostport.PortMapping{})
+	sbox.SetHostNetwork(false)
+	sbox.SetContainers(memorystore.New[*oci.Container]())
+	testSandbox, err = sbox.GetSandbox()
 	Expect(err).ToNot(HaveOccurred())
 
 	testContainer, err = oci.NewContainer(containerID, "", "", "",
@@ -168,7 +205,7 @@ var beforeEach = func() {
 
 	// Initialize test streaming server
 	streamServerConfig := streaming.DefaultConfig
-	testStreamService = server.StreamService{}
+	testStreamService = &server.StreamService{}
 	testStreamService.SetRuntimeServer(sut)
 	server, err := streaming.NewServer(streamServerConfig, testStreamService)
 	Expect(err).ToNot(HaveOccurred())
@@ -179,11 +216,14 @@ var afterEach = func() {
 	os.RemoveAll(testPath)
 	os.RemoveAll("state.json")
 	os.RemoveAll("config.json")
+	mockCtrl.Finish()
 }
 
 var setupSUT = func() {
 	var err error
+
 	mockNewServer()
+
 	sut, err = server.New(context.Background(), libMock)
 	Expect(err).ToNot(HaveOccurred())
 	Expect(sut).NotTo(BeNil())
@@ -191,19 +231,24 @@ var setupSUT = func() {
 	// Inject the mock
 	sut.SetStorageImageServer(imageServerMock)
 	sut.SetStorageRuntimeServer(runtimeServerMock)
-
-	gomock.InOrder(cniPluginMock.EXPECT().Status().Return(nil))
-	Expect(sut.SetCNIPlugin(cniPluginMock)).To(Succeed())
 }
 
 func mockNewServer() {
+	GinkgoHelper()
+
+	graphroot := t.MustTempDir("graphroot")
 	gomock.InOrder(
+		cniPluginMock.EXPECT().StatusWithContext(gomock.Any()).Return(nil),
 		libMock.EXPECT().GetData().Times(2).Return(serverConfig),
 		libMock.EXPECT().GetStore().Return(storeMock, nil),
 		libMock.EXPECT().GetData().Return(serverConfig),
+		storeMock.EXPECT().GraphRoot().Return(graphroot),
 		storeMock.EXPECT().Containers().
 			Return([]cstorage.Container{}, nil),
+		cniPluginMock.EXPECT().GC(gomock.Any(), gomock.Any()).
+			Return(nil).AnyTimes(),
 	)
+	Expect(serverConfig.SetCNIPlugin(cniPluginMock)).To(Succeed())
 }
 
 func addContainerAndSandbox() {
@@ -237,10 +282,11 @@ func createDummyConfig() {
 	Expect(os.WriteFile("config.json", []byte(`{"linux":{},"process":{}}`), 0o644)).To(Succeed())
 }
 
-func mockRuncInLibConfig() {
+func mockRuntimeInLibConfig() {
 	echo, err := exec.LookPath("echo")
 	Expect(err).ToNot(HaveOccurred())
-	serverConfig.Runtimes["runc"] = &config.RuntimeHandler{
+
+	serverConfig.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{
 		RuntimePath: echo,
 	}
 }

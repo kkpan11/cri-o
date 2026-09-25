@@ -1,31 +1,35 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
-	"github.com/cri-o/cri-o/internal/log"
-	"github.com/cri-o/cri-o/internal/oci"
-	"golang.org/x/net/context"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/log"
 )
 
-// ReopenContainerLog reopens the containers log file
-func (s *Server) ReopenContainerLog(ctx context.Context, req *types.ReopenContainerLogRequest) (*types.ReopenContainerLogResponse, error) {
+// ReopenContainerLog reopens the containers log file.
+func (s *Server) ReopenContainerLog(
+	ctx context.Context,
+	req *types.ReopenContainerLogRequest,
+) (*types.ReopenContainerLogResponse, error) {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
-	c, err := s.GetContainerFromShortID(ctx, req.ContainerId)
+
+	c, err := s.GetContainerFromShortID(ctx, req.GetContainerId())
 	if err != nil {
-		return nil, fmt.Errorf("could not find container %s: %w", req.ContainerId, err)
+		return nil, fmt.Errorf("could not find container %s: %w", req.GetContainerId(), err)
 	}
 
-	if err := s.ContainerServer.Runtime().UpdateContainerStatus(ctx, c); err != nil {
+	isRunning, err := s.ContainerServer.Runtime().IsContainerAlive(c)
+	if err != nil {
 		return nil, err
 	}
 
-	cState := c.State()
-	if !(cState.Status == oci.ContainerStateRunning || cState.Status == oci.ContainerStateCreated) {
-		return nil, errors.New("container is not created or running")
+	if !isRunning {
+		return nil, errors.New("container is not running")
 	}
 
 	if err := s.ContainerServer.Runtime().ReopenContainerLog(ctx, c); err != nil {

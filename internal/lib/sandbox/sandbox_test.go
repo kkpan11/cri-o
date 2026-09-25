@@ -4,17 +4,19 @@ import (
 	"context"
 	"time"
 
-	"github.com/cri-o/cri-o/internal/hostport"
-	"github.com/cri-o/cri-o/internal/lib/sandbox"
-	"github.com/cri-o/cri-o/internal/oci"
-	"github.com/cri-o/cri-o/internal/storage"
-	"github.com/cri-o/cri-o/internal/storage/references"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/hostport"
+	"github.com/cri-o/cri-o/internal/lib/sandbox"
+	"github.com/cri-o/cri-o/internal/memorystore"
+	"github.com/cri-o/cri-o/internal/oci"
+	"github.com/cri-o/cri-o/internal/storage"
+	"github.com/cri-o/cri-o/internal/storage/references"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Sandbox", func() {
 	// Setup the SUT
 	BeforeEach(beforeEach)
@@ -42,14 +44,37 @@ var _ = t.Describe("Sandbox", func() {
 			hostNetwork := false
 			createdAt := time.Now()
 
-			// When
-			sandbox, err := sandbox.New(id, namespace, name, kubeName, logDir,
-				labels, annotations, processLabel, mountLabel, &metadata,
-				shmPath, cgroupParent, privileged, runtimeHandler,
-				resolvPath, hostname, portMappings, hostNetwork, createdAt, "", nil, nil)
+			sbox := sandbox.NewBuilder()
+
+			sbox.SetID(id)
+			sbox.SetName(name)
+			sbox.SetNamespace(namespace)
+			sbox.SetKubeName(kubeName)
+			sbox.SetLogDir(logDir)
+			sbox.SetCreatedAt(createdAt)
+			sbox.SetCreatedAt(createdAt)
+			err := sbox.SetCRISandbox(sbox.ID(), labels, annotations, &metadata)
+			Expect(err).ToNot(HaveOccurred())
+			sbox.SetShmPath(shmPath)
+			sbox.SetCgroupParent(cgroupParent)
+			sbox.SetPrivileged(privileged)
+			sbox.SetRuntimeHandler(runtimeHandler)
+			sbox.SetResolvPath(resolvPath)
+			sbox.SetHostname(hostname)
+			sbox.SetPortMappings(portMappings)
+			sbox.SetHostNetwork(hostNetwork)
+			sbox.SetProcessLabel(processLabel)
+			sbox.SetMountLabel(mountLabel)
+			sbox.SetCreatedAt(createdAt)
+			sbox.SetUsernsMode("")
+			sbox.SetPodLinuxOverhead(nil)
+			sbox.SetPodLinuxResources(nil)
+			sbox.SetContainers(memorystore.New[*oci.Container]())
+
+			sandbox, err := sbox.GetSandbox()
+			Expect(err).ToNot(HaveOccurred())
 
 			// Then
-			Expect(err).ToNot(HaveOccurred())
 			Expect(sandbox).NotTo(BeNil())
 			Expect(sandbox.ID()).To(Equal(id))
 			Expect(sandbox.Namespace()).To(Equal(namespace))
@@ -60,7 +85,7 @@ var _ = t.Describe("Sandbox", func() {
 			Expect(sandbox.Annotations()).To(ConsistOf([]string{"annotA", "annotB"}))
 			Expect(sandbox.ProcessLabel()).To(Equal(processLabel))
 			Expect(sandbox.MountLabel()).To(Equal(mountLabel))
-			Expect(sandbox.Metadata().Name).To(Equal(name))
+			Expect(sandbox.Metadata().GetName()).To(Equal(name))
 			Expect(sandbox.ShmPath()).To(Equal(shmPath))
 			Expect(sandbox.CgroupParent()).To(Equal(cgroupParent))
 			Expect(sandbox.Privileged()).To(Equal(privileged))
@@ -71,7 +96,7 @@ var _ = t.Describe("Sandbox", func() {
 			Expect(sandbox.HostNetwork()).To(Equal(hostNetwork))
 			Expect(sandbox.StopMutex()).NotTo(BeNil())
 			Expect(sandbox.Containers()).NotTo(BeNil())
-			Expect(sandbox.CreatedAt()).To(Equal(createdAt.UnixNano()))
+			Expect(sandbox.CreatedAt()).To(Equal(createdAt))
 		})
 	})
 
@@ -114,6 +139,7 @@ var _ = t.Describe("Sandbox", func() {
 
 			// Then
 			Expect(testSandbox.Stopped()).To(BeTrue())
+			Expect(testSandbox.Ready()).To(BeFalse())
 		})
 	})
 
@@ -135,6 +161,7 @@ var _ = t.Describe("Sandbox", func() {
 		It("should succeed", func() {
 			// Given
 			Expect(testSandbox.DNSConfig()).To(BeNil())
+
 			dnsConfig := types.DNSConfig{
 				Servers:  []string{"server1", "server2"},
 				Searches: []string{"search1", "searches"},
@@ -159,6 +186,7 @@ var _ = t.Describe("Sandbox", func() {
 
 			// Then
 			Expect(testSandbox.Created()).To(BeTrue())
+			Expect(testSandbox.Ready()).To(BeTrue())
 		})
 	})
 
@@ -190,12 +218,12 @@ var _ = t.Describe("Sandbox", func() {
 			testSandbox.SetNamespaceOptions(newNamespaceOption)
 
 			// Then
-			Expect(testSandbox.NamespaceOptions().Network).
-				To(Equal(newNamespaceOption.Network))
-			Expect(testSandbox.NamespaceOptions().Pid).
-				To(Equal(newNamespaceOption.Pid))
-			Expect(testSandbox.NamespaceOptions().Ipc).
-				To(Equal(newNamespaceOption.Ipc))
+			Expect(testSandbox.NamespaceOptions().GetNetwork()).
+				To(Equal(newNamespaceOption.GetNetwork()))
+			Expect(testSandbox.NamespaceOptions().GetPid()).
+				To(Equal(newNamespaceOption.GetPid()))
+			Expect(testSandbox.NamespaceOptions().GetIpc()).
+				To(Equal(newNamespaceOption.GetIpc()))
 		})
 	})
 
@@ -203,9 +231,13 @@ var _ = t.Describe("Sandbox", func() {
 		var testContainer *oci.Container
 
 		BeforeEach(func() {
-			imageName, err := references.ParseRegistryImageReferenceFromOutOfProcessData("example.com/some-image:latest")
+			imageName, err := references.ParseRegistryImageReferenceFromOutOfProcessData(
+				"example.com/some-image:latest",
+			)
 			Expect(err).ToNot(HaveOccurred())
-			imageID, err := storage.ParseStorageImageIDFromOutOfProcessData("2a03a6059f21e150ae84b0973863609494aad70f0a80eaeb64bddd8d92465812")
+			imageID, err := storage.ParseStorageImageIDFromOutOfProcessData(
+				"2a03a6059f21e150ae84b0973863609494aad70f0a80eaeb64bddd8d92465812",
+			)
 			Expect(err).ToNot(HaveOccurred())
 			testContainer, err = oci.NewContainer("testid", "testname", "",
 				"/container/logs", map[string]string{},

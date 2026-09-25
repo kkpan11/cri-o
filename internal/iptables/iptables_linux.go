@@ -19,13 +19,13 @@ limitations under the License.
 package iptables
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"time"
 
 	"golang.org/x/sys/unix"
-	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -34,23 +34,21 @@ type locker struct {
 	lock14 *net.UnixListener
 }
 
-func (l *locker) Close() error {
-	errList := []error{}
+func (l *locker) Close() (err error) {
 	if l.lock16 != nil {
-		if err := l.lock16.Close(); err != nil {
-			errList = append(errList, err)
-		}
+		err = errors.Join(l.lock16.Close())
 	}
+
 	if l.lock14 != nil {
-		if err := l.lock14.Close(); err != nil {
-			errList = append(errList, err)
-		}
+		err = errors.Join(err, l.lock14.Close())
 	}
-	return utilerrors.NewAggregate(errList)
+
+	return err
 }
 
 func grabIptablesLocks(lockfilePath14x, lockfilePath16x string) (iptablesLocker, error) {
 	var err error
+
 	var success bool
 
 	l := &locker{}
@@ -68,30 +66,44 @@ func grabIptablesLocks(lockfilePath14x, lockfilePath16x string) (iptablesLocker,
 	// Roughly duplicate iptables 1.6.x xtables_lock() function.
 	l.lock16, err = os.OpenFile(lockfilePath16x, os.O_CREATE, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open iptables lock %s: %v", lockfilePath16x, err)
+		return nil, fmt.Errorf("failed to open iptables lock %s: %w", lockfilePath16x, err)
 	}
 
-	if err := wait.PollImmediate(200*time.Millisecond, 2*time.Second, func() (bool, error) { //nolint:staticcheck
-		if err := grabIptablesFileLock(l.lock16); err != nil {
-			return false, nil
-		}
-		return true, nil
-	}); err != nil {
-		return nil, fmt.Errorf("failed to acquire new iptables lock: %v", err)
+	if err := wait.PollImmediate( //nolint:staticcheck // deprecated poll API
+		200*time.Millisecond,
+		2*time.Second,
+		func() (bool, error) {
+			if err := grabIptablesFileLock(l.lock16); err != nil {
+				return false, nil
+			}
+
+			return true, nil
+		},
+	); err != nil {
+		return nil, fmt.Errorf("failed to acquire new iptables lock: %w", err)
 	}
 
 	// Roughly duplicate iptables 1.4.x xtables_lock() function.
-	if err := wait.PollImmediate(200*time.Millisecond, 2*time.Second, func() (bool, error) { //nolint:staticcheck
-		l.lock14, err = net.ListenUnix("unix", &net.UnixAddr{Name: lockfilePath14x, Net: "unix"})
-		if err != nil {
-			return false, nil
-		}
-		return true, nil
-	}); err != nil {
-		return nil, fmt.Errorf("failed to acquire old iptables lock: %v", err)
+	if err := wait.PollImmediate( //nolint:staticcheck // deprecated poll API
+		200*time.Millisecond,
+		2*time.Second,
+		func() (bool, error) {
+			l.lock14, err = net.ListenUnix(
+				"unix",
+				&net.UnixAddr{Name: lockfilePath14x, Net: "unix"},
+			)
+			if err != nil {
+				return false, nil
+			}
+
+			return true, nil
+		},
+	); err != nil {
+		return nil, fmt.Errorf("failed to acquire old iptables lock: %w", err)
 	}
 
 	success = true
+
 	return l, nil
 }
 

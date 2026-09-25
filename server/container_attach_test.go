@@ -5,11 +5,11 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"k8s.io/client-go/tools/remotecommand"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"k8s.io/cri-streaming/pkg/streaming/remotecommand"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("ContainerAttach", func() {
 	// Prepare the sut
 	BeforeEach(func() {
@@ -22,6 +22,8 @@ var _ = t.Describe("ContainerAttach", func() {
 	t.Describe("ContainerAttach", func() {
 		It("should succeed", func() {
 			// Given
+			addContainerAndSandbox()
+
 			// When
 			response, err := sut.Attach(context.Background(),
 				&types.AttachRequest{

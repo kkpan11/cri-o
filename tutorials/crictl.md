@@ -4,17 +4,18 @@ This tutorial will walk you through the creation of [Redis](https://redis.io/)
 server running in a [Pod](http://kubernetes.io/docs/user-guide/pods/) using
 [crictl](https://github.com/kubernetes-sigs/cri-tools/blob/master/docs/crictl.md)
 
-It assumes you've already downloaded and configured `CRI-O`. If not, see
-[here for CRI-O](/install.md).
-It also assumes you've set up CNI, and are using the default plugins as described
-[here](/contrib/cni/README.md). If you are using a different configuration,
+It assumes you've already downloaded and configured `CRI-O`. If not,
+see the [CRI-O installation guide](/install.md).
+It also assumes you've set up CNI, and are using the default plugins
+as described in the [CNI README](/contrib/cni/README.md). If you are
+using a different configuration,
 results may vary.
 
 ## Installation
 
 This section will walk you through installing the following components:
 
-* crictl - The CRI client for testing.
+- crictl - The CRI client for testing.
 
 ### Get crictl
 
@@ -112,7 +113,7 @@ while capturing the container ID:
 CONTAINER_ID=$(sudo crictl create $POD_ID test/testdata/container_redis.json test/testdata/sandbox_config.json)
 ```
 
-The `crictl create` command  will take a few seconds to return because the Redis
+The `crictl create` command will take a few seconds to return because the Redis
 container needs to be pulled.
 
 Start the Redis container:
@@ -147,9 +148,11 @@ Info: # Redacted
 Fetch the Pod IP (can also be obtained via the `inspectp` output above):
 
 <!-- markdownlint-disable MD013 -->
+
 ```shell
 POD_IP=$(sudo crictl inspectp --output go-template --template '{{.status.network.ip}}' $POD_ID)
 ```
+
 <!-- markdownlint-enable MD013 -->
 
 Verify the Redis server is responding to `MONITOR` commands:

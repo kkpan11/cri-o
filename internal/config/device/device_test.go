@@ -1,13 +1,15 @@
 package device_test
 
 import (
-	"github.com/cri-o/cri-o/internal/config/device"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/cri-o/cri-o/internal/config/device"
 )
 
 var _ = t.Describe("DeviceConfig", func() {
 	var d *device.Config
+
 	BeforeEach(func() {
 		d = device.New()
 	})
@@ -73,7 +75,10 @@ var _ = t.Describe("DeviceConfig", func() {
 		It("should fail if one invalid device", func() {
 			// Given
 			// When
-			d, err := device.DevicesFromAnnotation("/dev/true,/dev/invalid", []string{"/dev/null", "/dev/invalid"})
+			d, err := device.DevicesFromAnnotation(
+				"/dev/true,/dev/invalid",
+				[]string{"/dev/null", "/dev/invalid"},
+			)
 			// Then
 			Expect(err).To(HaveOccurred())
 			Expect(d).To(BeEmpty())

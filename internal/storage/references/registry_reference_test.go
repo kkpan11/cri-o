@@ -3,19 +3,24 @@ package references_test
 import (
 	"fmt"
 
-	"github.com/containers/image/v5/docker/reference"
-	"github.com/cri-o/cri-o/internal/storage/references"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.podman.io/image/v5/docker/reference"
+
+	"github.com/cri-o/cri-o/internal/storage/references"
 )
 
 var _ = t.Describe("RegistryImageReference", func() {
 	It("Should parse valid references", func() {
 		ref, err := references.ParseRegistryImageReferenceFromOutOfProcessData("minimal")
 		Expect(err).ToNot(HaveOccurred())
-		Expect(ref.StringForOutOfProcessConsumptionOnly()).To(Equal("docker.io/library/minimal:latest"))
+		Expect(
+			ref.StringForOutOfProcessConsumptionOnly(),
+		).To(Equal("docker.io/library/minimal:latest"))
 
-		ref, err = references.ParseRegistryImageReferenceFromOutOfProcessData("quay.io/ns/repo:notlatest")
+		ref, err = references.ParseRegistryImageReferenceFromOutOfProcessData(
+			"quay.io/ns/repo:notlatest",
+		)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(ref.StringForOutOfProcessConsumptionOnly()).To(Equal("quay.io/ns/repo:notlatest"))
 	})
@@ -41,6 +46,7 @@ var _ = t.Describe("RegistryImageReference", func() {
 
 	It("Should reject use of uninitialized/empty values", func() {
 		ref := references.RegistryImageReference{}
+
 		Expect(func() { _ = ref.StringForOutOfProcessConsumptionOnly() }).To(Panic())
 	})
 
@@ -80,6 +86,7 @@ var _ = t.Describe("RegistryImageReference", func() {
 		} {
 			ref, err := references.ParseRegistryImageReferenceFromOutOfProcessData(c.in)
 			Expect(err).ToNot(HaveOccurred())
+
 			registry := ref.Registry()
 			Expect(registry).To(Equal(c.expected))
 		}

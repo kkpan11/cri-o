@@ -7,17 +7,18 @@ import (
 	"os"
 	"time"
 
-	"github.com/cri-o/cri-o/internal/lib"
-	"github.com/cri-o/cri-o/internal/oci"
-	"github.com/cri-o/cri-o/pkg/annotations"
-	libconfig "github.com/cri-o/cri-o/pkg/config"
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/annotations"
+	"github.com/cri-o/cri-o/internal/lib"
+	"github.com/cri-o/cri-o/internal/oci"
+	libconfig "github.com/cri-o/cri-o/pkg/config"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("ContainerServer", func() {
 	ctx := context.TODO()
 	// Prepare the sut
@@ -29,14 +30,22 @@ var _ = t.Describe("ContainerServer", func() {
 			// Create temp lockfile
 			tmpfile, err := os.CreateTemp("", "lockfile")
 			Expect(err).ToNot(HaveOccurred())
+
 			defer os.Remove(tmpfile.Name())
 
+			Expect(tmpfile.Close()).To(Succeed())
 			// Setup config
 			config, err := libconfig.DefaultConfig()
 			Expect(err).ToNot(HaveOccurred())
+
 			config.HooksDir = []string{}
 			// so we have permission to make a directory within it
 			config.ContainerAttachSocketDir = t.MustTempDir("crio")
+			// Simulate a clean shutdown. Otherwise, when running tests as root on
+			// a system where cri-o is already installed, we hit non-mocked functions
+			// in lib.New internal/lib/container_server.go in if condition
+			// `if config.InternalRepair && ShutdownWasUnclean(config)`.
+			config.CleanShutdownFile = t.MustTempFile("clean.shutdown")
 
 			// Specify mocks
 			gomock.InOrder(
@@ -100,9 +109,10 @@ var _ = t.Describe("ContainerServer", func() {
 		It("should succeed to get the StorageImageServer", func() {
 			// Given
 			// When
-			res := sut.StorageImageServer()
+			res, err := sut.StorageImageServer(nil)
 
 			// Then
+			Expect(err).ToNot(HaveOccurred())
 			Expect(res).NotTo(BeNil())
 		})
 
@@ -136,9 +146,10 @@ var _ = t.Describe("ContainerServer", func() {
 		It("should succeed to get the StorageRuntimeServer", func() {
 			// Given
 			// When
-			res := sut.StorageRuntimeServer()
+			res, err := sut.StorageRuntimeServer(nil)
 
 			// Then
+			Expect(err).ToNot(HaveOccurred())
 			Expect(res).NotTo(BeNil())
 		})
 	})
@@ -173,6 +184,7 @@ var _ = t.Describe("ContainerServer", func() {
 		It("should succeed with invalid network namespace", func() {
 			// Given
 			createDummyState()
+
 			manifest := bytes.Replace(testManifest,
 				[]byte(`{"type": "network", "path": "default"}`),
 				[]byte(`{"type": "", "path": ""},{"type": "network", "path": ""}`), 1,
@@ -190,6 +202,7 @@ var _ = t.Describe("ContainerServer", func() {
 		It("should succeed with missing network namespace", func() {
 			// Given
 			createDummyState()
+
 			manifest := bytes.Replace(testManifest,
 				[]byte(`{"type": "network", "path": "default"}`),
 				[]byte(`{}`), 1,
@@ -348,9 +361,13 @@ var _ = t.Describe("ContainerServer", func() {
 
 		It("should fail with invalid metadata", func() {
 			// Given
-			manifest := bytes.Replace(testManifest,
-				[]byte(`"io.kubernetes.cri-o.Metadata": "{}",`),
-				[]byte(`"io.kubernetes.cri-o.Metadata": "",`), 1,
+			manifest := bytes.Replace(
+				testManifest,
+				[]byte(
+					`"io.kubernetes.cri-o.Metadata": "{\"name\":\"testpod\",\"namespace\":\"default\",\"uid\":\"test-uid-123\",\"attempt\":0}",`,
+				),
+				[]byte(`"io.kubernetes.cri-o.Metadata": "",`),
+				1,
 			)
 			gomock.InOrder(
 				storeMock.EXPECT().
@@ -422,6 +439,26 @@ var _ = t.Describe("ContainerServer", func() {
 			Expect(err).To(HaveOccurred())
 		})
 
+		It("should fail with empty namespace", func() {
+			// Given
+			manifest := bytes.Replace(testManifest,
+				[]byte(`"io.kubernetes.cri-o.Namespace": "default",`),
+				[]byte(`"io.kubernetes.cri-o.Namespace": "",`), 1,
+			)
+			gomock.InOrder(
+				storeMock.EXPECT().
+					FromContainerDirectory(gomock.Any(), gomock.Any()).
+					Return(manifest, nil),
+			)
+
+			// When
+			sb, err := sut.LoadSandbox(context.Background(), "id")
+
+			// Then
+			Expect(sb).To(BeNil())
+			Expect(err).To(HaveOccurred())
+		})
+
 		It("should fail with wrong PodLinuxOverhead", func() {
 			// Given
 			manifest := bytes.Replace(testManifest,
@@ -447,6 +484,78 @@ var _ = t.Describe("ContainerServer", func() {
 			manifest := bytes.Replace(testManifest,
 				[]byte(`"io.kubernetes.cri-o.PodLinuxResources": "{}",`),
 				[]byte(`"io.kubernetes.cri-o.PodLinuxResources": "wrong",`), 1,
+			)
+			gomock.InOrder(
+				storeMock.EXPECT().
+					FromContainerDirectory(gomock.Any(), gomock.Any()).
+					Return(manifest, nil),
+			)
+
+			// When
+			sb, err := sut.LoadSandbox(context.Background(), "id")
+
+			// Then
+			Expect(sb).To(BeNil())
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should fail with empty name annotation", func() {
+			// Given
+			manifest := bytes.Replace(testManifest,
+				[]byte(`"io.kubernetes.cri-o.Name": "name",`),
+				[]byte(`"io.kubernetes.cri-o.Name": "",`), 1,
+			)
+			gomock.InOrder(
+				storeMock.EXPECT().
+					FromContainerDirectory(gomock.Any(), gomock.Any()).
+					Return(manifest, nil),
+			)
+
+			// When
+			sb, err := sut.LoadSandbox(context.Background(), "id")
+
+			// Then
+			Expect(sb).To(BeNil())
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should fail with empty metadata name", func() {
+			// Given
+			manifest := bytes.Replace(
+				testManifest,
+				[]byte(
+					`"io.kubernetes.cri-o.Metadata": "{\"name\":\"testpod\",\"namespace\":\"default\",\"uid\":\"test-uid-123\",\"attempt\":0}",`,
+				),
+				[]byte(
+					`"io.kubernetes.cri-o.Metadata": "{\"namespace\":\"default\",\"uid\":\"abc123\"}",`,
+				),
+				1,
+			)
+			gomock.InOrder(
+				storeMock.EXPECT().
+					FromContainerDirectory(gomock.Any(), gomock.Any()).
+					Return(manifest, nil),
+			)
+
+			// When
+			sb, err := sut.LoadSandbox(context.Background(), "id")
+
+			// Then
+			Expect(sb).To(BeNil())
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should fail with empty metadata uid", func() {
+			// Given
+			manifest := bytes.Replace(
+				testManifest,
+				[]byte(
+					`"io.kubernetes.cri-o.Metadata": "{\"name\":\"testpod\",\"namespace\":\"default\",\"uid\":\"test-uid-123\",\"attempt\":0}",`,
+				),
+				[]byte(
+					`"io.kubernetes.cri-o.Metadata": "{\"name\":\"test\",\"namespace\":\"default\"}",`,
+				),
+				1,
 			)
 			gomock.InOrder(
 				storeMock.EXPECT().
@@ -606,8 +715,8 @@ var _ = t.Describe("ContainerServer", func() {
 			// Given
 			manifest := bytes.Replace(testManifest,
 				[]byte(`"io.kubernetes.cri-o.Annotations": "{}",`),
-				[]byte(fmt.Sprintf("%q: %q,", annotations.ContainerManager,
-					annotations.ContainerManagerLibpod)), 1,
+				fmt.Appendf(nil, "%q: %q,", annotations.ContainerManager,
+					annotations.ContainerManagerLibpod), 1,
 			)
 			gomock.InOrder(
 				storeMock.EXPECT().
@@ -818,13 +927,11 @@ var _ = t.Describe("ContainerServer", func() {
 
 			// When
 			sandboxes := sut.ListSandboxes()
-			containers, err := sut.ListContainers(
-				func(container *oci.Container) bool {
-					return true
-				},
-				func(container *oci.Container) bool {
-					return true
-				})
+			returnTrue := func(container *oci.Container) bool {
+				return true
+			}
+			//nolint:gocritic // dupOption is expected here as both filters are intentionally the same in this test
+			containers, err := sut.ListContainers(returnTrue, returnTrue)
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())

@@ -1,7 +1,10 @@
-{ pkgs }:
-with pkgs; buildGo122Module {
+{ stdenv
+, pkgs
+, gitCommit ? "unknown"
+}:
+with pkgs; buildGo126Module /* use go 1.26.4 */ {
   name = "cri-o";
-  src = ./..;
+  src = nix-gitignore.gitignoreSourcePure [ ../.gitignore ] ./..;
   vendorHash = null;
   doCheck = false;
   enableParallelBuilding = true;
@@ -15,24 +18,27 @@ with pkgs; buildGo122Module {
     pkg-config
     which
   ];
-  buildInputs = [
+  buildInputs = lib.optionals (!stdenv.hostPlatform.isMusl) [
     glibc
     glibc.static
+  ] ++ [
+    btrfs-progs
     gpgme
-    libassuan
-    libgpgerror
-    libseccomp
     libapparmor
+    libassuan
+    libgpg-error
+    libseccomp
     libselinux
   ];
   prePatch = ''
     export CFLAGS='-static -pthread'
     export LDFLAGS='-s -w -static-libgcc -static'
     export EXTRA_LDFLAGS='-s -w -linkmode external -extldflags "-static -lm"'
-    export BUILDTAGS='static netgo osusergo exclude_graphdriver_btrfs exclude_graphdriver_devicemapper seccomp apparmor selinux'
+    export BUILDTAGS='static netgo osusergo seccomp apparmor selinux'
     export CGO_ENABLED=1
     export CGO_LDFLAGS='-lgpgme -lassuan -lgpg-error'
     export SOURCE_DATE_EPOCH=0
+    export BUILD_COMMIT="${gitCommit}"
   '';
   buildPhase = ''
     make binaries

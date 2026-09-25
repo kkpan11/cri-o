@@ -1,29 +1,32 @@
 package config_test
 
 import (
+	"context"
 	"os"
+	"path/filepath"
 	"strings"
 
-	"github.com/containers/common/pkg/apparmor"
-	"github.com/cri-o/cri-o/pkg/config"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.podman.io/common/pkg/apparmor"
+
+	"github.com/cri-o/cri-o/pkg/config"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Config", func() {
 	BeforeEach(beforeEach)
 
 	t.Describe("Reload", func() {
-		modifyDefaultConfig := func(old, new string) {
+		modifyDefaultConfig := func(old, updated string) {
 			filePath := t.MustTempFile("config")
 			Expect(sut.ToFile(filePath)).To(Succeed())
-			Expect(sut.UpdateFromFile(filePath)).To(Succeed())
+			Expect(sut.UpdateFromFile(context.Background(), filePath)).To(Succeed())
 
 			read, err := os.ReadFile(filePath)
 			Expect(err).ToNot(HaveOccurred())
 
-			newContents := strings.ReplaceAll(string(read), old, new)
+			newContents := strings.ReplaceAll(string(read), old, updated)
 			err = os.WriteFile(filePath, []byte(newContents), 0)
 			Expect(err).ToNot(HaveOccurred())
 		}
@@ -32,10 +35,10 @@ var _ = t.Describe("Config", func() {
 			// Given
 			filePath := t.MustTempFile("config")
 			Expect(sut.ToFile(filePath)).To(Succeed())
-			Expect(sut.UpdateFromFile(filePath)).To(Succeed())
+			Expect(sut.UpdateFromFile(context.Background(), filePath)).To(Succeed())
 
 			// When
-			err := sut.Reload()
+			err := sut.Reload(context.Background())
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -49,7 +52,7 @@ var _ = t.Describe("Config", func() {
 			)
 
 			// When
-			err := sut.Reload()
+			err := sut.Reload(context.Background())
 
 			// Then
 			Expect(err).To(HaveOccurred())
@@ -63,7 +66,7 @@ var _ = t.Describe("Config", func() {
 			)
 
 			// When
-			err := sut.Reload()
+			err := sut.Reload(context.Background())
 
 			// Then
 			Expect(err).To(HaveOccurred())
@@ -77,7 +80,7 @@ var _ = t.Describe("Config", func() {
 			)
 
 			// When
-			err := sut.Reload()
+			err := sut.Reload(context.Background())
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -97,6 +100,7 @@ var _ = t.Describe("Config", func() {
 		It("should succeed with config change", func() {
 			// Given
 			const newLogLevel = "fatal"
+
 			newConfig := defaultConfig()
 			newConfig.LogLevel = newLogLevel
 
@@ -134,6 +138,7 @@ var _ = t.Describe("Config", func() {
 		It("should succeed with config change", func() {
 			// Given
 			const newLogFilter = "fatal"
+
 			newConfig := defaultConfig()
 			newConfig.LogFilter = newLogFilter
 
@@ -171,6 +176,7 @@ var _ = t.Describe("Config", func() {
 		It("should succeed with pause_image change", func() {
 			// Given
 			const newPauseImage = "my-pause"
+
 			newConfig := defaultConfig()
 			newConfig.PauseImage = newPauseImage
 
@@ -185,6 +191,7 @@ var _ = t.Describe("Config", func() {
 		It("should fail with invalid pause_image change", func() {
 			// Given
 			const newPauseImage = "//THIS=is!invalid"
+
 			newConfig := defaultConfig()
 			newConfig.PauseImage = newPauseImage
 
@@ -198,6 +205,7 @@ var _ = t.Describe("Config", func() {
 		It("should succeed with pause_command change", func() {
 			// Given
 			const newPauseCommand = "/new-pause"
+
 			newConfig := defaultConfig()
 			newConfig.PauseCommand = newPauseCommand
 
@@ -328,6 +336,7 @@ var _ = t.Describe("Config", func() {
 		It("should succeed with config change", func() {
 			// Given
 			const profile = "unconfined"
+
 			newConfig := defaultConfig()
 			newConfig.ApparmorProfile = profile
 
@@ -341,6 +350,12 @@ var _ = t.Describe("Config", func() {
 	})
 
 	t.Describe("ReloadRuntimes", func() {
+		var existingRuntimePath string
+
+		BeforeEach(func() {
+			existingRuntimePath = filepath.Join(t.EnsureRuntimeDeps(), config.DefaultRuntime)
+		})
+
 		It("should succeed without any config change", func() {
 			// Given
 			// When
@@ -365,7 +380,7 @@ var _ = t.Describe("Config", func() {
 		It("should add a new runtime", func() {
 			// Given
 			newRuntimeHandler := &config.RuntimeHandler{
-				RuntimePath:                  "/usr/bin/runc",
+				RuntimePath:                  existingRuntimePath,
 				PrivilegedWithoutHostDevices: true,
 			}
 			newConfig := &config.Config{}
@@ -383,7 +398,7 @@ var _ = t.Describe("Config", func() {
 		It("should change the default runtime", func() {
 			// Given
 			sut.Runtimes["existing"] = &config.RuntimeHandler{
-				RuntimePath: "/usr/bin/runc",
+				RuntimePath: existingRuntimePath,
 			}
 			newConfig := &config.Config{}
 			newConfig.Runtimes = sut.Runtimes
@@ -400,12 +415,12 @@ var _ = t.Describe("Config", func() {
 		It("should overwrite existing runtime", func() {
 			// Given
 			existingRuntime := &config.RuntimeHandler{
-				RuntimePath: "/usr/bin/runc",
+				RuntimePath: existingRuntimePath,
 			}
 			sut.Runtimes["existing"] = existingRuntime
 
 			newRuntime := &config.RuntimeHandler{
-				RuntimePath:                  "/usr/bin/runc",
+				RuntimePath:                  existingRuntimePath,
 				PrivilegedWithoutHostDevices: true,
 			}
 			newConfig := &config.Config{}
@@ -420,23 +435,53 @@ var _ = t.Describe("Config", func() {
 			Expect(sut.Runtimes).To(HaveKeyWithValue("existing", newRuntime))
 			Expect(sut.Runtimes["existing"].PrivilegedWithoutHostDevices).To(BeTrue())
 		})
+
+		It("should inherit runtime config", func() {
+			// Given
+			newRuntime := &config.RuntimeHandler{
+				RuntimePath:           invalidPath,
+				InheritDefaultRuntime: true,
+			}
+			defaultRuntime := &config.RuntimeHandler{
+				RuntimePath: existingRuntimePath,
+			}
+			newConfig := &config.Config{}
+			newConfig.DefaultRuntime = "default"
+			newConfig.Runtimes = make(config.Runtimes)
+			newConfig.Runtimes["default"] = defaultRuntime
+			newConfig.Runtimes["new"] = newRuntime
+
+			// When
+			err := sut.ReloadRuntimes(newConfig)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sut.Runtimes).To(HaveKeyWithValue("new", newRuntime))
+			Expect(sut.Runtimes["new"].RuntimePath).To(Equal(existingRuntimePath))
+		})
 	})
 
 	t.Describe("ReloadPinnedImages", func() {
-		It("should update PinnedImages with newConfig's PinnedImages if they are different", func() {
-			sut.PinnedImages = []string{"image1", "image4", "image3"}
-			newConfig := &config.Config{}
-			newConfig.PinnedImages = []string{"image5"}
-			sut.ReloadPinnedImages(newConfig)
-			Expect(sut.PinnedImages).To(Equal([]string{"image5"}))
-		})
+		It(
+			"should update PinnedImages with newConfig's PinnedImages if they are different",
+			func() {
+				sut.PinnedImages = []string{"image1", "image4", "image3"}
+				newConfig := &config.Config{}
+				newConfig.PinnedImages = []string{"image5"}
+				sut.ReloadPinnedImages(newConfig)
+				Expect(sut.PinnedImages).To(Equal([]string{"image5"}))
+			},
+		)
 
-		It("should not update PinnedImages if they are the same as newConfig's PinnedImages", func() {
-			sut.PinnedImages = []string{"image1", "image2", "image3"}
-			newConfig := &config.Config{}
-			newConfig.PinnedImages = []string{"image1", "image2", "image3"}
-			sut.ReloadPinnedImages(newConfig)
-			Expect(sut.PinnedImages).To(Equal([]string{"image1", "image2", "image3"}))
-		})
+		It(
+			"should not update PinnedImages if they are the same as newConfig's PinnedImages",
+			func() {
+				sut.PinnedImages = []string{"image1", "image2", "image3"}
+				newConfig := &config.Config{}
+				newConfig.PinnedImages = []string{"image1", "image2", "image3"}
+				sut.ReloadPinnedImages(newConfig)
+				Expect(sut.PinnedImages).To(Equal([]string{"image1", "image2", "image3"}))
+			},
+		)
 	})
 })

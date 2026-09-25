@@ -4,12 +4,13 @@ import (
 	"context"
 	"os"
 
-	criu "github.com/checkpoint-restore/go-criu/v7/utils"
-	"github.com/cri-o/cri-o/internal/oci"
+	criu "github.com/checkpoint-restore/go-criu/v8/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/oci"
 )
 
 var _ = t.Describe("ContainerCheckpoint", func() {
@@ -17,10 +18,12 @@ var _ = t.Describe("ContainerCheckpoint", func() {
 	BeforeEach(func() {
 		beforeEach()
 		createDummyConfig()
-		mockRuncInLibConfig()
+		mockRuntimeInLibConfig()
+
 		if err := criu.CheckForCriu(criu.PodCriuVersion); err != nil {
 			Skip("Check CRIU: " + err.Error())
 		}
+
 		serverConfig.SetCheckpointRestore(true)
 		setupSUT()
 	})
@@ -76,7 +79,7 @@ var _ = t.Describe("ContainerCheckpoint with CheckpointRestore set to false", fu
 	BeforeEach(func() {
 		beforeEach()
 		createDummyConfig()
-		mockRuncInLibConfig()
+		mockRuntimeInLibConfig()
 		serverConfig.SetCheckpointRestore(false)
 		setupSUT()
 	})
