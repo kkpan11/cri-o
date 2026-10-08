@@ -18,6 +18,7 @@ type PodSandbox interface {
 	GetLinuxPodSandbox() LinuxPodSandbox
 
 	GetPid() uint32
+	GetIPs() []string
 }
 
 type LinuxPodSandbox interface {
@@ -39,13 +40,15 @@ func commonPodSandboxToNRI(pod PodSandbox) *nri.PodSandbox {
 		Annotations:    pod.GetAnnotations(),
 		RuntimeHandler: pod.GetRuntimeHandler(),
 		Pid:            pod.GetPid(),
+		Ips:            pod.GetIPs(),
 	}
 }
 
 func podSandboxesToNRI(podList []PodSandbox) []*nri.PodSandbox {
-	pods := []*nri.PodSandbox{}
+	pods := make([]*nri.PodSandbox, 0, len(podList))
 	for _, pod := range podList {
 		pods = append(pods, podSandboxToNRI(pod))
 	}
+
 	return pods
 }

@@ -1,0 +1,36 @@
+FROM registry.access.redhat.com/ubi9/ubi:9.8
+
+RUN dnf install -y \
+    autoconf \
+    automake \
+    gcc \
+    git \
+    glib2-devel \
+    glibc-static \
+    gpgme-devel \
+    libassuan-devel \
+    libcap-devel \
+    libseccomp-devel \
+    libtool \
+    make \
+    pkgconfig \
+    && dnf clean all
+
+# Install Go. Keep GOVERSION in sync with go.mod, and update the pinned
+# checksums below when bumping it (see https://go.dev/dl/?mode=json&include=all).
+ARG TARGETARCH
+ENV GOVERSION=1.27.1
+RUN case "${TARGETARCH}" in \
+        amd64)   GO_SHA256=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445 ;; \
+        arm64)   GO_SHA256=3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec ;; \
+        ppc64le) GO_SHA256=ad1ff83c24f783c2d4a025852b928a05c199e8742a14a5482d88de0293d2bd0d ;; \
+        s390x)   GO_SHA256=c9e1ad7bddea40e2eb10b4d3267ae06d462667839bf0ba94c2e2d160b06f9b9e ;; \
+        *) echo "unsupported TARGETARCH: ${TARGETARCH:-unset}" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL "https://go.dev/dl/go${GOVERSION}.linux-${TARGETARCH}.tar.gz" -o /tmp/go.tar.gz && \
+    echo "${GO_SHA256}  /tmp/go.tar.gz" | sha256sum -c - && \
+    tar -C /usr/local -xzf /tmp/go.tar.gz && \
+    rm -f /tmp/go.tar.gz
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+WORKDIR /src

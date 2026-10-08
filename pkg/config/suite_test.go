@@ -5,13 +5,14 @@ import (
 	"os/exec"
 	"testing"
 
-	"github.com/cri-o/cri-o/pkg/config"
-	. "github.com/cri-o/cri-o/test/framework"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/cri-o/cri-o/pkg/config"
+	. "github.com/cri-o/cri-o/test/framework"
 )
 
-// TestLib runs the created specs
+// TestLib runs the created specs.
 func TestLibConfig(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunFrameworkSpecs(t, "LibConfig")
@@ -33,7 +34,9 @@ func validConmonPath() string {
 	if errors.Is(err, exec.ErrNotFound) {
 		Skip("conmon not found in $PATH")
 	}
+
 	Expect(err).ToNot(HaveOccurred())
+
 	return conmonPath
 }
 
@@ -56,5 +59,12 @@ func defaultConfig() *config.Config {
 	c, err := config.DefaultConfig()
 	Expect(err).ToNot(HaveOccurred())
 	Expect(c).NotTo(BeNil())
+	t.EnsureRuntimeDeps()
+
+	// Use a hermetic, empty registries configuration so tests do not depend on
+	// the host's /etc/containers/registries.conf, which may be in the legacy v1
+	// format that is no longer accepted.
+	c.SystemContext.SystemRegistriesConfPath = t.MustTempFile("registries")
+
 	return c
 }

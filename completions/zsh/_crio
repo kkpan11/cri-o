@@ -2,17 +2,36 @@ _cli_zsh_autocomplete() {
 
   local -a cmds
   cmds=(
+        "check:Check CRI-O storage directory for errors.
+
+This command can also repair damaged containers, images and layers.
+
+By default, the data integrity of the storage directory is verified,
+which can be an I/O and CPU-intensive operation. The --quick option
+can be used to reduce the number of checks run.
+
+When using the --repair option, especially with the --force option,
+CRI-O and any currently running containers should be stopped if
+possible to ensure no concurrent access to the storage directory
+occurs.
+
+The --wipe option can be used to automatically attempt to remove
+containers and images on a repair failure. This option, combined
+with the --force option, can be used to entirely remove the storage
+directory content in case of irrecoverable errors. This should be
+used as a last resort, and similarly to the --repair option, it's
+best if CRI-O and any currently running containers are stopped."
         'complete:Generate bash, fish or zsh completions.'
         'completion:Generate bash, fish or zsh completions.'
-        'man:Generate the man page documentation.'
-        'markdown:Generate the markdown documentation.'
-        'md:Generate the markdown documentation.'
         'config:Outputs a commented version of the configuration file that could be used
 by CRI-O. This allows you to save you current configuration setup and then load
 it later with **--config**. Global options will modify the output.'
+        'man:Generate the man page documentation.'
+        'markdown:Generate the markdown documentation.'
+        'md:Generate the markdown documentation.'
+        'status:Display status information'
         'version:display detailed version information'
         "wipe:wipe CRI-O's container and image storage"
-        'status:Display status information'
         'help:Shows a list of commands or help for one command'
         'h:Shows a list of commands or help for one command'
   )
@@ -22,20 +41,25 @@ it later with **--config**. Global options will modify the output.'
   opts=(
         '--absent-mount-sources-to-reject'
         '--add-inheritable-capabilities'
+        '--additional-artifact-stores'
         '--additional-devices'
         '--address'
         '--allowed-devices'
         '--apparmor-profile'
+        '--auto-reload-registries'
         '--big-files-temporary-dir'
         '--bind-mount-prefix'
         '--blockio-config-file'
         '--blockio-reload'
         '--cdi-spec-dirs'
         '--cgroup-manager'
+        '--checkpoint-restore-level'
         '--clean-shutdown-file'
         '--cni-config-dir'
         '--cni-default-network'
         '--cni-plugin-dir'
+        '--cni-status-grace-period'
+        '--collection-period'
         '--config'
         '--config-dir'
         '--conmon'
@@ -69,8 +93,8 @@ it later with **--config**. Global options will modify the output.'
         '--hostnetwork-disable-selinux'
         '--image-volumes'
         '--imagestore'
+        '--included-pod-metrics'
         '--infra-ctr-cpuset'
-        '--insecure-registry'
         '--internal-repair'
         '--internal-wipe'
         '--irqbalance-config-file'
@@ -89,31 +113,43 @@ it later with **--config**. Global options will modify the output.'
         '--metrics-key'
         '--metrics-port'
         '--metrics-socket'
+        '--min-injected-gomaxprocs'
         '--minimum-mappable-gid'
         '--minimum-mappable-uid'
+        '--namespaced-auth-dir'
         '--namespaces-dir'
         '--no-pivot'
         '--nri-disable-connections'
+        '--nri-enable-default-validator'
         '--nri-listen'
         '--nri-plugin-config-dir'
         '--nri-plugin-dir'
         '--nri-plugin-registration-timeout'
         '--nri-plugin-request-timeout'
+        '--nri-validator-reject-custom-seccomp-adjustment'
+        '--nri-validator-reject-namespace-adjustment'
+        '--nri-validator-reject-oci-hook-adjustment'
+        '--nri-validator-reject-runtime-default-seccomp-adjustment'
+        '--nri-validator-reject-unconfined-seccomp-adjustment'
+        '--nri-validator-required-plugins'
+        '--nri-validator-tolerate-missing-plugins-annotation'
+        '--oci-artifact-mount-support'
         '--pause-command'
         '--pause-image'
         '--pause-image-auth-file'
         '--pids-limit'
         '--pinned-images'
         '--pinns-path'
+        '--privileged-seccomp-profile'
         '--profile'
         '--profile-cpu'
         '--profile-mem'
         '--profile-port'
+        '--pull-progress-timeout'
         '--rdt-config-file'
         '--read-only'
         '--registries-conf'
         '--registries-conf-dir'
-        '--registry'
         '--root'
         '--runroot'
         '--runtimes'
@@ -121,6 +157,7 @@ it later with **--config**. Global options will modify the output.'
         '--selinux'
         '--separate-pull-cgroup'
         '--shared-cpuset'
+        '--short-name-mode'
         '--signature-policy'
         '--signature-policy-dir'
         '--stats-collection-period'
@@ -134,6 +171,8 @@ it later with **--config**. Global options will modify the output.'
         '--stream-tls-cert'
         '--stream-tls-key'
         '--timezone'
+        '--tls-cipher-suites'
+        '--tls-min-version'
         '--tracing-endpoint'
         '--tracing-sampling-rate-per-million'
         '--uid-mappings'

@@ -9,6 +9,9 @@ echo "deb $CRIU_REPO/ /" | sudo tee /etc/apt/sources.list.d/criu.list
 
 sudo apt update
 sudo apt install -y \
+    autoconf \
+    automake \
+    cargo \
     conmon \
     criu \
     libaio-dev \
@@ -18,13 +21,20 @@ sudo apt install -y \
     libdevmapper-dev \
     libfuse-dev \
     libgpgme11-dev \
+    libjson-c-dev \
     libnet1-dev \
     libnl-3-dev \
     libprotobuf-c-dev \
     libprotobuf-dev \
     libseccomp-dev \
     libsystemd-dev \
+    libtool \
     libudev-dev \
+    libyajl-dev \
+    lld \
+    make \
+    rustc \
     sed \
     socat \
-    uuid-dev
+    uuid-dev \
+    wget

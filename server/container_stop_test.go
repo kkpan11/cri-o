@@ -3,15 +3,16 @@ package server_test
 import (
 	"context"
 
-	"github.com/cri-o/cri-o/internal/oci"
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"go.uber.org/mock/gomock"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/oci"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("ContainerStop", func() {
 	// Prepare the sut
 	BeforeEach(func() {
@@ -43,14 +44,14 @@ var _ = t.Describe("ContainerStop", func() {
 			Expect(err).ToNot(HaveOccurred())
 		})
 
-		It("should fail with invalid container id", func() {
+		It("should succeed with not existing container ID", func() {
 			// Given
 			// When
 			_, err := sut.StopContainer(context.Background(),
 				&types.StopContainerRequest{ContainerId: "id"})
 
 			// Then
-			Expect(err).To(HaveOccurred())
+			Expect(err).NotTo(HaveOccurred())
 		})
 	})
 })

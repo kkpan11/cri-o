@@ -9,55 +9,75 @@ import (
 )
 
 type containerEventConn struct {
-	wg  sync.WaitGroup
-	err error
+	ch   chan struct{}
+	once sync.Once
+	err  error
 }
 
-// GetContainerEvents sends the stream of container events to clients
-func (s *Server) GetContainerEvents(_ *types.GetEventsRequest, ces types.RuntimeService_GetContainerEventsServer) error {
-	if !s.Config().EnablePodEvents {
+func (c *containerEventConn) done() {
+	// only ever close the channel once, even if multiple messages are sent
+	c.once.Do(func() {
+		close(c.ch)
+	})
+}
+
+func (c *containerEventConn) wait() {
+	<-c.ch
+}
+
+// GetContainerEvents sends the stream of container events to clients.
+func (s *Server) GetContainerEvents(
+	_ *types.GetEventsRequest,
+	ces types.RuntimeService_GetContainerEventsServer,
+) error {
+	if !s.ContainerServer.Config().EnablePodEvents {
 		return nil
 	}
+
+	conn := &containerEventConn{
+		ch:   make(chan struct{}),
+		once: sync.Once{},
+	}
+	// Register before starting the broadcaster so the client that triggers
+	// it does not miss already buffered events.
+	s.containerEventClients.Store(ces, conn)
 
 	s.containerEventStreamBroadcaster.Do(func() {
 		// note that this function will run indefinitely until ContainerEventsChan is closed
 		go s.broadcastEvents()
 	})
 
-	conn := &containerEventConn{
-		wg: sync.WaitGroup{},
-	}
-
-	s.containerEventClients.Store(ces, conn)
-	conn.wg.Add(1)
-
 	// wait here until we don't want to send events to this client anymore
-	conn.wg.Wait()
+	conn.wait()
 	s.containerEventClients.Delete(ces)
+
 	return conn.err
 }
 
 func (s *Server) broadcastEvents() {
 	// notify all connections that ContainerEventsChan has been closed
-	defer s.containerEventClients.Range(func(_, value any) bool { // nolint: unparam
-		conn, ok := value.(*containerEventConn)
-		if !ok {
-			return true
-		}
-		conn.wg.Done()
-		return true
-	})
+	defer func() {
+		for _, value := range s.containerEventClients.Range {
+			conn, ok := value.(*containerEventConn)
+			if !ok {
+				continue
+			}
 
+			conn.done()
+		}
+	}()
+
+	//nolint:govet // copylock is not harmful for this implementation
 	for containerEvent := range s.ContainerEventsChan {
-		s.containerEventClients.Range(func(key, value any) bool {
+		for key, value := range s.containerEventClients.Range {
 			stream, ok := key.(types.RuntimeService_GetContainerEventsServer)
 			if !ok {
-				return true
+				continue
 			}
 
 			conn, ok := value.(*containerEventConn)
 			if !ok {
-				return true
+				continue
 			}
 
 			if err := stream.Send(&containerEvent); err != nil {
@@ -68,9 +88,8 @@ func (s *Server) broadcastEvents() {
 					conn.err = err
 				}
 				// notify our waiting client connection that we are done
-				conn.wg.Done()
+				conn.done()
 			}
-			return true
-		})
+		}
 	}
 }

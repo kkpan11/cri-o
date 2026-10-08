@@ -27,6 +27,8 @@ runtime_root = "$RUNTIME_ROOT"
 runtime_type = "$RUNTIME_TYPE"
 monitor_cgroup = "$MONITOR_CGROUP"
 EOF
+	unset CONTAINER_DEFAULT_RUNTIME
+	unset CONTAINER_RUNTIMES
 }
 
 @test "pids limit" {
@@ -99,9 +101,9 @@ EOF
 		skip "not supported for conmon"
 	fi
 
+	setup_crio
 	configure_monitor_cgroup_for_conmonrs "customcrioconmon.slice"
-
-	CONTAINER_CGROUP_MANAGER="systemd" CONTAINER_DROP_INFRA_CTR=true start_crio
+	CONTAINER_CGROUP_MANAGER="systemd" CONTAINER_DROP_INFRA_CTR=true start_crio_no_setup
 
 	jq '	  .linux.cgroup_parent = "Burstablecriotest123.slice"' \
 		"$TESTDATA"/sandbox_config.json > "$TESTDIR"/sandbox_config_slice.json
@@ -198,6 +200,30 @@ EOF
 	[[ "$output" == *"210763776"* ]]
 }
 
+@test "cgroupv2 unified update support" {
+	if ! is_cgroup_v2; then
+		skip "node must be configured with cgroupv2 for this test"
+	fi
+	start_crio
+
+	jq '	  .linux.resources.unified = {"memory.min": "209715200", "memory.high": "210763776"}' \
+		"$TESTDATA"/container_sleep.json > "$newconfig"
+	ctr_id=$(crictl run "$newconfig" "$TESTDATA"/sandbox_config.json)
+
+	output=$(crictl exec --sync "$ctr_id" sh -c "cat /sys/fs/cgroup/memory.min")
+	[[ "$output" == *"209715200"* ]]
+	output=$(crictl exec --sync "$ctr_id" sh -c "cat /sys/fs/cgroup/memory.high")
+	[[ "$output" == *"210763776"* ]]
+
+	# update unified resources via CRI API
+	"$UPDATEUNIFIED_BINARY" "$CRIO_SOCKET" "$ctr_id" "memory.min=0" "memory.high=max"
+
+	output=$(crictl exec --sync "$ctr_id" sh -c "cat /sys/fs/cgroup/memory.min")
+	[[ "$output" == "0" ]]
+	output=$(crictl exec --sync "$ctr_id" sh -c "cat /sys/fs/cgroup/memory.high")
+	[[ "$output" == *"max"* ]]
+}
+
 @test "cpu-quota.crio.io can disable quota" {
 	if is_cgroup_v2; then
 		skip "node must be configured with cgroupv1 for this test"
@@ -222,4 +248,93 @@ EOF
 	if [[ "$CONTAINER_DEFAULT_RUNTIME" == "crun" ]]; then
 		[[ $(cat "$CTR_CGROUP"/container/"$cgroup_file") == "-1" ]]
 	fi
+}
+
+@test "systemd cgroup manager uses system dbus when running as root with rootless env" {
+	if [[ $(id -u) -ne 0 ]]; then
+		skip "test requires running as root"
+	fi
+
+	# Set _CRIO_ROOTLESS=1 to simulate containerized environment (like in nested containers)
+	# where rootless adjustments are needed but system dbus should still be used.
+	_CRIO_ROOTLESS=1 CONTAINER_CGROUP_MANAGER="systemd" CONTAINER_DROP_INFRA_CTR=false start_crio
+
+	jq '	  .linux.cgroup_parent = "system.slice"' \
+		"$TESTDATA"/sandbox_config.json > "$TESTDIR"/sandbox_systemd.json
+
+	pod_id=$(crictl runp "$TESTDIR"/sandbox_systemd.json)
+
+	output=$(systemctl status "crio-conmon-$pod_id.scope" 2>&1) || true
+	[[ "$output" == *"crio-conmon-$pod_id.scope"* ]]
+
+	ctr_id=$(crictl create "$pod_id" "$TESTDATA"/container_sleep.json "$TESTDIR"/sandbox_systemd.json)
+	crictl start "$ctr_id"
+
+	output=$(crictl inspect "$ctr_id" | jq -r '.status.state')
+	[[ "$output" == "CONTAINER_RUNNING" ]]
+}
+
+@test "user namespace containers include UID/GID mappings for cgroup delegation" {
+	if test -n "$CONTAINER_UID_MAPPINGS"; then
+		skip "userNS already enabled globally"
+	fi
+	if ! is_cgroup_v2; then
+		skip "test requires cgroup v2"
+	fi
+
+	start_crio
+
+	# Create a pod with user namespace enabled (hostUsers: false)
+	jq '	.linux.security_context.namespace_options.userns_options = {
+			"mode": 0,
+			"uids": [{
+				"host_id": 100000,
+				"container_id": 0,
+				"length": 65536
+			}],
+			"gids": [{
+				"host_id": 100000,
+				"container_id": 0,
+				"length": 65536
+			}]
+		}' "$TESTDATA"/sandbox_config.json > "$TESTDIR"/sandbox_userns.json
+
+	pod_id=$(crictl runp "$TESTDIR"/sandbox_userns.json)
+
+	# Create a container in the user namespace pod
+	ctr_id=$(crictl create "$pod_id" "$TESTDATA"/container_sleep.json "$TESTDIR"/sandbox_userns.json)
+
+	# Start the container and verify it can run successfully
+	# Without proper UID/GID mappings, systemd containers would fail to create cgroups
+	crictl start "$ctr_id"
+
+	output=$(crictl inspect "$ctr_id" | jq -r '.status.state')
+	[[ "$output" == "CONTAINER_RUNNING" ]]
+
+	# Get container info including the runtime spec
+	container_info=$(crictl inspect --output json "$ctr_id")
+
+	# Verify that BOTH user namespace path AND uidMappings/gidMappings are present
+	# in the container's runtime information
+
+	# Check that user namespace has a path (joining the sandbox's userns)
+	user_ns_path=$(echo "$container_info" | jq -r '.info.runtimeSpec.linux.namespaces[] | select(.type == "user") | .path')
+	[[ -n "$user_ns_path" ]]
+
+	# Check that uidMappings and gidMappings are present in the spec
+	# These are required for proper cgroup delegation even when joining an existing userns
+	uid_mappings=$(echo "$container_info" | jq -r '.info.runtimeSpec.linux.uidMappings')
+	gid_mappings=$(echo "$container_info" | jq -r '.info.runtimeSpec.linux.gidMappings')
+	[[ "$uid_mappings" != "null" ]]
+	[[ "$gid_mappings" != "null" ]]
+
+	# Verify the mappings contain the expected values
+	uid_host_id=$(echo "$container_info" | jq -r '.info.runtimeSpec.linux.uidMappings[0].hostID')
+	gid_host_id=$(echo "$container_info" | jq -r '.info.runtimeSpec.linux.gidMappings[0].hostID')
+	[[ "$uid_host_id" == "100000" ]]
+	[[ "$gid_host_id" == "100000" ]]
+
+	# Verify the container can access its cgroup (regression test for #9705)
+	# The container should be able to read its cgroup files
+	crictl exec --sync "$ctr_id" cat /proc/self/cgroup
 }

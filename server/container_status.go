@@ -1,18 +1,19 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"time"
+
+	json "github.com/json-iterator/go"
+	spec "github.com/opencontainers/runtime-spec/specs-go"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	"github.com/cri-o/cri-o/internal/log"
 	oci "github.com/cri-o/cri-o/internal/oci"
 	"github.com/cri-o/cri-o/internal/storage"
-	json "github.com/json-iterator/go"
-	spec "github.com/opencontainers/runtime-spec/specs-go"
-	"golang.org/x/net/context"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
 const (
@@ -23,43 +24,64 @@ const (
 )
 
 // ContainerStatus returns status of the container.
-func (s *Server) ContainerStatus(ctx context.Context, req *types.ContainerStatusRequest) (*types.ContainerStatusResponse, error) {
+func (s *Server) ContainerStatus(
+	ctx context.Context,
+	req *types.ContainerStatusRequest,
+) (*types.ContainerStatusResponse, error) {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
-	c, err := s.GetContainerFromShortID(ctx, req.ContainerId)
+
+	c, err := s.GetContainerFromShortID(ctx, req.GetContainerId())
 	if err != nil {
-		return nil, status.Errorf(codes.NotFound, "could not find container %q: %v", req.ContainerId, err)
+		return nil, status.Errorf(
+			codes.NotFound,
+			"could not find container %q: %v",
+			req.GetContainerId(),
+			err,
+		)
 	}
 
 	containerID := c.ID()
-	imageRef := c.CRIContainer().ImageRef
+	imageRef := c.CRIContainer().GetImageRef()
+
 	imageNameInSpec := ""
-	if imageName := c.ImageName(); imageName != nil {
-		imageNameInSpec = imageName.StringForOutOfProcessConsumptionOnly()
+	if someNameOfTheImage := c.SomeNameOfTheImage(); someNameOfTheImage != nil {
+		imageNameInSpec = someNameOfTheImage.StringForOutOfProcessConsumptionOnly()
 	}
+
+	imageID := ""
+	if c.ImageID() != nil {
+		imageID = c.ImageID().IDStringForOutOfProcessConsumptionOnly()
+	}
+
 	resp := &types.ContainerStatusResponse{
 		Status: &types.ContainerStatus{
 			Id:          containerID,
 			Metadata:    c.Metadata(),
 			Labels:      c.Labels(),
 			Annotations: c.Annotations(),
+			ImageId:     imageID,
 			ImageRef:    imageRef,
 			Image: &types.ImageSpec{
 				Image: imageNameInSpec,
 			},
+			User: c.RuntimeUser(),
 		},
 	}
 
 	mounts := []*types.Mount{}
 	for _, cv := range c.Volumes() {
 		mounts = append(mounts, &types.Mount{
-			ContainerPath:  cv.ContainerPath,
-			HostPath:       cv.HostPath,
-			Readonly:       cv.Readonly,
-			Propagation:    cv.Propagation,
-			SelinuxRelabel: cv.SelinuxRelabel,
+			ContainerPath:     cv.ContainerPath,
+			HostPath:          cv.HostPath,
+			Readonly:          cv.Readonly,
+			RecursiveReadOnly: cv.RecursiveReadOnly,
+			Propagation:       cv.Propagation,
+			SelinuxRelabel:    cv.SelinuxRelabel,
+			Image:             cv.Image,
 		})
 	}
+
 	resp.Status.Mounts = mounts
 
 	containerSpec := c.Spec()
@@ -73,14 +95,16 @@ func (s *Server) ContainerStatus(ctx context.Context, req *types.ContainerStatus
 	// If we defaulted to exit code not set earlier then we attempt to
 	// get the exit code from the exit file again.
 	if cState.Status == oci.ContainerStateStopped && cState.ExitCode == nil {
-		err := s.Runtime().UpdateContainerStatus(ctx, c)
+		err := s.ContainerServer.Runtime().UpdateContainerStatus(ctx, c)
 		if err != nil {
 			log.Warnf(ctx, "Failed to UpdateStatus of container %s: %v", c.ID(), err)
 		}
+
 		cState = c.State()
 	}
 
 	resp.Status.CreatedAt = c.CreatedAt().UnixNano()
+
 	switch cState.Status {
 	case oci.ContainerStateCreated:
 		rStatus = types.ContainerState_CONTAINER_CREATED
@@ -93,19 +117,21 @@ func (s *Server) ContainerStatus(ctx context.Context, req *types.ContainerStatus
 		started := cState.Started.UnixNano()
 		resp.Status.StartedAt = started
 		finished := cState.Finished.UnixNano()
+
 		resp.Status.FinishedAt = finished
 		if cState.ExitCode == nil {
 			resp.Status.ExitCode = -1
 		} else {
 			resp.Status.ExitCode = *cState.ExitCode
 		}
+
 		switch {
 		case cState.OOMKilled:
 			resp.Status.Reason = oomKilledReason
 		case cState.SeccompKilled:
 			resp.Status.Reason = seccompKilledReason
 			resp.Status.Message = cState.Error
-		case resp.Status.ExitCode == 0:
+		case resp.GetStatus().GetExitCode() == 0:
 			resp.Status.Reason = completedReason
 		default:
 			resp.Status.Reason = errorReason
@@ -116,11 +142,12 @@ func (s *Server) ContainerStatus(ctx context.Context, req *types.ContainerStatus
 	resp.Status.State = rStatus
 	resp.Status.LogPath = c.LogPath()
 
-	if req.Verbose {
-		info, err := s.createContainerInfo(c)
+	if req.GetVerbose() {
+		info, err := s.createContainerInfo(ctx, c)
 		if err != nil {
 			return nil, fmt.Errorf("creating container info: %w", err)
 		}
+
 		resp.Info = info
 	}
 
@@ -139,8 +166,23 @@ type containerInfoCheckpointRestore struct {
 	Restored       bool      `json:"restored"`
 }
 
-func (s *Server) createContainerInfo(container *oci.Container) (map[string]string, error) {
-	metadata, err := s.StorageRuntimeServer().GetContainerMetadata(container.ID())
+func (s *Server) createContainerInfo(
+	ctx context.Context,
+	container *oci.Container,
+) (map[string]string, error) {
+	sb, err := s.LookupSandbox(container.Sandbox())
+	if err != nil {
+		// Do not treat lookup failures as an error.
+		// If it happens, log the error, and use the default (nil) runtime handler.
+		log.Debugf(ctx, "Failed to lookup sandbox %s: %v", container.Sandbox(), err)
+	}
+
+	runtimeSvc, err := s.StorageRuntimeServer(sb)
+	if err != nil {
+		return nil, fmt.Errorf("getting runtime service: %w", err)
+	}
+
+	metadata, err := runtimeSvc.GetContainerMetadata(container.ID())
 	if err != nil {
 		return nil, fmt.Errorf("getting container metadata: %w", err)
 	}
@@ -165,6 +207,7 @@ func (s *Server) createContainerInfo(container *oci.Container) (map[string]strin
 				localContainerInfo,
 				localContainerInfoCheckpointRestore,
 			}
+
 			return json.Marshal(info)
 		}
 
@@ -173,5 +216,6 @@ func (s *Server) createContainerInfo(container *oci.Container) (map[string]strin
 	if err != nil {
 		return nil, fmt.Errorf("marshal data: %w", err)
 	}
+
 	return map[string]string{"info": string(bytes)}, nil
 }

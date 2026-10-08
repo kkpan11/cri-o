@@ -9,6 +9,8 @@ SIGNED_IMAGE=registry.access.redhat.com/rhel7-atomic:latest
 IMAGE_LIST_TAG=quay.io/crio/alpine:3.9
 IMAGE_LIST_DIGEST_FOR_TAG=quay.io/crio/alpine@sha256:414e0518bb9228d35e4cd5165567fb91d26c6a214e9c95899e1e056fcd349011
 IMAGE_LIST_DIGEST_FOR_TAG_AMD64=quay.io/crio/alpine@sha256:65b3a80ebe7471beecbc090c5b2cdd0aafeaefa0715f8f12e40dc918a3a70e32
+# Currently unused
+# IMAGE_LIST_DIGEST_FOR_TAG_ARM64=quay.io/crio/alpine@sha256:f920ccc826134587fffcf1ddc6b2a554947e0f1a5ae5264bbf3435da5b2e8e61
 
 IMAGE_LIST_DIGEST_AMD64=quay.io/crio/alpine@sha256:65b3a80ebe7471beecbc090c5b2cdd0aafeaefa0715f8f12e40dc918a3a70e32
 IMAGE_LIST_DIGEST=quay.io/crio/alpine@sha256:414e0518bb9228d35e4cd5165567fb91d26c6a214e9c95899e1e056fcd349011
@@ -24,7 +26,7 @@ function teardown() {
 @test "run container in pod with image ID" {
 	start_crio
 	pod_id=$(crictl runp "$TESTDATA"/sandbox_config.json)
-	jq '.image.image = "'"$REDIS_IMAGEID"'"' \
+	jq '.image.image = "'"$REDIS_IMAGEID"'" | .image.user_specified_image = "'"$REDIS_IMAGEDIGEST"'"' \
 		"$TESTDATA"/container_config.json > "$TESTDIR"/ctr.json
 	ctr_id=$(crictl create --no-pull "$pod_id" "$TESTDIR"/ctr.json "$TESTDATA"/sandbox_config.json)
 	crictl start "$ctr_id"
@@ -33,7 +35,7 @@ function teardown() {
 @test "container status when created by image ID" {
 	start_crio
 
-	jq '.image.image = "'"$REDIS_IMAGEID"'"' \
+	jq '.image.image = "'"$REDIS_IMAGEID"'" | .image.user_specified_image = "'"$REDIS_IMAGEDIGEST"'"' \
 		"$TESTDATA"/container_config.json > "$TESTDIR"/ctr.json
 	ctr_id=$(crictl run --no-pull "$TESTDIR"/ctr.json "$TESTDATA"/sandbox_config.json)
 
@@ -71,9 +73,9 @@ function teardown() {
 @test "container status when created by image list canonical reference" {
 	start_crio
 
-	crictl pull "$IMAGE_LIST_DIGEST"
+	crictl_pull "$IMAGE_LIST_DIGEST"
 
-	jq '.image.image = "'"$IMAGE_LIST_DIGEST"'"' \
+	jq '.image.image = "'"$IMAGE_LIST_DIGEST"'" | .image.user_specified_image = "'"$IMAGE_LIST_DIGEST"'"' \
 		"$TESTDATA"/container_config.json > "$TESTDIR"/ctr.json
 
 	ctr_id=$(crictl run "$TESTDIR"/ctr.json "$TESTDATA"/sandbox_config.json)
@@ -85,7 +87,7 @@ function teardown() {
 
 @test "image pull and list" {
 	start_crio
-	crictl pull "$IMAGE"
+	crictl_pull "$IMAGE"
 	imageid=$(crictl images --quiet "$IMAGE")
 	[ "$imageid" != "" ]
 
@@ -102,8 +104,10 @@ function teardown() {
 	mkdir -p "$TESTDIR/imagestore"
 	CONTAINER_IMAGESTORE="$TESTDIR/imagestore" start_crio
 
-	FEDORA="registry.fedoraproject.org/fedora"
-	crictl pull $FEDORA
+	# registry.fedoraproject.org is pretty flaky
+	# Moving to the stable quay.io
+	FEDORA="quay.io/fedora/fedora"
+	crictl_pull $FEDORA
 	imageid=$(crictl images --quiet "$FEDORA")
 	[ "$imageid" != "" ]
 
@@ -126,13 +130,13 @@ function teardown() {
 @test "image pull with signature" {
 	skip "registry has some issues"
 	start_crio
-	crictl pull "$SIGNED_IMAGE"
+	crictl_pull "$SIGNED_IMAGE"
 	cleanup_images
 }
 
 @test "image pull and list by tag and ID" {
 	start_crio
-	crictl pull "$IMAGE:go"
+	crictl_pull "$IMAGE:go"
 
 	imageid=$(crictl images --quiet "$IMAGE:go")
 	[ "$imageid" != "" ]
@@ -146,7 +150,7 @@ function teardown() {
 @test "image pull and list by digest and ID" {
 	start_crio
 	NGINX_IMAGE=quay.io/crio/nginx@sha256:960355a671fb88ef18a85f92ccf2ccf8e12186216c86337ad808c204d69d512d
-	crictl pull "$NGINX_IMAGE"
+	crictl_pull "$NGINX_IMAGE"
 
 	imageid=$(crictl images --quiet "$NGINX_IMAGE")
 	[ "$imageid" != "" ]
@@ -160,7 +164,7 @@ function teardown() {
 @test "image pull and list by manifest list digest" {
 	start_crio
 
-	crictl pull ${IMAGE_LIST_DIGEST}
+	crictl_pull ${IMAGE_LIST_DIGEST}
 
 	imageid=$(crictl images --quiet ${IMAGE_LIST_DIGEST})
 	[ "$imageid" != "" ]
@@ -169,8 +173,8 @@ function teardown() {
 	[ "$output" != "" ]
 	[[ "$output" == *"RepoDigests: ${IMAGE_LIST_DIGEST}"* ]]
 
-	case $(go env GOARCH) in
-	amd64)
+	case $ARCH in
+	x86_64)
 		output=$(crictl images -v ${IMAGE_LIST_DIGEST_AMD64})
 		[ "$output" != "" ]
 		[[ "$output" == *"RepoDigests: ${IMAGE_LIST_DIGEST_AMD64}"* ]]
@@ -186,7 +190,7 @@ function teardown() {
 @test "image pull and list by manifest list tag" {
 	start_crio
 
-	crictl pull ${IMAGE_LIST_TAG}
+	crictl_pull ${IMAGE_LIST_TAG}
 	imageid=$(crictl images --quiet ${IMAGE_LIST_TAG})
 	[ "$imageid" != "" ]
 
@@ -199,8 +203,8 @@ function teardown() {
 	fi
 	[[ "$output" == *"RepoDigests: ${IMAGE_LIST_DIGEST_FOR_TAG}"* ]]
 
-	case $(go env GOARCH) in
-	amd64)
+	case $ARCH in
+	x86_64)
 		output=$(crictl images -v ${IMAGE_LIST_DIGEST_FOR_TAG_AMD64})
 		[[ "$output" == *"RepoDigests: ${IMAGE_LIST_DIGEST_FOR_TAG_AMD64}"* ]]
 		;;
@@ -215,13 +219,13 @@ function teardown() {
 @test "image pull and list by manifest list and individual digest" {
 	start_crio
 
-	crictl pull ${IMAGE_LIST_DIGEST}
+	crictl_pull ${IMAGE_LIST_DIGEST}
 	imageid=$(crictl images --quiet ${IMAGE_LIST_DIGEST})
 	[ "$imageid" != "" ]
 
-	case $(go env GOARCH) in
-	amd64)
-		crictl pull ${IMAGE_LIST_DIGEST_AMD64}
+	case $ARCH in
+	x86_64)
+		crictl_pull ${IMAGE_LIST_DIGEST_AMD64}
 		output=$(crictl images -v ${IMAGE_LIST_DIGEST_AMD64})
 		[[ "$output" == *"RepoDigests: ${IMAGE_LIST_DIGEST_AMD64}"* ]]
 		;;
@@ -239,15 +243,15 @@ function teardown() {
 @test "image pull and list by individual and manifest list digest" {
 	start_crio
 
-	case $(go env GOARCH) in
-	amd64)
-		crictl pull ${IMAGE_LIST_DIGEST_AMD64}
+	case $ARCH in
+	x86_64)
+		crictl_pull ${IMAGE_LIST_DIGEST_AMD64}
 		output=$(crictl images -v ${IMAGE_LIST_DIGEST_AMD64})
 		[[ "$output" == *"RepoDigests: ${IMAGE_LIST_DIGEST_AMD64}"* ]]
 		;;
 	esac
 
-	crictl pull ${IMAGE_LIST_DIGEST}
+	crictl_pull ${IMAGE_LIST_DIGEST}
 
 	imageid=$(crictl images --quiet ${IMAGE_LIST_DIGEST})
 	[ "$imageid" != "" ]
@@ -263,7 +267,7 @@ function teardown() {
 
 @test "image list with filter" {
 	start_crio
-	crictl pull "$IMAGE"
+	crictl_pull "$IMAGE"
 	output=$(crictl images --quiet "$IMAGE")
 	[ "$output" != "" ]
 	for id in $output; do
@@ -276,7 +280,7 @@ function teardown() {
 
 @test "image list/remove" {
 	start_crio
-	crictl pull "$IMAGE"
+	crictl_pull "$IMAGE"
 	output=$(crictl images --quiet)
 	[ "$output" != "" ]
 	for id in $output; do
@@ -290,7 +294,7 @@ function teardown() {
 
 @test "image status/remove" {
 	start_crio
-	crictl pull "$IMAGE"
+	crictl_pull "$IMAGE"
 	output=$(crictl images --quiet)
 	[ "$output" != "" ]
 	for id in $output; do
@@ -308,6 +312,8 @@ function teardown() {
 	if [ -z "$CRUN_WASM_BINARY" ] || [[ "$RUNTIME_TYPE" == "vm" ]]; then
 		skip "crun-wasm not installed or runtime type is VM"
 	fi
+	setup_crio
+
 	cat << EOF > "$CRIO_CONFIG_DIR/99-crun-wasm.conf"
 [crio.runtime]
 default_runtime = "crun-wasm"
@@ -317,10 +323,21 @@ runtime_path = "/usr/bin/crun"
 
 platform_runtime_paths = {"wasi/wasm32" = "/usr/bin/crun-wasm", "abc/def" = "/usr/bin/acme"}
 EOF
-	start_crio
+	unset CONTAINER_DEFAULT_RUNTIME
+	unset CONTAINER_RUNTIMES
+
+	start_crio_no_setup
+
+	# these two variables are used by this test
+	json=$(crictl images -o json)
+	eval "$(jq -r '.images[] |
+        select(.repoTags[0] == "quay.io/crio/hello-wasm:latest") |
+        "WASM_IMAGEID=" + .id + "\n" +
+        "WASM_IMAGEDIGEST=" + .repoDigests[0] + "\n" +
+	"REDIS_IMAGEREF=" + .repoDigests[0]' <<< "$json")"
 
 	jq '.metadata.name = "podsandbox-wasm"
-		|.image.image = "quay.io/crio/hello-wasm:latest"
+		| .image.image = "'"$WASM_IMAGEID"'" | .image.user_specified_image = "'"$WASM_IMAGEDIGEST"'"
 		| del(.command, .args, .linux.resources)' \
 		"$TESTDATA"/container_config.json > "$TESTDIR/wasm.json"
 
@@ -335,7 +352,7 @@ EOF
 pinned_images = [ "quay.io/crio/hello-wasm:latest" ]
 EOF
 	start_crio
-	crictl pull quay.io/crio/hello-wasm:latest
+	crictl_pull quay.io/crio/hello-wasm:latest
 	output=$(crictl images -o json | jq '.images[] | select(.repoTags[] == "quay.io/crio/hello-wasm:latest") | .pinned')
 	[ "$output" == "true" ]
 }
@@ -348,8 +365,9 @@ EOF
 		"$TESTDATA"/container_config.json > "$TESTDIR/timezone.json"
 
 	ctr_id=$(crictl run "$TESTDIR/timezone.json" "$TESTDATA/sandbox_config.json")
-	output=$(crictl exec "$ctr_id" date +"%a %b %e %H:%M:%S %Z %Y")
-	expected_output=$(TZ="Asia/Singapore" date +"%a %b %e %H:%M:%S %Z %Y")
+	datestr=$(date +%s)
+	output=$(crictl exec "$ctr_id" date -d "@$datestr" +"%a %b %e %H:%M:%S %Z %Y")
+	expected_output=$(TZ="Asia/Singapore" date -d "@$datestr" +"%a %b %e %H:%M:%S %Z %Y")
 	[[ "$output" == *"$expected_output"* ]]
 }
 
@@ -361,7 +379,77 @@ EOF
 		"$TESTDATA"/container_config.json > "$TESTDIR/empty_timezone.json"
 
 	ctr_id=$(crictl run "$TESTDIR/empty_timezone.json" "$TESTDATA/sandbox_config.json")
-	output=$(crictl exec "$ctr_id" date +"%a %b %e %H:%M:%S %Z %Y")
-	expected_output=$(date +"%a %b %e %H:%M:%S %Z %Y")
+	datestr=$(date +%s)
+	output=$(crictl exec "$ctr_id" date -d "@$datestr" +"%a %b %e %H:%M:%S %Z %Y")
+	expected_output=$(date -d "@$datestr" +"%a %b %e %H:%M:%S %Z %Y")
 	[[ "$output" == *"$expected_output"* ]]
+}
+
+@test "pull progress timeout should trigger when being set too low" {
+	CONTAINER_PULL_PROGRESS_TIMEOUT=1ms start_crio
+
+	run ! crictl pull "$IMAGE_LIST_TAG"
+	[[ "$output" == *"context canceled"* ]]
+}
+
+@test "pull progress timeout should not timeout when set to 0" {
+	CONTAINER_PULL_PROGRESS_TIMEOUT=0 start_crio
+
+	crictl_pull "$IMAGE_LIST_TAG"
+}
+
+@test "short name mode enabled should fail to pull ambiguous image" {
+	start_crio
+
+	# Use a name without a shortname alias so it remains ambiguous
+	run crictl pull ambiguous-test-image
+	[[ "$output" == *"short name mode is enforcing, but image name ambiguous-test-image returns ambiguous list"* ]]
+	[[ "$status" -ne 0 ]]
+}
+
+@test "short name mode disabled should succeed to pull ambiguous image" {
+	CONTAINER_SHORT_NAME_MODE="disabled" start_crio
+
+	# There should be many nginx images
+	crictl_pull nginx
+}
+
+@test "image pull returns image ID not repo digest" {
+	start_crio
+
+	# Pull an image and capture the returned image reference
+	pulled_ref=$(crictl_pull "$IMAGE")
+
+	# Extract the image ID from crictl output
+	# crictl may output "Image is up to date for <id>" or just "<id>"
+	# We want just the ID part (the last word)
+	pulled_id=$(echo "$pulled_ref" | awk '{print $NF}')
+
+	# Ensure we actually got an ID back (format is storage-defined)
+	[ "$pulled_id" != "" ]
+
+	# Get the image status for the same image
+	imageid=$(crictl images --quiet "$IMAGE")
+	[ "$imageid" != "" ]
+
+	# The pulled reference should match the image ID from ImageStatus
+	# Both PullImage and GetImageRef (via ImageStatus) should return the same value
+	# to ensure Kubernetes credential verification works correctly
+	[ "$pulled_id" = "$imageid" ]
+
+	# Verify we can use the image ID to inspect the image
+	output=$(crictl inspecti "$imageid")
+	[[ "$output" == *"$IMAGE"* ]]
+
+	cleanup_images
+}
+
+@test "image pull should not fall back to OCI artifact on network error" {
+	start_crio
+
+	# 192.0.2.1 is TEST-NET-1 (RFC 5737), guaranteed unreachable
+	run ! crictl pull 192.0.2.1/test/image:latest
+
+	# Network errors should not trigger the OCI artifact fallback
+	run ! grep -q "Falling back" "$CRIO_LOG"
 }

@@ -4,69 +4,122 @@ import (
 	"context"
 	"strings"
 
-	"github.com/cri-o/cri-o/internal/log"
-	oci "github.com/cri-o/cri-o/internal/oci"
 	"k8s.io/apimachinery/pkg/fields"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/log"
+	oci "github.com/cri-o/cri-o/internal/oci"
 )
 
-// filterContainer returns whether passed container matches filtering criteria
+// filterContainer returns whether passed container matches filtering criteria.
 func filterContainer(c *types.Container, filter *types.ContainerFilter) bool {
 	if filter != nil {
-		if filter.State != nil {
-			if c.State != filter.State.State {
+		if filter.GetState() != nil {
+			if c.GetState() != filter.GetState().GetState() {
 				return false
 			}
 		}
+
 		if filter.LabelSelector != nil {
-			sel := fields.SelectorFromSet(filter.LabelSelector)
-			if !sel.Matches(fields.Set(c.Labels)) {
+			sel := fields.SelectorFromSet(filter.GetLabelSelector())
+			if !sel.Matches(fields.Set(c.GetLabels())) {
 				return false
 			}
 		}
 	}
+
 	return true
 }
 
 // filterContainerList applies a protobuf-defined filter to retrieve only intended containers. Not matching
 // the filter is not considered an error but will return an empty response.
-func (s *Server) filterContainerList(ctx context.Context, filter *types.ContainerFilter, origCtrList []*oci.Container) []*oci.Container {
+func (s *Server) filterContainerList(
+	ctx context.Context,
+	filter *types.ContainerFilter,
+	origCtrList []*oci.Container,
+) []*oci.Container {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
 	// Filter using container id and pod id first.
-	if filter.Id != "" {
-		c, err := s.ContainerServer.GetContainerFromShortID(ctx, filter.Id)
+	if filter.GetId() != "" {
+		c, err := s.GetContainerFromShortID(ctx, filter.GetId())
 		if err != nil {
 			// If we don't find a container ID with a filter, it should not
 			// be considered an error.  Log a warning and return an empty struct
-			log.Warnf(ctx, "Unable to find container ID %s", filter.Id)
+			log.Warnf(ctx, "Unable to find container ID %s", filter.GetId())
+
 			return nil
 		}
+
 		switch {
-		case filter.PodSandboxId == "":
+		case filter.GetPodSandboxId() == "":
 			return []*oci.Container{c}
-		case strings.HasPrefix(c.Sandbox(), filter.PodSandboxId):
+		case strings.HasPrefix(c.Sandbox(), filter.GetPodSandboxId()):
 			return []*oci.Container{c}
 		default:
 			return nil
 		}
-	} else if filter.PodSandboxId != "" {
-		sb, err := s.getPodSandboxFromRequest(ctx, filter.PodSandboxId)
+	} else if filter.GetPodSandboxId() != "" {
+		sb, err := s.getPodSandboxFromRequest(ctx, filter.GetPodSandboxId())
 		if err != nil {
 			return nil
 		}
+
 		return sb.Containers().List()
 	}
+
 	log.Debugf(ctx, "No filters were applied, returning full container list")
+
 	return origCtrList
 }
 
 // ListContainers lists all containers by filters.
-func (s *Server) ListContainers(ctx context.Context, req *types.ListContainersRequest) (*types.ListContainersResponse, error) {
+func (s *Server) ListContainers(
+	ctx context.Context,
+	req *types.ListContainersRequest,
+) (*types.ListContainersResponse, error) {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
-	var ctrs []*types.Container
-	filter := req.Filter
+
+	ctrs, err := s.listContainers(ctx, req.GetFilter())
+	if err != nil {
+		return nil, err
+	}
+
+	return &types.ListContainersResponse{
+		Containers: ctrs,
+	}, nil
+}
+
+// StreamContainers returns a stream of containers.
+func (s *Server) StreamContainers(
+	req *types.StreamContainersRequest,
+	stream types.RuntimeService_StreamContainersServer,
+) error {
+	ctx := stream.Context()
+
+	ctrs, err := s.listContainers(ctx, req.GetFilter())
+	if err != nil {
+		return err
+	}
+
+	for i := 0; i < len(ctrs); i += streamChunkSize {
+		end := min(i+streamChunkSize, len(ctrs))
+		if err := stream.Send(&types.StreamContainersResponse{
+			Containers: ctrs[i:end],
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// listContainers returns a filtered list of Container objects.
+func (s *Server) listContainers(
+	ctx context.Context,
+	filter *types.ContainerFilter,
+) ([]*types.Container, error) {
 	ctrList, err := s.ContainerServer.ListContainers()
 	if err != nil {
 		return nil, err
@@ -76,19 +129,20 @@ func (s *Server) ListContainers(ctx context.Context, req *types.ListContainersRe
 		ctrList = s.filterContainerList(ctx, filter, ctrList)
 	}
 
+	var ctrs []*types.Container
+
 	for _, ctr := range ctrList {
 		// Skip over containers that are still being created
 		if !ctr.Created() {
 			continue
 		}
+
 		c := ctr.CRIContainer()
 		// Filter by other criteria such as state and labels.
-		if filterContainer(c, req.Filter) {
+		if filterContainer(c, filter) {
 			ctrs = append(ctrs, c)
 		}
 	}
 
-	return &types.ListContainersResponse{
-		Containers: ctrs,
-	}, nil
+	return ctrs, nil
 }

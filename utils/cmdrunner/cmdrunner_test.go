@@ -3,9 +3,10 @@ package cmdrunner_test
 import (
 	"os/exec"
 
-	"github.com/cri-o/cri-o/utils/cmdrunner"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/cri-o/cri-o/utils/cmdrunner"
 )
 
 var _ = t.Describe("CommandRunner", func() {
@@ -23,6 +24,7 @@ var _ = t.Describe("CommandRunner", func() {
 	It("command should not prepend if not configured", func() {
 		// Given
 		cmdrunner.ResetPrependedCmd()
+
 		cmd := "ls"
 		baseline, err := exec.Command(cmd).CombinedOutput()
 		Expect(err).ToNot(HaveOccurred())
@@ -38,8 +40,11 @@ var _ = t.Describe("CommandRunner", func() {
 	It("command should prepend if configured", func() {
 		// Given
 		cmdrunner.ResetPrependedCmd()
+
 		cmd := "ls"
+
 		cmdrunner.PrependCommandsWith("which")
+
 		baseline, err := exec.Command(cmd).CombinedOutput()
 		Expect(err).ToNot(HaveOccurred())
 
@@ -54,8 +59,11 @@ var _ = t.Describe("CommandRunner", func() {
 	It("command should not prepend if only args are configured", func() {
 		// Given
 		cmdrunner.ResetPrependedCmd()
+
 		cmd := "ls"
+
 		cmdrunner.PrependCommandsWith("", "-l")
+
 		baseline, err := exec.Command(cmd).CombinedOutput()
 		Expect(err).ToNot(HaveOccurred())
 

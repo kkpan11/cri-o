@@ -8,7 +8,7 @@ import (
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Status", func() {
 	// Prepare the sut
 	BeforeEach(func() {
@@ -27,9 +27,10 @@ var _ = t.Describe("Status", func() {
 			// Then
 			Expect(err).ToNot(HaveOccurred())
 			Expect(response).NotTo(BeNil())
-			Expect(len(response.Status.Conditions)).To(BeEquivalentTo(2))
-			for _, condition := range response.Status.Conditions {
-				Expect(condition.Status).To(BeTrue())
+			Expect(len(response.GetStatus().GetConditions())).To(BeEquivalentTo(2))
+
+			for _, condition := range response.GetStatus().GetConditions() {
+				Expect(condition.GetStatus()).To(BeTrue())
 			}
 		})
 
@@ -41,9 +42,10 @@ var _ = t.Describe("Status", func() {
 			// Then
 			Expect(err).ToNot(HaveOccurred())
 			Expect(response).NotTo(BeNil())
-			Expect(len(response.Status.Conditions)).To(BeEquivalentTo(2))
-			for _, condition := range response.Status.Conditions {
-				Expect(condition.Status).To(BeTrue())
+			Expect(len(response.GetStatus().GetConditions())).To(BeEquivalentTo(2))
+
+			for _, condition := range response.GetStatus().GetConditions() {
+				Expect(condition.GetStatus()).To(BeTrue())
 			}
 		})
 
@@ -55,7 +57,7 @@ var _ = t.Describe("Status", func() {
 			// Then
 			Expect(err).ToNot(HaveOccurred())
 			Expect(response).NotTo(BeNil())
-			Expect(response.Info).NotTo(BeNil())
+			Expect(response.GetInfo()).NotTo(BeNil())
 		})
 	})
 })

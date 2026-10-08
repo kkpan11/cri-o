@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/opencontainers/runc/libcontainer/devices"
+	"github.com/moby/sys/devices"
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 )
 
 // DeviceAnnotationDelim is the character
 // used to separate devices in the annotation
-// `io.kubernetes.cri-o.Devices`
+// `io.kubernetes.cri-o.Devices`.
 const DeviceAnnotationDelim = ","
 
 // Config is the internal device configuration
@@ -22,13 +22,13 @@ type Config struct {
 }
 
 // Device holds the runtime spec
-// fields needed for a device
+// fields needed for a device.
 type Device struct {
 	Device   rspec.LinuxDevice
 	Resource rspec.LinuxDeviceCgroup
 }
 
-// New creates a new device Config
+// New creates a new device Config.
 func New() *Config {
 	return &Config{
 		devices: make([]Device, 0),
@@ -44,18 +44,21 @@ func (d *Config) LoadDevices(devsFromConfig []string) error {
 	if err != nil {
 		return err
 	}
+
 	d.devices = devs
+
 	return nil
 }
 
 // DevicesFromAnnotation takes an annotation string of the form
 // io.kubernetes.cri-o.Device=$PATH:$PATH:$MODE,$PATH...
-// and returns a Device object that can be passed to a create config
+// and returns a Device object that can be passed to a create config.
 func DevicesFromAnnotation(annotation string, allowedDevices []string) ([]Device, error) {
 	allowedMap := make(map[string]struct{})
 	for _, d := range allowedDevices {
 		allowedMap[d] = struct{}{}
 	}
+
 	return devicesFromStrings(strings.Split(annotation, DeviceAnnotationDelim), allowedMap)
 }
 
@@ -64,8 +67,11 @@ func DevicesFromAnnotation(annotation string, allowedDevices []string) ([]Device
 // The second is where the device will be put in the container (optional)
 // and the third is the mode the device will be mounted with (optional)
 // It returns a slice of Device structs, ready to be saved or given to a container
-// runtime spec generator
-func devicesFromStrings(devsFromConfig []string, allowedDevices map[string]struct{}) ([]Device, error) {
+// runtime spec generator.
+func devicesFromStrings(
+	devsFromConfig []string,
+	allowedDevices map[string]struct{},
+) ([]Device, error) {
 	linuxdevs := make([]Device, 0, len(devsFromConfig))
 
 	for _, d := range devsFromConfig {
@@ -73,6 +79,7 @@ func devicesFromStrings(devsFromConfig []string, allowedDevices map[string]struc
 		if d == "" {
 			continue
 		}
+
 		src, dst, permissions, err := parseDevice(d)
 		if err != nil {
 			return nil, err
@@ -120,21 +127,24 @@ func devicesFromStrings(devsFromConfig []string, allowedDevices map[string]struc
 	return linuxdevs, nil
 }
 
-// Devices returns the devices saved in the Config
+// Devices returns the devices saved in the Config.
 func (d *Config) Devices() []Device {
 	return d.devices
 }
 
-// ParseDevice parses device mapping string to a src, dest & permissions string
+// ParseDevice parses device mapping string to a src, dest & permissions string.
 func parseDevice(device string) (src, dst, permissions string, err error) {
 	permissions = "rwm"
+
 	arr := strings.Split(device, ":")
 	switch len(arr) {
 	case 3:
 		if !isValidDeviceMode(arr[2]) {
 			return "", "", "", fmt.Errorf("invalid device mode: %s", arr[2])
 		}
+
 		permissions = arr[2]
+
 		fallthrough
 	case 2:
 		if isValidDeviceMode(arr[1]) {
@@ -143,8 +153,10 @@ func parseDevice(device string) (src, dst, permissions string, err error) {
 			if arr[1] != "" && arr[1][0] != '/' {
 				return "", "", "", fmt.Errorf("invalid device mode: %s", arr[1])
 			}
+
 			dst = arr[1]
 		}
+
 		fallthrough
 	case 1:
 		src = arr[0]
@@ -155,6 +167,7 @@ func parseDevice(device string) (src, dst, permissions string, err error) {
 	if dst == "" {
 		dst = src
 	}
+
 	return src, dst, permissions, nil
 }
 
@@ -166,14 +179,18 @@ func isValidDeviceMode(mode string) bool {
 		'w': true,
 		'm': true,
 	}
+
 	if mode == "" {
 		return false
 	}
+
 	for _, c := range mode {
 		if !legalDeviceMode[c] {
 			return false
 		}
+
 		legalDeviceMode[c] = false
 	}
+
 	return true
 }

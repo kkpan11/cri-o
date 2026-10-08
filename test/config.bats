@@ -55,17 +55,19 @@ function teardown() {
 @test "choose different default runtime should succeed" {
 	# when
 	unset CONTAINER_RUNTIMES
-	RES=$("$CRIO_BINARY_PATH" -c "$TESTDATA"/50-crun-default.conf -d "" config 2>&1)
+	unset CONTAINER_DEFAULT_RUNTIME
+	RES=$("$CRIO_BINARY_PATH" -c "$TESTDATA"/50-runc-default.conf -d "" config 2>&1)
 
 	# then
-	[[ "$RES" == *"default_runtime = \"crun\""* ]]
-	[[ "$RES" == *"crio.runtime.runtimes.runc"* ]]
+	[[ "$RES" == *"default_runtime = \"runc\""* ]]
 	[[ "$RES" == *"crio.runtime.runtimes.crun"* ]]
+	[[ "$RES" == *"crio.runtime.runtimes.runc"* ]]
 }
 
 @test "runc not existing when default_runtime changed should succeed" {
 	# when
 	unset CONTAINER_RUNTIMES
+	unset CONTAINER_DEFAULT_RUNTIME
 	cat << EOF > "$TESTDIR"/50-runc-new-path.conf
 [crio.runtime]
 default_runtime = "crun"
@@ -83,19 +85,18 @@ EOF
 }
 
 @test "retain default runtime should succeed" {
+	unset CONTAINER_DEFAULT_RUNTIME
 	# when
-	RES=$("$CRIO_BINARY_PATH" -c "$TESTDATA"/50-crun.conf -d "" config 2>&1)
+	RES=$("$CRIO_BINARY_PATH" -c "$TESTDATA"/50-runc.conf -d "" config 2>&1)
 
 	# then
-	[[ "$RES" != *"default_runtime = \"crun\""* ]]
+	[[ "$RES" != *"default_runtime = \"runc\""* ]]
 	[[ "$RES" == *"crio.runtime.runtimes.runc"* ]]
 	[[ "$RES" == *"crio.runtime.runtimes.crun"* ]]
 }
 
 @test "monitor fields should be translated" {
-	if [[ "$RUNTIME_TYPE" == "vm" ]]; then
-		skip "not applicable to vm runtime type"
-	fi
+	unset CONTAINER_DEFAULT_RUNTIME
 	# when
 	RES=$("$CRIO_BINARY_PATH" --conmon-cgroup="pod" --conmon="/bin/true" -c "" -d "" config 2>&1)
 
@@ -109,8 +110,8 @@ EOF
 	unset CONTAINER_DEFAULT_RUNTIME
 	cat << EOF >> "$TESTDIR"/workload.conf
 [crio.runtime.workloads.userns]
-activation_annotation = "io.kubernetes.cri-o.userns-mode"
-allowed_annotations = ["io.kubernetes.cri-o.userns-mode"]
+activation_annotation = "userns-mode.crio.io"
+allowed_annotations = ["userns-mode.crio.io"]
 EOF
 
 	# then

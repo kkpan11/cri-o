@@ -11,57 +11,79 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/containers/kubensmnt"
-	"github.com/containers/storage/pkg/reexec"
-	"github.com/cri-o/cri-o/internal/criocli"
-	"github.com/cri-o/cri-o/internal/log"
-	"github.com/cri-o/cri-o/internal/opentelemetry"
-	"github.com/cri-o/cri-o/internal/signals"
-	"github.com/cri-o/cri-o/internal/version"
-	libconfig "github.com/cri-o/cri-o/pkg/config"
-	"github.com/cri-o/cri-o/server"
-	otel_collector "github.com/cri-o/cri-o/server/otel-collector"
-	"github.com/cri-o/cri-o/utils"
-	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	"github.com/sirupsen/logrus"
 	"github.com/soheilhy/cmux"
 	"github.com/uptrace/opentelemetry-go-extra/otellogrus"
 	"github.com/urfave/cli/v2"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.podman.io/storage/pkg/reexec"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	v1 "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/criocli"
+	"github.com/cri-o/cri-o/internal/log"
+	"github.com/cri-o/cri-o/internal/log/interceptors"
+	"github.com/cri-o/cri-o/internal/opentelemetry"
+	"github.com/cri-o/cri-o/internal/signals"
+	"github.com/cri-o/cri-o/internal/version"
+	libconfig "github.com/cri-o/cri-o/pkg/config"
+	"github.com/cri-o/cri-o/server"
+	"github.com/cri-o/cri-o/server/metrics"
+	"github.com/cri-o/cri-o/utils"
 )
 
 func writeCrioGoroutineStacks() {
-	path := filepath.Join("/tmp", fmt.Sprintf(
-		"crio-goroutine-stacks-%s.log",
-		strings.ReplaceAll(time.Now().Format(time.RFC3339), ":", ""),
-	))
+	path := filepath.Join(
+		os.TempDir(),
+		fmt.Sprintf("crio-goroutine-stacks-%s.log", criocli.Timestamp()),
+	)
 	if err := utils.WriteGoroutineStacksToFile(path); err != nil {
 		logrus.Warnf("Failed to write goroutine stacks: %s", err)
 	}
 }
 
-func catchShutdown(ctx context.Context, cancel context.CancelFunc, gserver *grpc.Server, tp *sdktrace.TracerProvider, sserver *server.Server, hserver *http.Server, signalled *bool) {
+func catchShutdown(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	gserver *grpc.Server,
+	tp *sdktrace.TracerProvider,
+	streamingServer *server.Server,
+	hserver *http.Server,
+	signalled *bool,
+) {
 	sig := make(chan os.Signal, 2048)
-	signal.Notify(sig, signals.Interrupt, signals.Term, unix.SIGUSR1, unix.SIGUSR2, unix.SIGPIPE, signals.Hup)
+	signal.Notify(
+		sig,
+		signals.Interrupt,
+		signals.Term,
+		unix.SIGUSR1,
+		unix.SIGUSR2,
+		unix.SIGPIPE,
+		signals.Hup,
+	)
+
 	go func() {
 		for s := range sig {
 			log.WithFields(ctx, logrus.Fields{
 				"signal": s,
-			}).Debug("received signal")
+			}).Debug("Received signal")
+
 			switch s {
 			case unix.SIGUSR1:
 				writeCrioGoroutineStacks()
+
 				continue
 			case unix.SIGUSR2:
 				runtime.GC()
+
 				continue
 			case unix.SIGPIPE:
 				continue
@@ -72,22 +94,29 @@ func catchShutdown(ctx context.Context, cancel context.CancelFunc, gserver *grpc
 			default:
 				continue
 			}
+
 			*signalled = true
+
 			if tp != nil {
 				if err := tp.Shutdown(ctx); err != nil {
 					log.Warnf(ctx, "Error shutting down opentelemetry tracer provider: %v", err)
 				}
 			}
+
 			gserver.GracefulStop()
-			hserver.Shutdown(ctx) // nolint: errcheck
-			if err := sserver.StopStreamServer(); err != nil {
+			hserver.Shutdown(ctx) //nolint:errcheck // best-effort shutdown during graceful stop
+
+			if err := streamingServer.StopStreamServer(); err != nil {
 				log.Warnf(ctx, "Error shutting down streaming server: %v", err)
 			}
-			sserver.StopMonitors()
+
+			streamingServer.StopMonitors()
 			cancel()
-			if err := sserver.Shutdown(ctx); err != nil {
+
+			if err := streamingServer.Shutdown(ctx); err != nil {
 				log.Warnf(ctx, "Error shutting down main service %v", err)
 			}
+
 			return
 		}
 	}()
@@ -119,6 +148,7 @@ func main() {
 	if reexec.Init() {
 		return
 	}
+
 	app := cli.NewApp()
 
 	app.Name = "crio"
@@ -132,7 +162,9 @@ func main() {
 		logrus.Fatal(err)
 	}
 
-	app.Version = version.Version + "\n" + info.String()
+	app.Version = strings.TrimSpace(
+		strings.ReplaceAll(strings.TrimPrefix(info.String(), "Version: "), "\n", "\n   "),
+	)
 
 	app.Flags, app.Metadata, err = criocli.GetFlagsAndMetadata()
 	if err != nil {
@@ -148,30 +180,35 @@ func main() {
 	}
 
 	app.Commands = criocli.DefaultCommands
-	app.Commands = append(app.Commands, []*cli.Command{
+	app.Commands = append(app.Commands,
+		criocli.CheckCommand,
 		criocli.ConfigCommand,
 		criocli.PublishCommand,
+		criocli.StatusCommand,
 		criocli.VersionCommand,
 		criocli.WipeCommand,
-		criocli.StatusCommand,
-	}...)
+	)
+
+	slices.SortFunc(app.Commands, func(a, b *cli.Command) int {
+		return strings.Compare(a.Name, b.Name)
+	})
 
 	app.Before = func(c *cli.Context) (err error) {
-		config, err := criocli.GetAndMergeConfigFromContext(c)
-		if err != nil {
-			return err
-		}
-
 		logrus.SetFormatter(&logrus.TextFormatter{
-			TimestampFormat: "2006-01-02 15:04:05.000000000Z07:00",
+			TimestampFormat: time.RFC3339Nano,
 			FullTimestamp:   true,
 		})
-		info.LogVersion()
+
+		config, err := criocli.GetAndMergeConfigFromContext(c)
+		if err != nil {
+			return fmt.Errorf("get and merge config from context: %w", err)
+		}
 
 		level, err := logrus.ParseLevel(config.LogLevel)
 		if err != nil {
 			return err
 		}
+
 		logrus.SetLevel(level)
 		logrus.AddHook(log.NewFilenameHook())
 		logrus.AddHook(otellogrus.NewHook(otellogrus.WithLevels(
@@ -188,6 +225,7 @@ func main() {
 		if err != nil {
 			return err
 		}
+
 		logrus.AddHook(filterHook)
 
 		if path := c.String("log"); path != "" {
@@ -195,6 +233,7 @@ func main() {
 			if err != nil {
 				return err
 			}
+
 			logrus.SetOutput(f)
 		}
 
@@ -211,7 +250,9 @@ func main() {
 	}
 
 	app.Action = func(c *cli.Context) error {
-		ctx, cancel := context.WithCancel(context.Background())
+		info.LogVersion()
+
+		ctx, cancel := context.WithCancel(c.Context)
 
 		cpuProfilePath := c.String("profile-cpu")
 		if cpuProfilePath != "" {
@@ -220,22 +261,27 @@ func main() {
 			file, err := os.Create(cpuProfilePath)
 			if err != nil {
 				cancel()
+
 				return fmt.Errorf("could not create CPU profile: %w", err)
 			}
 			defer file.Close()
 
 			if err := pprof.StartCPUProfile(file); err != nil {
 				cancel()
+
 				return fmt.Errorf("could not start CPU profiling: %w", err)
 			}
+
 			defer pprof.StopCPUProfile()
 		}
 
 		if c.Bool("profile") {
 			profilePort := c.Int("profile-port")
-			profileEndpoint := fmt.Sprintf("localhost:%v", profilePort)
+			profileEndpoint := fmt.Sprintf("127.0.0.1:%d", profilePort)
+
 			go func() {
 				logrus.Debugf("Starting profiling server on %v", profileEndpoint)
+
 				if err := http.ListenAndServe(profileEndpoint, nil); err != nil {
 					logrus.Fatalf("Unable to run profiling server: %v", err)
 				}
@@ -244,6 +290,7 @@ func main() {
 
 		if c.Args().Len() > 0 {
 			cancel()
+
 			return fmt.Errorf("command %q not supported", c.Args().Get(0))
 		}
 
@@ -260,13 +307,43 @@ func main() {
 		config, ok := c.App.Metadata["config"].(*libconfig.Config)
 		if !ok {
 			cancel()
+
 			return errors.New("type assertion error when accessing server config")
 		}
 
 		// Validate the configuration during runtime
 		if err := config.Validate(true); err != nil {
 			cancel()
+
 			return err
+		}
+
+		// Print the current CLI flags.
+		for _, flagName := range c.FlagNames() {
+			flagValue := c.Value(flagName)
+			// Turn a multi-value flag into a single comma-separated list
+			// of arguments, then wrap into a slice so that %v does it work
+			// for us when rendering a slice type in the output.
+			if _, ok := flagValue.(cli.StringSlice); ok {
+				flagValue = []string{strings.Join(c.StringSlice(flagName), ",")}
+			}
+
+			logrus.Infof("FLAG: --%s=\"%v\"\n", flagName, flagValue)
+		}
+
+		// TODO: delete this check in future releases
+		if _, ok := os.LookupEnv("CONTAINER_INCLUDED_POD_METRCIS"); ok {
+			logrus.Warnf(
+				"CONTAINER_INCLUDED_POD_METRCIS (typo) will be ineffective in future releases. Use CONTAINER_INCLUDED_POD_METRICS instead.",
+			)
+		}
+
+		// Print the current configuration.
+		tomlConfig, err := config.ToString()
+		if err != nil {
+			logrus.Errorf("Unable to print current configuration: %v", err)
+		} else {
+			logrus.Infof("Current CRI-O configuration:\n%s", tomlConfig)
 		}
 
 		lis, err := server.Listen("unix", config.Listen)
@@ -282,6 +359,7 @@ func main() {
 			tracerProvider *sdktrace.TracerProvider
 			opts           []otelgrpc.Option
 		)
+
 		if config.EnableTracing {
 			tracerProvider, opts, err = opentelemetry.InitTracing(
 				ctx,
@@ -292,13 +370,10 @@ func main() {
 				logrus.Fatalf("Failed to initialize tracer provider: %v", err)
 			}
 		}
+
 		grpcServer := grpc.NewServer(
-			grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(
-				otel_collector.UnaryInterceptor(),
-			)),
-			grpc.StreamInterceptor(grpc_middleware.ChainStreamServer(
-				otel_collector.StreamInterceptor(),
-			)),
+			grpc.UnaryInterceptor(interceptors.UnaryInterceptor()),
+			grpc.StreamInterceptor(interceptors.StreamInterceptor()),
 			grpc.StatsHandler(otelgrpc.NewServerHandler(opts...)),
 			grpc.MaxSendMsgSize(config.GRPCMaxSendMsgSize),
 			grpc.MaxRecvMsgSize(config.GRPCMaxRecvMsgSize),
@@ -326,7 +401,10 @@ func main() {
 				logrus.Error(err)
 			}
 
-			if err := os.MkdirAll(filepath.Dir(config.CleanShutdownSupportedFileName()), 0o755); err != nil {
+			if err := os.MkdirAll(
+				filepath.Dir(config.CleanShutdownSupportedFileName()),
+				0o755,
+			); err != nil {
 				logrus.Errorf("Creating clean shutdown supported parent directory: %v", err)
 			}
 
@@ -338,6 +416,7 @@ func main() {
 			if err != nil {
 				logrus.Errorf("Writing clean shutdown supported file: %v", err)
 			}
+
 			f.Close()
 
 			// and sync the changes to disk
@@ -346,11 +425,18 @@ func main() {
 			}
 		}
 
+		// Set the default runtime metric after config has been validated.
+		// This is done here rather than in pkg/config to avoid cyclic imports.
+		metrics.Instance().MetricDefaultRuntimeSet(config.DefaultRuntime)
+
 		// We always use 'Volatile: true' when creating containers, which means that in
 		// the event of an unclean shutdown, we might lose track of containers and layers.
 		// We need to call the garbage collection function to clean up the redundant files.
 		if err := crioServer.Store().GarbageCollect(); err != nil {
-			logrus.Errorf("Attempts to clean up unreferenced old container leftovers failed: %v", err)
+			logrus.Errorf(
+				"Attempts to clean up unreferenced old container leftovers failed: %v",
+				err,
+			)
 		}
 
 		v1.RegisterRuntimeServiceServer(grpcServer, crioServer)
@@ -362,11 +448,13 @@ func main() {
 		go func() {
 			crioServer.StartExitMonitor(ctx)
 		}()
+
 		hookSync := make(chan error, 2)
-		if crioServer.ContainerServer.Hooks == nil {
+		if crioServer.Hooks == nil {
 			hookSync <- err // so we don't block during cleanup
 		} else {
-			go crioServer.ContainerServer.Hooks.Monitor(ctx, hookSync)
+			go crioServer.Hooks.Monitor(ctx, hookSync)
+
 			err = <-hookSync
 			if err != nil {
 				cancel()
@@ -375,7 +463,9 @@ func main() {
 		}
 
 		m := cmux.New(lis)
-		grpcL := m.MatchWithWriters(cmux.HTTP2MatchHeaderFieldSendSettings("content-type", "application/grpc"))
+		grpcL := m.MatchWithWriters(
+			cmux.HTTP2MatchHeaderFieldSendSettings("content-type", "application/grpc"),
+		)
 		httpL := m.Match(cmux.HTTP1Fast())
 
 		infoMux := crioServer.GetExtendInterfaceMux(c.Bool("enable-profile-unix-socket"))
@@ -399,18 +489,23 @@ func main() {
 		}()
 
 		serverCloseCh := make(chan struct{})
+
 		go func() {
 			defer close(serverCloseCh)
+
 			if err := m.Serve(); err != nil {
-				if graceful && strings.Contains(strings.ToLower(err.Error()), "use of closed network connection") {
-					err = nil
-				} else {
+				if !graceful ||
+					!strings.Contains(
+						strings.ToLower(err.Error()),
+						"use of closed network connection",
+					) {
 					logrus.Errorf("Failed to serve grpc request: %v", err)
 				}
 			}
 		}()
 
 		streamServerCloseCh := crioServer.StreamingServerCloseChan()
+
 		serverMonitorsCh := crioServer.MonitorsCloseChan()
 		select {
 		case <-streamServerCloseCh:
@@ -421,18 +516,21 @@ func main() {
 		if err := crioServer.Shutdown(ctx); err != nil {
 			logrus.Warnf("Error shutting down service: %v", err)
 		}
+
 		cancel()
 
 		<-streamServerCloseCh
 		logrus.Debugf("Closed stream server")
 		<-serverMonitorsCh
 		logrus.Debugf("Closed monitors")
+
 		err = <-hookSync
-		if err == nil || err == context.Canceled {
+		if err == nil || errors.Is(err, context.Canceled) {
 			logrus.Debugf("Closed hook monitor")
 		} else {
 			logrus.Errorf("Hook monitor failed: %v", err)
 		}
+
 		<-serverCloseCh
 		logrus.Debugf("Closed main server")
 
@@ -444,7 +542,9 @@ func main() {
 			if err != nil {
 				return fmt.Errorf("could not create memory profile: %w", err)
 			}
+
 			defer file.Close()
+
 			runtime.GC()
 
 			if err := pprof.WriteHeapProfile(file); err != nil {
@@ -454,7 +554,6 @@ func main() {
 
 		return nil
 	}
-
 	if err := app.Run(os.Args); err != nil {
 		logrus.Fatal(err)
 	}

@@ -3,26 +3,29 @@ package lib_test
 import (
 	"context"
 	"os"
+	"os/exec"
 	"testing"
 	"time"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	"github.com/sirupsen/logrus"
+	"go.uber.org/mock/gomock"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	"github.com/cri-o/cri-o/internal/hostport"
 	"github.com/cri-o/cri-o/internal/lib"
 	"github.com/cri-o/cri-o/internal/lib/sandbox"
+	"github.com/cri-o/cri-o/internal/memorystore"
 	"github.com/cri-o/cri-o/internal/oci"
 	libconfig "github.com/cri-o/cri-o/pkg/config"
 	. "github.com/cri-o/cri-o/test/framework"
 	containerstoragemock "github.com/cri-o/cri-o/test/mocks/containerstorage"
 	libmock "github.com/cri-o/cri-o/test/mocks/lib"
 	ocimock "github.com/cri-o/cri-o/test/mocks/oci"
-	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"github.com/sirupsen/logrus"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
-// TestLib runs the created specs
+// TestLib runs the created specs.
 func TestLib(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunFrameworkSpecs(t, "Lib")
@@ -72,7 +75,7 @@ var _ = BeforeSuite(func() {
 			"io.kubernetes.cri-o.PortMappings": "[]",
 			"io.kubernetes.cri-o.Labels": "{}",
 			"io.kubernetes.cri-o.LogPath": "{}",
-			"io.kubernetes.cri-o.Metadata": "{}",
+			"io.kubernetes.cri-o.Metadata": "{\"name\":\"testpod\",\"namespace\":\"default\",\"uid\":\"test-uid-123\",\"attempt\":0}",
 			"io.kubernetes.cri-o.Name": "name",
 			"io.kubernetes.cri-o.Namespace": "default",
 			"io.kubernetes.cri-o.PrivilegedRuntime": "{}",
@@ -112,6 +115,7 @@ var _ = AfterSuite(func() {
 	removeConfig()
 	t.Teardown()
 	mockCtrl.Finish()
+
 	_ = os.RemoveAll("/tmp/fake-runtime")
 })
 
@@ -134,12 +138,19 @@ func beforeEach() {
 
 	// Set the config
 	var err error
+
 	config, err = libconfig.DefaultConfig()
 	Expect(err).ToNot(HaveOccurred())
+
 	config.LogDir = "."
 	config.HooksDir = []string{}
 	// so we have permission to make a directory within it
 	config.ContainerAttachSocketDir = t.MustTempDir("crio")
+	// Simulate a clean shutdown. Otherwise, when running tests as root on
+	// a system where cri-o is already installed, we hit non-mocked functions
+	// in lib.New internal/lib/container_server.go in if condition
+	// `if config.InternalRepair && ShutdownWasUnclean(config)`.
+	config.CleanShutdownFile = t.MustTempFile("clean.shutdown")
 
 	gomock.InOrder(
 		libMock.EXPECT().GetStore().Return(storeMock, nil),
@@ -152,11 +163,47 @@ func beforeEach() {
 	Expect(sut).NotTo(BeNil())
 
 	// Setup test vars
-	mySandbox, err = sandbox.New(sandboxID, "", "", "", "",
-		make(map[string]string), make(map[string]string), "", "",
-		&types.PodSandboxMetadata{}, "", "", false, "", "", "",
-		[]*hostport.PortMapping{}, false, time.Now(), "", nil, nil)
-	Expect(err).ToNot(HaveOccurred())
+	createdAt := time.Now()
+	sbox := sandbox.NewBuilder()
+	sbox.SetID("sandboxID")
+	sbox.SetName("name")
+	sbox.SetLogDir("test")
+	sbox.SetShmPath("test")
+	sbox.SetNamespace("")
+	sbox.SetKubeName("")
+	sbox.SetMountLabel("")
+	sbox.SetProcessLabel("")
+	sbox.SetCgroupParent("")
+	sbox.SetRuntimeHandler("")
+	sbox.SetResolvPath("")
+	sbox.SetHostname("")
+	sbox.SetPortMappings([]*hostport.PortMapping{})
+	sbox.SetHostNetwork(false)
+	sbox.SetUsernsMode("")
+	sbox.SetPodLinuxOverhead(nil)
+	sbox.SetPodLinuxResources(nil)
+	sbox.SetCreatedAt(createdAt)
+
+	err = sbox.SetCRISandbox(
+		sbox.ID(),
+		make(map[string]string),
+		make(map[string]string),
+		&types.PodSandboxMetadata{},
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	sbox.SetPrivileged(false)
+	sbox.SetPortMappings([]*hostport.PortMapping{})
+	sbox.SetHostNetwork(false)
+	sbox.SetContainers(memorystore.New[*oci.Container]())
+	sbox.SetCreatedAt(createdAt)
+
+	mySandbox, err = sbox.GetSandbox()
+	if err != nil {
+		panic(err)
+	}
 
 	myContainer, err = oci.NewContainer(containerID, "", "", "",
 		make(map[string]string), make(map[string]string),
@@ -195,22 +242,37 @@ func createDummyConfig() {
 	Expect(os.WriteFile("config.json", []byte(`{"linux":{},"process":{}}`), 0o644)).To(Succeed())
 }
 
-func mockRuncInLibConfig() {
-	config.Runtimes["runc"] = &libconfig.RuntimeHandler{
-		RuntimePath: "/bin/echo",
+func mockRuntimeInLibConfig() {
+	echo, err := exec.LookPath("echo")
+	Expect(err).NotTo(HaveOccurred())
+
+	config.Runtimes[config.DefaultRuntime] = &libconfig.RuntimeHandler{
+		RuntimePath: echo,
 	}
 }
 
-func mockRuncInLibConfigCheckpoint() {
-	Expect(os.WriteFile("/tmp/fake-runtime", []byte("#!/bin/bash\n\necho flag needs an argument\nexit 0\n"), 0o755)).To(Succeed())
-	config.Runtimes["runc"] = &libconfig.RuntimeHandler{
+func mockRuntimeInLibConfigCheckpoint() {
+	trueCMD, err := exec.LookPath("true")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(
+		os.WriteFile(
+			"/tmp/fake-runtime",
+			[]byte("#!/bin/bash\n\necho flag needs an argument\nexit 0\n"),
+			0o755,
+		),
+	).To(Succeed())
+
+	config.Runtimes[config.DefaultRuntime] = &libconfig.RuntimeHandler{
 		RuntimePath: "/tmp/fake-runtime",
-		MonitorPath: "/bin/true",
+		MonitorPath: trueCMD,
 	}
 }
 
-func mockRuncToFalseInLibConfig() {
-	config.Runtimes["runc"] = &libconfig.RuntimeHandler{
-		RuntimePath: "/bin/false",
+func mockRuntimeToFalseInLibConfig() {
+	falseCMD, err := exec.LookPath("false")
+	Expect(err).NotTo(HaveOccurred())
+
+	config.Runtimes[config.DefaultRuntime] = &libconfig.RuntimeHandler{
+		RuntimePath: falseCMD,
 	}
 }

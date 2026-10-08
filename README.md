@@ -1,21 +1,53 @@
 <!-- markdownlint-disable-next-line MD041 -->
+
 ![CRI-O logo](https://github.com/cri-o/cri-o/blob/main/logo/crio-logo.svg?raw=true)
 
 # CRI-O - OCI-based implementation of Kubernetes Container Runtime Interface
 
 <!-- markdownlint-disable-next-line MD042 -->
+
 [![Stable Status](https://img.shields.io/badge/status-stable-brightgreen.svg)](#)
 [![codecov](https://codecov.io/gh/cri-o/cri-o/branch/main/graph/badge.svg)](https://codecov.io/gh/cri-o/cri-o)
 [![Packages](https://img.shields.io/badge/deb%2frpm-packages-blue.svg)](https://github.com/cri-o/packaging)
 [![Release Notes](https://img.shields.io/badge/release-notes-blue.svg)](https://cri-o.github.io/cri-o)
 [![Dependencies](https://img.shields.io/badge/report-dependencies-blue.svg)](https://cri-o.github.io/cri-o/dependencies)
 [![GoDoc](https://godoc.org/github.com/cri-o/cri-o?status.svg)](https://godoc.org/github.com/cri-o/cri-o)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/cri-o/cri-o/badge)](https://scorecard.dev/viewer/?uri=github.com/cri-o/cri-o)
 [![OpenSSF Best Practices](https://bestpractices.coreinfrastructure.org/projects/2298/badge)](https://bestpractices.coreinfrastructure.org/projects/2298)
 [![Go Report Card](https://goreportcard.com/badge/github.com/cri-o/cri-o)](https://goreportcard.com/report/github.com/cri-o/cri-o)
 [![FOSSA Status](https://app.fossa.io/api/projects/git%2Bgithub.com%2Fcri-o%2Fcri-o.svg?type=shield)](https://app.fossa.io/projects/git%2Bgithub.com%2Fcri-o%2Fcri-o?ref=badge_shield)
 [![Mentioned in Awesome CRI-O](https://awesome.re/mentioned-badge.svg)](awesome.md)
 [![Gitpod ready-to-code](https://img.shields.io/badge/Gitpod-ready--to--code-blue?logo=gitpod)](https://gitpod.io/#https://github.com/cri-o/cri-o)
-<a href="https://actuated.dev/"><img alt="Arm CI sponsored by Actuated" src="https://docs.actuated.dev/images/actuated-badge.png" width="20px"></img></a>
+
+<!-- toc -->
+
+- [Compatibility matrix: CRI-O ⬄ Kubernetes](#compatibility-matrix-cri-o--kubernetes)
+- [What is the scope of this project?](#what-is-the-scope-of-this-project)
+- [What is not in the scope of this project?](#what-is-not-in-the-scope-of-this-project)
+- [Roadmap](#roadmap)
+- [CI images and jobs](#ci-images-and-jobs)
+- [Commands](#commands)
+- [Configuration](#configuration)
+- [Security](#security)
+- [OCI Hooks Support](#oci-hooks-support)
+- [CRI-O Usage Transfer](#cri-o-usage-transfer)
+- [Communication](#communication)
+- [Awesome CRI-O](#awesome-cri-o)
+- [Getting started](#getting-started)
+  - [Installing CRI-O](#installing-cri-o)
+  - [Running Kubernetes with CRI-O](#running-kubernetes-with-cri-o)
+    - [The HTTP status API](#the-http-status-api)
+    - [Metrics](#metrics)
+    - [Tracing](#tracing)
+    - [Container Runtime Interface special cases](#container-runtime-interface-special-cases)
+    - [Debugging tips](#debugging-tips)
+- [Adopters](#adopters)
+- [Weekly Meeting](#weekly-meeting)
+- [Governance](#governance)
+- [AI Assistants](#ai-assistants)
+- [License Scan](#license-scan)
+
+<!-- /toc -->
 
 ## Compatibility matrix: CRI-O ⬄ Kubernetes
 
@@ -40,10 +72,12 @@ For more information visit the [Kubernetes Version Skew
 Policy](https://kubernetes.io/releases/version-skew-policy/).
 
 <!-- markdownlint-disable MD013 -->
+
 | CRI-O                           | Kubernetes                      | Maintenance status                                                    |
 | ------------------------------- | ------------------------------- | --------------------------------------------------------------------- |
 | `main` branch                   | `master` branch                 | Features from the main Kubernetes repository are actively implemented |
 | `release-1.x` branch (`v1.x.y`) | `release-1.x` branch (`v1.x.z`) | Maintenance is manual, only bugfixes will be backported.              |
+
 <!-- markdownlint-enable MD013 -->
 
 The release notes for CRI-O are hand-crafted and can be continuously retrieved
@@ -81,8 +115,8 @@ The plan is to use OCI projects and best of breed libraries for different aspect
 
 - Runtime: [runc](https://github.com/opencontainers/runc)
   (or any OCI runtime-spec implementation) and [oci runtime tools](https://github.com/opencontainers/runtime-tools)
-- Images: Image management using [containers/image](https://github.com/containers/image)
-- Storage: Storage and management of image layers using [containers/storage](https://github.com/containers/storage)
+- Images: Image management using [container-libs/image](https://github.com/containers/container-libs/tree/main/image)
+- Storage: Storage and management of image layers using [container-libs/storage](https://github.com/containers/container-libs/tree/main/storage)
 - Networking: Networking support through the use of [CNI](https://github.com/containernetworking/cni)
 
 It is currently in active development in the Kubernetes community through the
@@ -95,6 +129,23 @@ A roadmap that describes the direction of CRI-O can be found [here](/roadmap.md)
 The project is tracking all ongoing efforts as part of the [Feature Roadmap
 GitHub project](https://github.com/orgs/cri-o/projects/1).
 
+## CI images and jobs
+
+CRI-O's CI is split-up between GitHub actions and [OpenShift CI (Prow)](https://prow.ci.openshift.org).
+Relevant virtual machine images used for the prow jobs are built periodically in
+the jobs:
+
+- [periodic-ci-cri-o-cri-o-main-periodics-setup-periodic](https://prow.ci.openshift.org/?job=periodic-ci-cri-o-cri-o-main-periodics-setup-periodic)
+- [periodic-ci-cri-o-cri-o-main-periodics-setup-fedora-periodic](https://prow.ci.openshift.org/?job=periodic-ci-cri-o-cri-o-main-periodics-setup-fedora-periodic)
+- [periodic-ci-cri-o-cri-o-main-periodics-evented-pleg-periodic](https://prow.ci.openshift.org/?job=periodic-ci-cri-o-cri-o-main-periodics-evented-pleg-periodic)
+
+The jobs are maintained [from the openshift/release repository](https://github.com/openshift/release/blob/ecdeb0a/ci-operator/jobs/cri-o/cri-o/cri-o-cri-o-main-periodics.yaml)
+and define workflows used for the particular jobs. The actual job definitions
+can be found in the same repository under [ci-operator/jobs/cri-o/cri-o/cri-o-cri-o-main-presubmits.yaml](https://github.com/openshift/release/blob/ecdeb0a/ci-operator/jobs/cri-o/cri-o/cri-o-cri-o-main-presubmits.yaml)
+for the `main` branch as well as the corresponding files for the release
+branches. The base image configuration for those jobs is available in the same
+repository under [ci-operator/config/cri-o/cri-o](https://github.com/openshift/release/tree/ecdeb0a/ci-operator/config/cri-o/cri-o).
+
 ## Commands
 
 | Command                    | Description                             |
@@ -106,14 +157,20 @@ Examples of commandline tools to interact with CRI-O
 and [Podman](https://github.com/containers/podman).
 
 ## Configuration
+
 <!-- markdownlint-disable MD013 -->
-| File                                                                                                     | Description                           |
-| -------------------------------------------------------------------------------------------------------- | ------------------------------------- |
-| [crio.conf(5)](/docs/crio.conf.5.md)                                                                     | CRI-O Configuration file              |
-| [policy.json(5)](https://github.com/containers/image/blob/main/docs/containers-policy.json.5.md)         | Signature Verification Policy File(s) |
-| [registries.conf(5)](https://github.com/containers/image/blob/main/docs/containers-registries.conf.5.md) | Registries Configuration file         |
-| [storage.conf(5)](https://github.com/containers/storage/blob/main/docs/containers-storage.conf.5.md)     | Storage Configuration file            |
+
+| File                                                                                                                    | Description                           |
+| ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| [crio.conf(5)](/docs/crio.conf.5.md)                                                                                    | CRI-O Configuration file              |
+| [policy.json(5)](https://github.com/containers/container-libs/blob/main/image/docs/containers-policy.json.5.md)         | Signature Verification Policy File(s) |
+| [registries.conf(5)](https://github.com/containers/container-libs/blob/main/image/docs/containers-registries.conf.5.md) | Registries Configuration file         |
+| [storage.conf(5)](https://github.com/containers/container-libs/blob/main/storage/docs/containers-storage.conf.5.md)     | Storage Configuration file            |
+
 <!-- markdownlint-enable MD013 -->
+
+For information about CRI-O annotations and their migration to Kubernetes-recommended naming conventions,
+see the [Annotation Migration Guide](ANNOTATION_MIGRATION.md).
 
 ## Security
 
@@ -131,7 +188,7 @@ as it relates to infrastructure that utilizes CRI-O.
 
 ## Communication
 
-For async communication and long running discussions please use [issues](https://github.com/cri-o/cri-o/issues)
+For async communication and long-running discussions please use [issues](https://github.com/cri-o/cri-o/issues)
 and [pull requests](https://github.com/cri-o/cri-o/pulls) on the [GitHub repo](https://github.com/cri-o/cri-o).
 This will be the best place to discuss design and implementation.
 
@@ -151,59 +208,6 @@ up a PR and add it to the list.
 To install `CRI-O`, you can follow our [installation guide](install.md).
 Alternatively, if you'd rather build `CRI-O` from source, checkout our [setup
 guide](install.md#build-and-install-cri-o-from-source).
-We also provide a way in building
-[static binaries of `CRI-O`](install.md#static-builds) via nix as part of the
-[cri-o/packaging repository](https://github.com/cri-o/packaging).
-Those binaries are available for every successfully built commit on our
-[Google Cloud Storage Bucket][bucket].
-This means that the latest commit can be installed via our convenience script:
-
-[bucket]: https://console.cloud.google.com/storage/browser/cri-o/artifacts
-
-```console
-> curl https://raw.githubusercontent.com/cri-o/packaging/main/get | bash
-```
-
-The script automatically verifies the uploaded sigstore signatures as well, if
-the local system has [`cosign`](https://github.com/sigstore/cosign) available in
-its `$PATH`. The same applies to the [SPDX](https://spdx.org) based bill of
-materials (SBOM), which gets automatically verified if the
-[bom](https://sigs.k8s.io/bom) tool is in `$PATH`.
-
-Besides `amd64`, we also support the `arm64`, `ppc64le` and `s390x` bit
-architectures. This can be selected via the script, too:
-
-<!-- markdownlint-disable MD013 -->
-```shell
-curl https://raw.githubusercontent.com/cri-o/packaging/main/get | bash -s -- -a arm64
-```
-
-It is also possible to select a specific git SHA or tag by:
-
-```shell
-curl https://raw.githubusercontent.com/cri-o/packaging/main/get | bash -s -- -t v1.21.0
-```
-<!-- markdownlint-enable MD013 -->
-
-The above script resolves to the download URL of the static binary bundle
-tarball matching the format:
-
-```text
-https://storage.googleapis.com/cri-o/artifacts/cri-o.$ARCH.$REV.tar.gz
-```
-
-Where `$ARCH` can be `amd64`,`arm64`,`ppc64le` or `s390x` and `$REV`
-can be any git SHA or tag.
-Please be aware that using the latest `main` SHA might cause a race, because
-the CI has not finished publishing the artifacts yet or failed.
-
-We also provide a Software Bill of Materials (SBOM) in the [SPDX
-format](https://spdx.org) for each bundle. The SBOM is available at the same URL
-like the bundle itself, but suffixed with `.spdx`:
-
-```text
-https://storage.googleapis.com/cri-o/artifacts/cri-o.$ARCH.$REV.tar.gz.spdx
-```
 
 ### Running Kubernetes with CRI-O
 
@@ -250,13 +254,17 @@ $ sudo curl -v --unix-socket /var/run/crio/crio.sock http://localhost/info | jq
 The following API entry points are currently supported:
 
 <!-- markdownlint-disable MD013 -->
-| Path              | Content-Type       | Description                                                                        |
-| ----------------- | ------------------ | ---------------------------------------------------------------------------------- |
-| `/info`           | `application/json` | General information about the runtime, like `storage_driver` and `storage_root`.   |
-| `/containers/:id` | `application/json` | Dedicated container information, like `name`, `pid` and `image`.                   |
-| `/config`         | `application/toml` | The complete TOML configuration (defaults to `/etc/crio/crio.conf`) used by CRI-O. |
-| `/pause/:id`      | `application/json` | Pause a running container.                                                         |
-| `/unpause/:id`    | `application/json` | Unpause a paused container.                                                        |
+
+| Path                | Content-Type       | Description                                                                        |
+| ------------------- | ------------------ | ---------------------------------------------------------------------------------- |
+| `/info`             | `application/json` | General information about the runtime, like `storage_driver` and `storage_root`.   |
+| `/containers/:id`   | `application/json` | Dedicated container information, like `name`, `pid` and `image`.                   |
+| `/config`           | `application/toml` | The complete TOML configuration (defaults to `/etc/crio/crio.conf`) used by CRI-O. |
+| `/pause/:id`        | `application/json` | Pause a running container.                                                         |
+| `/unpause/:id`      | `application/json` | Unpause a paused container.                                                        |
+| `/debug/goroutines` | `text/plain`       | Print the goroutine stacks.                                                        |
+| `/debug/heap`       | `text/plain`       | Write the heap dump.                                                               |
+
 <!-- markdownlint-enable MD013 -->
 
 The subcommand `crio status` can be used to access the API with a dedicated command
@@ -304,7 +312,11 @@ The details to join the meeting are on the [wiki](https://github.com/cri-o/cri-o
 
 ## Governance
 
-For more information on how CRI-O is goverened, take a look at the [governance file](GOVERNANCE.md)
+For more information on how CRI-O is governed, take a look at the [governance file](GOVERNANCE.md)
+
+## AI Assistants
+
+For AI coding assistants working with this codebase, see [AGENTS.md](AGENTS.md) for project context, workflow patterns, and development guidelines.
 
 ## License Scan
 

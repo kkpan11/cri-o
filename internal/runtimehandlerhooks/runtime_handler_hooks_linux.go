@@ -6,40 +6,111 @@ import (
 	"sync"
 
 	"github.com/cri-o/cri-o/internal/log"
-	crioann "github.com/cri-o/cri-o/pkg/annotations"
+	crioann "github.com/cri-o/cri-o/pkg/annotations/v2"
 	libconfig "github.com/cri-o/cri-o/pkg/config"
 )
 
-// GetRuntimeHandlerHooks returns RuntimeHandlerHooks implementation by the runtime handler name
-func GetRuntimeHandlerHooks(ctx context.Context, config *libconfig.Config, handler string, annotations map[string]string) (RuntimeHandlerHooks, error) {
+// NewHooksRetriever returns a pointer to a new retriever.
+// Log a warning if deprecated configuration is detected.
+func NewHooksRetriever(ctx context.Context, config *libconfig.Config) *HooksRetriever {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
-	if strings.Contains(handler, HighPerformance) {
-		log.Warnf(ctx, "The usage of the handler %q without adding high-performance feature annotations under allowed_annotations will be deprecated under 1.21", HighPerformance)
-		return &HighPerformanceHooks{irqBalanceConfigFile: config.IrqBalanceConfigFile, cpusetLock: sync.Mutex{}, sharedCPUs: config.SharedCPUSet}, nil
-	}
-	if highPerformanceAnnotationsSpecified(annotations) {
-		log.Warnf(ctx, "The usage of the handler %q without adding high-performance feature annotations under allowed_annotations will be deprecated under 1.21", HighPerformance)
-		return &HighPerformanceHooks{irqBalanceConfigFile: config.IrqBalanceConfigFile, cpusetLock: sync.Mutex{}, sharedCPUs: config.SharedCPUSet}, nil
-	}
-	if cpuLoadBalancingAllowed(config) {
-		return &DefaultCPULoadBalanceHooks{}, nil
+
+	rhh := &HooksRetriever{
+		config:               config,
+		highPerformanceHooks: nil,
 	}
 
-	return nil, nil
+	for name, runtime := range config.Runtimes {
+		annotationMap := map[string]string{}
+		for _, v := range runtime.AllowedAnnotations {
+			annotationMap[v] = ""
+		}
+
+		if strings.Contains(name, HighPerformance) &&
+			!highPerformanceAnnotationsSpecified(annotationMap) {
+			log.Warnf(
+				ctx,
+				"The usage of the handler %q without adding high-performance feature annotations under "+
+					"allowed_annotations is deprecated since 1.21",
+				HighPerformance,
+			)
+		}
+	}
+
+	return rhh
+}
+
+// Get checks runtime name or the sandbox's annotations for allowed high performance annotations and
+// the config for GOMAXPROCS injection. It returns a single hook, a CompositeHooks chain, or nil.
+func (hr *HooksRetriever) Get(
+	ctx context.Context,
+	runtimeName string,
+	sandboxAnnotations map[string]string,
+) RuntimeHandlerHooks {
+	var hooks []RuntimeHandlerHooks
+
+	if strings.Contains(runtimeName, HighPerformance) ||
+		highPerformanceAnnotationsSpecified(sandboxAnnotations) {
+		runtimeConfig, ok := hr.config.Runtimes[runtimeName]
+		if !ok {
+			// This shouldn't happen because runtime is already validated
+			log.Errorf(ctx, "Config of runtime %s is not found", runtimeName)
+
+			return nil
+		}
+
+		if hr.highPerformanceHooks == nil {
+			hr.highPerformanceHooks = &HighPerformanceHooks{
+				CgroupManager:             hr.config.CgroupManager(),
+				irqBalanceConfigFile:      hr.config.IrqBalanceConfigFile,
+				cpusetLock:                sync.Mutex{},
+				updateIRQSMPAffinityLock:  sync.Mutex{},
+				irqSMPAffinityDisabledSet: map[string]struct{}{},
+				sharedCPUs:                hr.config.SharedCPUSet,
+				irqSMPAffinityFile:        IrqSmpAffinityProcFile,
+				execCPUAffinity:           runtimeConfig.ExecCPUAffinity,
+				sysCPUDir:                 sysCPUDir,
+			}
+		}
+
+		hooks = append(hooks, hr.highPerformanceHooks)
+	} else if cpuLoadBalancingAllowed(
+		hr.config,
+	) {
+		hooks = append(hooks, &DefaultCPULoadBalanceHooks{
+			CgroupManager: hr.config.CgroupManager(),
+		})
+	}
+
+	if hr.config.MinInjectedGOMAXPROCS > 0 {
+		hooks = append(hooks, &GomaxprocsHooks{
+			fallback: hr.config.MinInjectedGOMAXPROCS,
+		})
+	}
+
+	switch len(hooks) {
+	case 0:
+		return nil
+	case 1:
+		return hooks[0]
+	default:
+		return &CompositeHooks{hooks: hooks}
+	}
 }
 
 func highPerformanceAnnotationsSpecified(annotations map[string]string) bool {
 	for k := range annotations {
-		if strings.HasPrefix(k, crioann.CPULoadBalancingAnnotation) ||
-			strings.HasPrefix(k, crioann.CPUQuotaAnnotation) ||
-			strings.HasPrefix(k, crioann.IRQLoadBalancingAnnotation) ||
-			strings.HasPrefix(k, crioann.CPUCStatesAnnotation) ||
-			strings.HasPrefix(k, crioann.CPUFreqGovernorAnnotation) ||
-			strings.HasPrefix(k, crioann.CPUSharedAnnotation) {
+		if strings.HasPrefix(k, crioann.CPULoadBalancing) ||
+			strings.HasPrefix(k, crioann.CPUQuota) ||
+			strings.HasPrefix(k, crioann.IRQLoadBalancing) ||
+			strings.HasPrefix(k, crioann.CPUCStates) ||
+			strings.HasPrefix(k, crioann.CPUFreqGovernor) ||
+			strings.HasPrefix(k, crioann.CPUShared) {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -47,18 +118,20 @@ func cpuLoadBalancingAllowed(config *libconfig.Config) bool {
 	cpuLoadBalancingAllowedAnywhereOnce.Do(func() {
 		for _, runtime := range config.Runtimes {
 			for _, ann := range runtime.AllowedAnnotations {
-				if ann == crioann.CPULoadBalancingAnnotation {
+				if ann == crioann.CPULoadBalancing {
 					cpuLoadBalancingAllowedAnywhere = true
 				}
 			}
 		}
+
 		for _, workload := range config.Workloads {
 			for _, ann := range workload.AllowedAnnotations {
-				if ann == crioann.CPULoadBalancingAnnotation {
+				if ann == crioann.CPULoadBalancing {
 					cpuLoadBalancingAllowedAnywhere = true
 				}
 			}
 		}
 	})
+
 	return cpuLoadBalancingAllowedAnywhere
 }

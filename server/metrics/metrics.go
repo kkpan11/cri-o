@@ -3,26 +3,23 @@ package metrics
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
-	"sync"
 	"time"
 
-	"github.com/cri-o/cri-o/internal/process"
-	"github.com/cri-o/cri-o/internal/storage/references"
-	libconfig "github.com/cri-o/cri-o/pkg/config"
-	"github.com/cri-o/cri-o/server/otel-collector/collectors"
-	"github.com/fsnotify/fsnotify"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
-	"k8s.io/client-go/util/cert"
+
+	"github.com/cri-o/cri-o/internal/cert"
+	"github.com/cri-o/cri-o/internal/log"
+	"github.com/cri-o/cri-o/internal/process"
+	"github.com/cri-o/cri-o/internal/storage/references"
+	libconfig "github.com/cri-o/cri-o/pkg/config"
+	"github.com/cri-o/cri-o/server/metrics/collectors"
 )
 
 // SinceInMicroseconds gets the time since the specified start in microseconds.
@@ -55,17 +52,20 @@ func GetSizeBucket(size float64) string {
 		">300 MiB", ">200 MiB", ">100 MiB", ">50 MiB",
 		">10 MiB", ">1 MiB", ">1 KiB",
 	}
+
 	for bucketIdx := range sizeBuckets {
 		if size > sizeBuckets[bucketIdx] {
 			return sizeBucketNames[bucketIdx]
 		}
 	}
+
 	return ">0 B"
 }
 
 // Metrics is the main structure for starting the metrics endpoints.
 type Metrics struct {
 	config                                    *libconfig.MetricsConfig
+	apiConfig                                 *libconfig.APIConfig
 	metricImagePullsLayerSize                 prometheus.Histogram
 	metricContainersEventsDropped             prometheus.Counter
 	metricContainersOOMTotal                  prometheus.Counter
@@ -82,14 +82,17 @@ type Metrics struct {
 	metricContainersOOMCountTotal             *prometheus.CounterVec
 	metricContainersSeccompNotifierCountTotal *prometheus.CounterVec
 	metricResourcesStalledAtStage             *prometheus.CounterVec
+	metricContainersStoppedMonitorCount       *prometheus.CounterVec
+	metricDefaultRuntime                      *prometheus.GaugeVec
 }
 
 var instance *Metrics
 
 // New creates a new metrics instance.
-func New(config *libconfig.MetricsConfig) *Metrics {
+func New(config *libconfig.MetricsConfig, apiConfig *libconfig.APIConfig) *Metrics {
 	instance = &Metrics{
-		config: config,
+		config:    config,
+		apiConfig: apiConfig,
 		metricImagePullsLayerSize: prometheus.NewHistogram(
 			prometheus.HistogramOpts{
 				Subsystem: collectors.Subsystem,
@@ -135,7 +138,9 @@ func New(config *libconfig.MetricsConfig) *Metrics {
 				if err == nil {
 					return float64(total)
 				}
+
 				logrus.Warn(err)
+
 				return 0
 			},
 		),
@@ -238,22 +243,44 @@ func New(config *libconfig.MetricsConfig) *Metrics {
 			},
 			[]string{"stage"},
 		),
+		metricContainersStoppedMonitorCount: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Subsystem: collectors.Subsystem,
+				Name:      collectors.ContainersStoppedMonitorCount.String(),
+				Help:      "Amount of containers whose monitor process has exited by their name",
+			},
+			[]string{"name"},
+		),
+		metricDefaultRuntime: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Subsystem: collectors.Subsystem,
+				Name:      collectors.DefaultRuntime.String(),
+				Help:      "Default container runtime configured. Value is always 1.",
+			},
+			[]string{"runtime"},
+		),
 	}
+
 	return Instance()
 }
 
 // Instance returns the singleton instance of the Metrics.
 func Instance() *Metrics {
 	if instance == nil {
-		return New(&libconfig.MetricsConfig{})
+		return New(&libconfig.MetricsConfig{}, &libconfig.APIConfig{})
 	}
+
 	return instance
 }
 
 // Start starts serving the metrics in the background.
-func (m *Metrics) Start(stop chan struct{}) error {
+func (m *Metrics) Start(ctx context.Context, stop chan struct{}) error {
 	if m.config == nil {
 		return errors.New("provided config is nil")
+	}
+
+	if m.apiConfig == nil {
+		return errors.New("provided api config is nil")
 	}
 
 	me, err := m.createEndpoint()
@@ -262,7 +289,7 @@ func (m *Metrics) Start(stop chan struct{}) error {
 	}
 
 	metricsAddress := net.JoinHostPort(m.config.MetricsHost, strconv.Itoa(m.config.MetricsPort))
-	if err := m.startEndpoint(stop, "tcp", metricsAddress, me); err != nil {
+	if err := m.startEndpoint(ctx, stop, "tcp", metricsAddress, me); err != nil {
 		return fmt.Errorf("create metrics endpoint on %s: %w", metricsAddress, err)
 	}
 
@@ -272,9 +299,10 @@ func (m *Metrics) Start(stop chan struct{}) error {
 			return fmt.Errorf("removing unused socket %s: %w", metricsSocket, err)
 		}
 
-		if err := m.startEndpoint(stop, "unix", m.config.MetricsSocket, me); err != nil {
+		if err := m.startEndpoint(ctx, stop, "unix", m.config.MetricsSocket, me); err != nil {
 			return fmt.Errorf("creating metrics endpoint socket: %w", err)
 		}
+
 		return nil
 	}
 
@@ -285,8 +313,10 @@ func (m *Metrics) MetricOperationsInc(operation string) {
 	c, err := m.metricOperationsTotal.GetMetricWithLabelValues(operation)
 	if err != nil {
 		logrus.Warnf("Unable to write operations metric: %v", err)
+
 		return
 	}
+
 	c.Inc()
 }
 
@@ -294,8 +324,10 @@ func (m *Metrics) MetricOperationsLatencySet(operation string, start time.Time) 
 	g, err := m.metricOperationsLatencySeconds.GetMetricWithLabelValues(operation)
 	if err != nil {
 		logrus.Warnf("Unable to write operation latency metric: %v", err)
+
 		return
 	}
+
 	g.Set(SinceInSeconds(start))
 }
 
@@ -303,8 +335,10 @@ func (m *Metrics) MetricOperationsLatencyTotalObserve(operation string, start ti
 	o, err := m.metricOperationsLatencySecondsTotal.GetMetricWithLabelValues(operation)
 	if err != nil {
 		logrus.Warnf("Unable to write operation latency (total) metric: %v", err)
+
 		return
 	}
+
 	o.Observe(SinceInSeconds(start))
 }
 
@@ -312,8 +346,10 @@ func (m *Metrics) MetricOperationsErrorsInc(operation string) {
 	c, err := m.metricOperationsErrorsTotal.GetMetricWithLabelValues(operation)
 	if err != nil {
 		logrus.Warnf("Unable to write operation errors metric: %v", err)
+
 		return
 	}
+
 	c.Inc()
 }
 
@@ -321,8 +357,10 @@ func (m *Metrics) MetricContainersOOMCountTotalInc(name string) {
 	c, err := m.metricContainersOOMCountTotal.GetMetricWithLabelValues(name)
 	if err != nil {
 		logrus.Warnf("Unable to write container OOM metric: %v", err)
+
 		return
 	}
+
 	c.Inc()
 }
 
@@ -342,8 +380,10 @@ func (m *Metrics) MetricContainersSeccompNotifierCountTotalInc(name, syscall str
 	c, err := m.metricContainersSeccompNotifierCountTotal.GetMetricWithLabelValues(name, syscall)
 	if err != nil {
 		logrus.Warnf("Unable to write container seccomp notifier metric: %v", err)
+
 		return
 	}
+
 	c.Inc()
 }
 
@@ -355,17 +395,24 @@ func (m *Metrics) MetricImagePullsSkippedBytesAdd(add float64) {
 	c, err := m.metricImagePullsSkippedBytesTotal.GetMetricWithLabelValues(GetSizeBucket(add))
 	if err != nil {
 		logrus.Warnf("Unable to write image pulls skipped bytes metric: %v", err)
+
 		return
 	}
+
 	c.Add(add)
 }
 
-func (m *Metrics) MetricImagePullsFailuresInc(image references.RegistryImageReference, label string) {
+func (m *Metrics) MetricImagePullsFailuresInc(
+	image references.RegistryImageReference,
+	label string,
+) {
 	c, err := m.metricImagePullsFailureTotal.GetMetricWithLabelValues(label)
 	if err != nil {
 		logrus.Warnf("Unable to write image pull failures total metric: %v", err)
+
 		return
 	}
+
 	c.Inc()
 }
 
@@ -373,8 +420,10 @@ func (m *Metrics) MetricImageLayerReuseInc(layer string) {
 	c, err := m.metricImageLayerReuseTotal.GetMetricWithLabelValues(layer)
 	if err != nil {
 		logrus.Warnf("Unable to write image layer reuse total metric: %v", err)
+
 		return
 	}
+
 	c.Inc()
 }
 
@@ -383,11 +432,16 @@ func (m *Metrics) MetricImagePullsSuccessesInc(name references.RegistryImageRefe
 }
 
 func (m *Metrics) MetricImagePullsBytesAdd(add float64, mediatype string, size int64) {
-	c, err := m.metricImagePullsBytesTotal.GetMetricWithLabelValues(mediatype, GetSizeBucket(float64(size)))
+	c, err := m.metricImagePullsBytesTotal.GetMetricWithLabelValues(
+		mediatype,
+		GetSizeBucket(float64(size)),
+	)
 	if err != nil {
 		logrus.Warnf("Unable to write image pulls bytes metric: %v", err)
+
 		return
 	}
+
 	c.Add(add)
 }
 
@@ -395,9 +449,35 @@ func (m *Metrics) MetricResourcesStalledAtStage(stage string) {
 	c, err := m.metricResourcesStalledAtStage.GetMetricWithLabelValues(stage)
 	if err != nil {
 		logrus.Warnf("Unable to write resource stalled at stage metric: %v", err)
+
 		return
 	}
+
 	c.Inc()
+}
+
+func (m *Metrics) MetricContainersStoppedMonitorCountInc(name string) {
+	c, err := m.metricContainersStoppedMonitorCount.GetMetricWithLabelValues(name)
+	if err != nil {
+		logrus.Warnf("Unable to write container stopped monitor count metric: %v", err)
+
+		return
+	}
+
+	c.Inc()
+}
+
+func (m *Metrics) MetricDefaultRuntimeSet(runtime string) {
+	m.metricDefaultRuntime.Reset()
+
+	g, err := m.metricDefaultRuntime.GetMetricWithLabelValues(runtime)
+	if err != nil {
+		logrus.Warnf("Unable to write default runtime metric: %v", err)
+
+		return
+	}
+
+	g.Set(1)
 }
 
 // createEndpoint creates a /metrics endpoint for prometheus monitoring.
@@ -419,9 +499,12 @@ func (m *Metrics) createEndpoint() (*http.ServeMux, error) {
 		collectors.OperationsTotal:                     m.metricOperationsTotal,
 		collectors.ProcessesDefunct:                    m.metricProcessesDefunct,
 		collectors.ResourcesStalledAtStage:             m.metricResourcesStalledAtStage,
+		collectors.ContainersStoppedMonitorCount:       m.metricContainersStoppedMonitorCount,
+		collectors.DefaultRuntime:                      m.metricDefaultRuntime,
 	} {
 		if m.config.MetricsCollectors.Contains(collector) {
 			logrus.Debugf("Enabling metric: %s", collector.Stripped())
+
 			if err := prometheus.Register(metric); err != nil {
 				return nil, fmt.Errorf("register metric: %w", err)
 			}
@@ -432,11 +515,12 @@ func (m *Metrics) createEndpoint() (*http.ServeMux, error) {
 
 	mux := &http.ServeMux{}
 	mux.Handle("/metrics", promhttp.Handler())
+
 	return mux, nil
 }
 
 func (m *Metrics) startEndpoint(
-	stop chan struct{}, network, address string, me http.Handler,
+	ctx context.Context, stop chan struct{}, network, address string, me http.Handler,
 ) error {
 	l, err := net.Listen(network, address)
 	if err != nil {
@@ -451,170 +535,65 @@ func (m *Metrics) startEndpoint(
 		}
 
 		if m.config.MetricsCert != "" && m.config.MetricsKey != "" {
-			logrus.Infof("Serving metrics on %s using HTTPS", address)
+			log.Infof(ctx, "Serving metrics on %s using HTTPS", address)
 
-			kpr, reloadErr := newCertReloader(
-				stop, m.config.MetricsCert, m.config.MetricsKey,
-			)
-			if reloadErr != nil {
-				logrus.Fatalf("Creating key pair reloader: %v", reloadErr)
+			if err = cert.GenerateSelfSignedCertKey(
+				ctx,
+				m.config.MetricsCert,
+				m.config.MetricsKey,
+			); err != nil {
+				log.Fatalf(ctx, "Generating self-signed cert/key: %v", err)
 			}
 
+			var cc *cert.Config
+
+			cc, err = cert.NewCertConfig(
+				ctx,
+				stop,
+				m.config.MetricsCert,
+				m.config.MetricsKey,
+				"",
+				m.apiConfig.GetTLSMinVersion(),
+				m.apiConfig.GetTLSCipherSuites(),
+			)
+			if err != nil {
+				log.Fatalf(ctx, "Creating key pair reloader: %v", err)
+			}
+
+			// #nosec G402 -- GetTLSMinVersion returns the validated TLS version. Any version older than TLS 1.2 will be rejected in config validation.
 			srv.TLSConfig = &tls.Config{
-				GetCertificate: kpr.getCertificate,
-				MinVersion:     tls.VersionTLS12,
+				GetConfigForClient: cc.GetConfigForClient,
+				MinVersion:         m.apiConfig.GetTLSMinVersion(),
+				CipherSuites:       m.apiConfig.GetTLSCipherSuites(),
 			}
 
 			go func() {
 				<-stop
-				if err := srv.Shutdown(context.Background()); err != nil {
-					logrus.Errorf("Error on metrics server shutdown: %v", err)
+
+				if err := srv.Shutdown(ctx); err != nil {
+					log.Errorf(ctx, "Error on metrics server shutdown: %v", err)
 				}
 			}()
+
 			err = srv.ServeTLS(l, m.config.MetricsCert, m.config.MetricsKey)
 		} else {
-			logrus.Infof("Serving metrics on %s using HTTP", address)
+			log.Infof(ctx, "Serving metrics on %s using HTTP", address)
+
 			go func() {
 				<-stop
-				if err := srv.Shutdown(context.Background()); err != nil {
-					logrus.Errorf("Error on metrics server shutdown: %v", err)
+
+				if err := srv.Shutdown(ctx); err != nil {
+					log.Errorf(ctx, "Error on metrics server shutdown: %v", err)
 				}
 			}()
+
 			err = srv.Serve(l)
 		}
 
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logrus.Errorf("Failed to serve metrics endpoint %v: %v", l, err)
+			log.Errorf(ctx, "Failed to serve metrics endpoint %v: %v", l, err)
 		}
 	}()
 
 	return nil
-}
-
-type certReloader struct {
-	certLock    sync.RWMutex
-	certificate *tls.Certificate
-	certPath    string
-	keyPath     string
-}
-
-func newCertReloader(doneChan chan struct{}, certPath, keyPath string) (*certReloader, error) {
-	reloader := &certReloader{
-		certPath: certPath,
-		keyPath:  keyPath,
-	}
-
-	// Generate self-signed certificate and key if the provided ones are not
-	// available.
-	_, errCertPath := os.Stat(certPath)
-	_, errKeyPath := os.Stat(keyPath)
-	if errCertPath != nil && os.IsNotExist(errCertPath) &&
-		errKeyPath != nil && os.IsNotExist(errKeyPath) {
-		logrus.Info("Metrics key and cert path does not exist, generating self-signed")
-
-		hostname, err := os.Hostname()
-		if err != nil {
-			return nil, fmt.Errorf("retrieve hostname: %w", err)
-		}
-
-		certBytes, keyBytes, err := cert.GenerateSelfSignedCertKey(hostname, nil, nil)
-		if err != nil {
-			return nil, fmt.Errorf("generate self-signed cert/key: %w", err)
-		}
-
-		for path, bytes := range map[string][]byte{
-			certPath: certBytes,
-			keyPath:  keyBytes,
-		} {
-			if err := os.MkdirAll(filepath.Dir(path), os.FileMode(0o700)); err != nil {
-				return nil, fmt.Errorf("create path: %w", err)
-			}
-			if err := os.WriteFile(path, bytes, os.FileMode(0o600)); err != nil {
-				return nil, fmt.Errorf("write file: %w", err)
-			}
-		}
-	}
-
-	if err := reloader.reload(); err != nil {
-		return nil, fmt.Errorf("load certificate: %w", err)
-	}
-
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return nil, fmt.Errorf("create new watcher: %w", err)
-	}
-	go func() {
-		defer watcher.Close()
-		done := make(chan struct{})
-		go func() {
-			for {
-				select {
-				case event := <-watcher.Events:
-					logrus.Debugf(
-						"Got cert watcher event for %s (%s), reloading certificates",
-						event.Name, event.Op.String(),
-					)
-					if err := reloader.reload(); err != nil {
-						logrus.Warnf("Keeping previous certificates: %v", err)
-					}
-				case err := <-watcher.Errors:
-					logrus.Errorf("Cert watcher error: %v", err)
-					close(done)
-					return
-				case <-doneChan:
-					logrus.Debug("Closing cert watcher")
-					close(done)
-					return
-				}
-			}
-		}()
-		for _, f := range []string{certPath, keyPath} {
-			logrus.Debugf("Watching file %s for changes", f)
-			if err := watcher.Add(f); err != nil {
-				logrus.Fatalf("Unable to watch %s: %v", f, err)
-			}
-		}
-		<-done
-	}()
-
-	return reloader, nil
-}
-
-func (c *certReloader) reload() error {
-	certificate, err := tls.LoadX509KeyPair(c.certPath, c.keyPath)
-	if err != nil {
-		return fmt.Errorf("load x509 key pair: %w", err)
-	}
-	if len(certificate.Certificate) == 0 {
-		return errors.New("certificates chain is empty")
-	}
-
-	x509Cert, err := x509.ParseCertificate(certificate.Certificate[0])
-	if err != nil {
-		return fmt.Errorf("parse x509 certificate: %w", err)
-	}
-	logrus.Infof(
-		"Metrics certificate is valid between %v and %v",
-		x509Cert.NotBefore, x509Cert.NotAfter,
-	)
-
-	now := time.Now()
-	if now.After(x509Cert.NotAfter) {
-		return errors.New("certificate is not valid any more")
-	}
-	if now.Before(x509Cert.NotBefore) {
-		return errors.New("certificate is not yet valid")
-	}
-
-	c.certLock.Lock()
-	c.certificate = &certificate
-	c.certLock.Unlock()
-
-	return nil
-}
-
-func (c *certReloader) getCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-	c.certLock.RLock()
-	defer c.certLock.RUnlock()
-	return c.certificate, nil
 }

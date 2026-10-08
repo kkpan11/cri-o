@@ -1,5 +1,4 @@
 //go:build linux
-// +build linux
 
 package nri
 
@@ -18,5 +17,6 @@ func podSandboxToNRI(pod PodSandbox) *nri.PodSandbox {
 		CgroupsPath:  lnxPod.GetCgroupsPath(),
 		Resources:    lnxPod.GetLinuxResources(),
 	}
+
 	return nriPod
 }

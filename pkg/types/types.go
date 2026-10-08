@@ -1,10 +1,10 @@
 package types
 
 import (
-	"github.com/containers/storage/pkg/idtools"
+	"go.podman.io/storage/pkg/idtools"
 )
 
-// ContainerInfo stores information about containers
+// ContainerInfo stores information about containers.
 type ContainerInfo struct {
 	Name            string            `json:"name"`
 	Pid             int               `json:"pid"`
@@ -18,6 +18,7 @@ type ContainerInfo struct {
 	Root            string            `json:"root"`
 	Sandbox         string            `json:"sandbox"`
 	IPs             []string          `json:"ip_addresses"`
+	HostNetwork     *bool             `json:"host_network"`
 }
 
 // IDMappings specifies the ID mappings used for containers.
@@ -26,7 +27,7 @@ type IDMappings struct {
 	Gids []idtools.IDMap `json:"gids"`
 }
 
-// CrioInfo stores information about the crio daemon
+// CrioInfo stores information about the crio daemon.
 type CrioInfo struct {
 	StorageDriver     string     `json:"storage_driver"`
 	StorageImage      string     `json:"storage_image"`

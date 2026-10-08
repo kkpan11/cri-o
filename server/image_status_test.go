@@ -3,21 +3,26 @@ package server_test
 import (
 	"context"
 
-	istorage "github.com/containers/image/v5/storage"
-	"github.com/cri-o/cri-o/internal/storage"
-	"github.com/cri-o/cri-o/internal/storage/references"
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
+	istorage "go.podman.io/image/v5/storage"
+	"go.uber.org/mock/gomock"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/storage"
+	"github.com/cri-o/cri-o/internal/storage/references"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("ImageStatus", func() {
-	imageCandidate, err := references.ParseRegistryImageReferenceFromOutOfProcessData("docker.io/library/image:latest")
+	imageCandidate, err := references.ParseRegistryImageReferenceFromOutOfProcessData(
+		"docker.io/library/image:latest",
+	)
 	Expect(err).ToNot(HaveOccurred())
-	imageID, err := storage.ParseStorageImageIDFromOutOfProcessData("2a03a6059f21e150ae84b0973863609494aad70f0a80eaeb64bddd8d92465812")
+	imageID, err := storage.ParseStorageImageIDFromOutOfProcessData(
+		"2a03a6059f21e150ae84b0973863609494aad70f0a80eaeb64bddd8d92465812",
+	)
 	Expect(err).ToNot(HaveOccurred())
 
 	// Prepare the sut
@@ -91,8 +96,8 @@ var _ = t.Describe("ImageStatus", func() {
 			// Then
 			Expect(err).ToNot(HaveOccurred())
 			Expect(response).NotTo(BeNil())
-			Expect(response.Info).To(HaveKey("info"))
-			Expect(response.Info["info"]).To(ContainSubstring(
+			Expect(response.GetInfo()).To(HaveKey("info"))
+			Expect(response.GetInfo()["info"]).To(ContainSubstring(
 				`{"imageSpec":{"architecture":"arch","os":"os","config":{}`,
 			))
 		})

@@ -5,43 +5,48 @@ import (
 	"errors"
 	"io"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/sirupsen/logrus"
+	"go.uber.org/mock/gomock"
 
-	"github.com/cri-o/cri-o/internal/config/ociartifact"
 	"github.com/cri-o/cri-o/internal/config/seccomp/seccompociartifact"
-	"github.com/cri-o/cri-o/pkg/annotations"
+	"github.com/cri-o/cri-o/internal/ociartifact/datastore"
+	v2 "github.com/cri-o/cri-o/pkg/annotations/v2"
 	seccompociartifactmock "github.com/cri-o/cri-o/test/mocks/seccompociartifact"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("SeccompOCIArtifact", func() {
 	t.Describe("TryPull", func() {
 		const testProfileContent = "{}"
 
 		var (
-			sut          *seccompociartifact.SeccompOCIArtifact
-			testArtifact *ociartifact.Artifact
-			implMock     *seccompociartifactmock.MockImpl
-			mockCtrl     *gomock.Controller
-			errTest      = errors.New("test")
+			sut           *seccompociartifact.SeccompOCIArtifact
+			testArtifacts []datastore.ArtifactData
+			implMock      *seccompociartifactmock.MockImpl
+			mockCtrl      *gomock.Controller
+			errTest       = errors.New("test")
+			tempDir       string
+			err           error
 		)
 
 		BeforeEach(func() {
 			logrus.SetOutput(io.Discard)
 
-			sut = seccompociartifact.New()
+			tempDir = t.MustTempDir("ociartifact")
+
+			sut, err = seccompociartifact.New(tempDir, nil)
+			Expect(err).NotTo(HaveOccurred())
 			Expect(sut).NotTo(BeNil())
 
 			mockCtrl = gomock.NewController(GinkgoT())
 			implMock = seccompociartifactmock.NewMockImpl(mockCtrl)
 			sut.SetImpl(implMock)
 
-			testArtifact = &ociartifact.Artifact{
-				Data: []byte(testProfileContent),
-			}
+			testArtifact := datastore.ArtifactData{}
+			testArtifact.SetData([]byte(testProfileContent))
+			testArtifacts = []datastore.ArtifactData{testArtifact}
 		})
 
 		AfterEach(func() {
@@ -51,7 +56,7 @@ var _ = t.Describe("SeccompOCIArtifact", func() {
 		It("should be a noop without matching annotations", func() {
 			// Given
 			// When
-			res, err := sut.TryPull(context.Background(), nil, "", nil, nil)
+			res, err := sut.TryPull(context.Background(), "", nil, nil)
 
 			// Then
 			Expect(err).NotTo(HaveOccurred())
@@ -61,11 +66,13 @@ var _ = t.Describe("SeccompOCIArtifact", func() {
 		It("should match image specific annotation for whole pod", func() {
 			// Given
 			gomock.InOrder(
-				implMock.EXPECT().Pull(gomock.Any(), gomock.Any(), gomock.Any()).Return(testArtifact, nil),
+				implMock.EXPECT().
+					PullData(gomock.Any(), gomock.Any(), gomock.Any()).
+					Return(testArtifacts, nil),
 			)
 
 			// When
-			res, err := sut.TryPull(context.Background(), nil, "", nil,
+			res, err := sut.TryPull(context.Background(), "", nil,
 				map[string]string{
 					seccompociartifact.SeccompProfilePodAnnotation: "test",
 				})
@@ -78,13 +85,15 @@ var _ = t.Describe("SeccompOCIArtifact", func() {
 		It("should match image specific annotation for container", func() {
 			// Given
 			gomock.InOrder(
-				implMock.EXPECT().Pull(gomock.Any(), gomock.Any(), gomock.Any()).Return(testArtifact, nil),
+				implMock.EXPECT().
+					PullData(gomock.Any(), gomock.Any(), gomock.Any()).
+					Return(testArtifacts, nil),
 			)
 
 			// When
-			res, err := sut.TryPull(context.Background(), nil, "container", nil,
+			res, err := sut.TryPull(context.Background(), "container", nil,
 				map[string]string{
-					annotations.SeccompProfileAnnotation + "/container": "test",
+					v2.SeccompProfile + "/container": "test",
 				})
 
 			// Then
@@ -95,11 +104,13 @@ var _ = t.Describe("SeccompOCIArtifact", func() {
 		It("should match pod specific annotation", func() {
 			// Given
 			gomock.InOrder(
-				implMock.EXPECT().Pull(gomock.Any(), gomock.Any(), gomock.Any()).Return(testArtifact, nil),
+				implMock.EXPECT().
+					PullData(gomock.Any(), gomock.Any(), gomock.Any()).
+					Return(testArtifacts, nil),
 			)
 
 			// When
-			res, err := sut.TryPull(context.Background(), nil, "",
+			res, err := sut.TryPull(context.Background(), "",
 				map[string]string{
 					seccompociartifact.SeccompProfilePodAnnotation: "test",
 				}, nil)
@@ -112,13 +123,15 @@ var _ = t.Describe("SeccompOCIArtifact", func() {
 		It("should match container specific annotation", func() {
 			// Given
 			gomock.InOrder(
-				implMock.EXPECT().Pull(gomock.Any(), gomock.Any(), gomock.Any()).Return(testArtifact, nil),
+				implMock.EXPECT().
+					PullData(gomock.Any(), gomock.Any(), gomock.Any()).
+					Return(testArtifacts, nil),
 			)
 
 			// When
-			res, err := sut.TryPull(context.Background(), nil, "container",
+			res, err := sut.TryPull(context.Background(), "container",
 				map[string]string{
-					annotations.SeccompProfileAnnotation + "/container": "test",
+					v2.SeccompProfile + "/container": "test",
 				}, nil)
 
 			// Then
@@ -129,9 +142,9 @@ var _ = t.Describe("SeccompOCIArtifact", func() {
 		It("should not match if container name is different", func() {
 			// Given
 			// When
-			res, err := sut.TryPull(context.Background(), nil, "another-container",
+			res, err := sut.TryPull(context.Background(), "another-container",
 				map[string]string{
-					annotations.SeccompProfileAnnotation + "/container": "test",
+					v2.SeccompProfile + "/container": "test",
 				}, nil)
 
 			// Then
@@ -142,11 +155,13 @@ var _ = t.Describe("SeccompOCIArtifact", func() {
 		It("should fail if artifact pull fails", func() {
 			// Given
 			gomock.InOrder(
-				implMock.EXPECT().Pull(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, errTest),
+				implMock.EXPECT().
+					PullData(gomock.Any(), gomock.Any(), gomock.Any()).
+					Return(nil, errTest),
 			)
 
 			// When
-			res, err := sut.TryPull(context.Background(), nil, "", nil,
+			res, err := sut.TryPull(context.Background(), "", nil,
 				map[string]string{
 					seccompociartifact.SeccompProfilePodAnnotation: "test",
 				})

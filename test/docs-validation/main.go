@@ -5,11 +5,13 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
-	"github.com/cri-o/cri-o/pkg/config"
 	"github.com/sirupsen/logrus"
+
+	"github.com/cri-o/cri-o/pkg/config"
 )
 
 type entry struct {
@@ -25,15 +27,17 @@ const (
 )
 
 var (
-	// Tags which should be not checked at all
+	// Tags which should be not checked at all.
 	excludedTags = []string{
 		"plugin_dir",                  // deprecated
 		"runtimes",                    // printed as separate table
 		"workloads",                   // printed as separate table
 		"manage_network_ns_lifecycle", // deprecated
+		"default_validator",           // printed as a separate table
+		"namespaced_auth_dir",         // hidden
 	}
 
-	// Tags where it should not validate the values
+	// Tags where it should not validate the values.
 	excludedTagsValue = []string{
 		"apparmor_profile", // contains dynamic version number
 		"root",             // user dependent
@@ -41,20 +45,21 @@ var (
 		"storage_driver",   // user dependent
 	}
 
-	// Tags where it should not validate the values
+	// Tags where it should not validate the values.
 	excludedCLI = []string{
 		"workloads", // too complex an option for a CLI flag
+		"default_validator",
+		"namespaced_auth_dir", // hidden
 	}
 
-	// Mapping for inconsistencies between tags and CLI arguments
+	// Mapping for inconsistencies between tags and CLI arguments.
 	tagToCLIOption = map[string]string{
-		"network_dir":         "cni-config-dir",
-		"plugin_dir":          "cni-plugin-dir",
-		"plugin_dirs":         "cni-plugin-dir",
-		"insecure_registries": "insecure-registry",
-		"log_to_journald":     "log-journald",
-		"registries":          "registry",
-		"storage_option":      "storage-opt",
+		"network_dir":             "cni-config-dir",
+		"plugin_dir":              "cni-plugin-dir",
+		"plugin_dirs":             "cni-plugin-dir",
+		"log_to_journald":         "log-journald",
+		"storage_option":          "storage-opt",
+		"container_level_enabled": "checkpoint-restore-level",
 	}
 )
 
@@ -76,6 +81,7 @@ func main() {
 	if tagFailed || cliFailed {
 		os.Exit(1)
 	}
+
 	logrus.Info("Everything looks fine")
 }
 
@@ -97,10 +103,12 @@ func validateTags(cfg *config.Config) (failed bool) {
 		"Verifying TOML tags of `config.go` to `TemplateString` and `%s`",
 		crioConfMdPath,
 	)
+
 	for _, entry := range entries {
 		// Skip whitelisted items
 		if stringInSlice(entry.tag, excludedTags) {
 			logrus.Debugf("Skipping excluded tag `%s`", entry.tag)
+
 			continue
 		}
 
@@ -114,6 +122,7 @@ func validateTags(cfg *config.Config) (failed bool) {
 				"Tag `%s` with expected value `%s` not found in TemplateString",
 				entry.tag, entry.value,
 			)
+
 			failed = true
 		}
 
@@ -127,6 +136,7 @@ func validateTags(cfg *config.Config) (failed bool) {
 				"Tag `%s` with expected value `%s` not found in `%s`",
 				entry.tag, entry.value, crioConfMdPath,
 			)
+
 			failed = true
 		}
 	}
@@ -136,6 +146,7 @@ func validateTags(cfg *config.Config) (failed bool) {
 	} else {
 		logrus.Info("Tag validation successful")
 	}
+
 	return failed
 }
 
@@ -161,6 +172,7 @@ func validateCli(cfg *config.Config) (failed bool) {
 
 		if stringInSlice(entry.tag, excludedCLI) {
 			logrus.Debugf("Skipping excluded CLI entry `%s`", entry.tag)
+
 			continue
 		}
 
@@ -175,7 +187,9 @@ func validateCli(cfg *config.Config) (failed bool) {
 				"No matching CLI option `%s` found (tag `%s`) in `%s`",
 				cliOption, entry.tag, crioCLIGoPath,
 			)
+
 			failed = true
+
 			continue
 		}
 
@@ -189,6 +203,7 @@ func validateCli(cfg *config.Config) (failed bool) {
 				"CLI option `%s` not found in synopsis of `%s`",
 				option, crioCLIMdPath,
 			)
+
 			failed = true
 		}
 
@@ -199,6 +214,7 @@ func validateCli(cfg *config.Config) (failed bool) {
 				"CLI option `%s` not found in description of `%s`",
 				option, crioCLIMdPath,
 			)
+
 			failed = true
 		}
 	}
@@ -208,6 +224,7 @@ func validateCli(cfg *config.Config) (failed bool) {
 	} else {
 		logrus.Info("CLI validation successful")
 	}
+
 	return failed
 }
 
@@ -216,21 +233,18 @@ func openFile(path string) []byte {
 	if err != nil {
 		logrus.Fatalf("Unable to open file: %v", err)
 	}
+
 	return file
 }
 
 func stringInSlice(a string, list []string) bool {
-	for _, b := range list {
-		if b == a {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, a)
 }
 
 func allEntries(c *config.Config) []entry {
 	entries := &[]entry{}
-	recursiveEntries(reflect.ValueOf(*c), entries, map[interface{}]bool{})
+	recursiveEntries(reflect.ValueOf(*c), entries, map[any]bool{})
+
 	return *entries
 }
 
@@ -241,41 +255,51 @@ type stringer interface {
 func recursiveEntries(
 	v reflect.Value,
 	entries *[]entry,
-	seen map[interface{}]bool,
+	seen map[any]bool,
 ) {
-	for v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface {
-		if v.Kind() == reflect.Ptr {
+	for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+		if v.Kind() == reflect.Pointer {
 			// Skip private or recursive data
 			if !v.CanInterface() || seen[v.Interface()] {
 				return
 			}
+
 			seen[v.Interface()] = true
 		}
+
 		v = v.Elem()
 	}
 
 	switch v.Kind() {
 	case reflect.Slice, reflect.Array:
-		for i := 0; i < v.Len(); i++ {
+		for i := range v.Len() {
 			recursiveEntries(v.Index(i), entries, seen)
 		}
 	case reflect.Struct:
 		t := v.Type()
-		for i := 0; i < t.NumField(); i++ {
+		for i := range t.NumField() {
 			field := t.Field(i)
 			tag := strings.TrimSuffix(field.Tag.Get("toml"), ",omitempty")
 			name := field.Name
 
 			vv := v.FieldByName(name)
 			value := ""
+
 			if !stringInSlice(tag, excludedTagsValue) {
 				switch {
-				case field.Type.Implements(reflect.TypeOf((*stringer)(nil)).Elem()):
+				case field.Type.Implements(reflect.TypeFor[stringer]()):
 					// We need a checked type assertion to make golangci-lint happy...
-					if str, ok := vv.MethodByName("String").Interface().(func() string); ok {
+					if str, ok := reflect.TypeAssert[func() string](vv.MethodByName("String")); ok {
+						// if the field is a pointer and nil, skip validation
+						if vv.Kind() == reflect.Pointer && vv.IsNil() {
+							break
+						}
+
 						value = strconv.Quote(str())
+
 						break
 					}
+
 					fallthrough
 				case vv.Kind() == reflect.Bool:
 					value = strconv.FormatBool(vv.Bool())
