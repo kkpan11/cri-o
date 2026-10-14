@@ -5,12 +5,10 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/moby/sys/devices"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
-
-	"github.com/opencontainers/runc/libcontainer/devices"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"tags.cncf.io/container-device-interface/pkg/cdi"
 )
@@ -23,6 +21,7 @@ var _ = t.Describe("Container", func() {
 			privilegedWithoutHostDevices bool
 			expectHostDevices            bool
 		}
+
 		hostDevices, err := devices.HostDevices()
 		Expect(err).ToNot(HaveOccurred())
 
@@ -54,7 +53,6 @@ var _ = t.Describe("Container", func() {
 		}
 
 		for _, test := range tests {
-			test := test
 			It(test.testDescription, func() {
 				// Given
 				config := &types.ContainerConfig{
@@ -99,6 +97,7 @@ var _ = t.Describe("Container", func() {
 			expectedDeviceUID                  uint32
 			expectedDeviceGID                  uint32
 		}
+
 		hostDevices, err := devices.HostDevices()
 		Expect(err).ToNot(HaveOccurred())
 
@@ -108,6 +107,7 @@ var _ = t.Describe("Container", func() {
 			for _, d := range hostDevices {
 				if d.Uid != d.Gid {
 					testDevice = d
+
 					break
 				}
 			}
@@ -147,7 +147,6 @@ var _ = t.Describe("Container", func() {
 		}
 
 		for _, test := range tests {
-			test := test
 			It(test.testDescription, func() {
 				// Given
 				config := &types.ContainerConfig{
@@ -189,7 +188,7 @@ var _ = t.Describe("Container", func() {
 		}
 	})
 
-	t.Describe("SpecAdd(CDI)Devices", func() {
+	t.Describe("SpecInjectCDIDevices", func() {
 		writeCDISpecFiles := func(content []string) error {
 			if len(content) == 0 {
 				return nil
@@ -198,13 +197,18 @@ var _ = t.Describe("Container", func() {
 			dir := t.MustTempDir("cdi")
 			for idx, data := range content {
 				file := filepath.Join(dir, fmt.Sprintf("spec-%d.yaml", idx))
+
 				err := os.WriteFile(file, []byte(data), 0o644)
 				if err != nil {
 					return err
 				}
 			}
 
-			return cdi.GetRegistry(cdi.WithSpecDirs(dir)).Refresh()
+			if err := cdi.Configure(cdi.WithSpecDirs(dir)); err != nil {
+				return err
+			}
+
+			return cdi.Refresh()
 		}
 
 		type testdata struct {
@@ -399,7 +403,6 @@ containerEdits:
 		}
 
 		for _, test := range tests {
-			test := test
 			It(test.testDescription, func() {
 				// Given
 				config := &types.ContainerConfig{
@@ -421,13 +424,20 @@ containerEdits:
 				Expect(writeCDISpecFiles(test.cdiSpecFiles)).To(Succeed())
 
 				// When
-				err := sut.SpecAddDevices(nil, nil, false, false)
+				err := sut.SpecInjectCDIDevices()
 
 				// Then
-				Expect(err != nil).To(Equal(test.expectError))
+				if test.expectError {
+					Expect(err).To(HaveOccurred())
+				} else {
+					Expect(err).ToNot(HaveOccurred())
+				}
+
 				if err == nil {
 					Expect(sut.Spec().Config.Process.Env).Should(ContainElements(test.expectEnv))
-					Expect(sut.Spec().Config.Linux.Devices).Should(ContainElements(test.expectDevices))
+					Expect(
+						sut.Spec().Config.Linux.Devices,
+					).Should(ContainElements(test.expectDevices))
 				}
 			})
 		}

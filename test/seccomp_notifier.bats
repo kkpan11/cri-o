@@ -8,10 +8,6 @@ function setup() {
 		skip "seccomp is not enabled"
 	fi
 
-	if [[ "$ARCH" != "$ARCH_X86_64" ]]; then
-		skip "not supported on arch $ARCH"
-	fi
-
 	setup_test
 }
 
@@ -21,16 +17,17 @@ function teardown() {
 
 @test "seccomp notifier with runtime/default" {
 	# Run with enabled feature set
-	create_runtime_with_allowed_annotation seccomp io.kubernetes.cri-o.seccompNotifierAction
+	setup_crio
+	create_runtime_with_allowed_annotation seccomp seccomp-notifier-action.crio.io
 	PORT=$(free_port)
-	CONTAINER_ENABLE_METRICS=true CONTAINER_METRICS_PORT=$PORT start_crio
+	CONTAINER_ENABLE_METRICS=true CONTAINER_METRICS_PORT=$PORT start_crio_no_setup
 
 	# Run with runtime/default
 	jq '.linux.security_context.seccomp.profile_type = 0' \
 		"$TESTDATA"/container_redis.json > "$TESTDIR"/container.json
 
 	# Enable the annotation in the sandbox
-	jq '.annotations += { "io.kubernetes.cri-o.seccompNotifierAction": "stop" }' \
+	jq '.annotations += { "seccomp-notifier-action.crio.io": "stop" }' \
 		"$TESTDATA"/sandbox_config.json > "$TESTDIR"/sandbox.json
 
 	CTR=$(crictl run "$TESTDIR"/container.json "$TESTDIR"/sandbox.json)
@@ -43,7 +40,7 @@ function teardown() {
 	sleep 6 # wait until the notifier stop the workload
 
 	# Assert
-	grep -q "Got seccomp notifier message for container ID: $CTR (syscall = swapoff)" "$CRIO_LOG"
+	grep -q "Seccomp blocked syscall 'swapoff' in container $CTR" "$CRIO_LOG"
 	# Check if container exited
 	crictl inspect "$CTR" | jq -e '.status.state == "CONTAINER_EXITED"'
 	crictl inspect "$CTR" | jq -e '.status.reason == "seccomp killed"'
@@ -53,35 +50,35 @@ function teardown() {
 
 @test "seccomp notifier with runtime/default but not stop" {
 	# Run with enabled feature set
-	create_runtime_with_allowed_annotation seccomp io.kubernetes.cri-o.seccompNotifierAction
+	setup_crio
+	create_runtime_with_allowed_annotation seccomp seccomp-notifier-action.crio.io
 	PORT=$(free_port)
-	CONTAINER_ENABLE_METRICS=true CONTAINER_METRICS_PORT=$PORT start_crio
+	CONTAINER_ENABLE_METRICS=true CONTAINER_METRICS_PORT=$PORT start_crio_no_setup
 
 	# Run with runtime/default
 	jq '.linux.security_context.seccomp.profile_type = 0' \
 		"$TESTDATA"/container_redis.json > "$TESTDIR"/container.json
 
 	# Enable the annotation in the sandbox
-	jq '.annotations += { "io.kubernetes.cri-o.seccompNotifierAction": "" }' \
+	jq '.annotations += { "seccomp-notifier-action.crio.io": "" }' \
 		"$TESTDATA"/sandbox_config.json > "$TESTDIR"/sandbox.json
 
 	CTR=$(crictl run "$TESTDIR"/container.json "$TESTDIR"/sandbox.json)
 
-	for _ in 1 2 3; do
-		run ! crictl exec -s "$CTR" swapoff -a
-		sleep 1
-	done
+	run ! crictl exec -s "$CTR" /bin/sh -c "swapoff -a; swapoff -a; swapoff -a"
+	sleep 1
 
-	# Assert
-	grep -q "Got seccomp notifier message for container ID: $CTR (syscall = swapoff)" "$CRIO_LOG"
+	# Assert the blocked syscall keeps being logged for every attempt
+	[[ $(grep -c "Seccomp blocked syscall 'swapoff' in container $CTR" "$CRIO_LOG") -ge 3 ]]
 	crictl inspect "$CTR" | jq -e '.status.state == "CONTAINER_RUNNING"'
 	curl -sf "http://localhost:$PORT/metrics" | grep 'container_runtime_crio_containers_seccomp_notifier_count_total{name="k8s_podsandbox1-redis_podsandbox1_redhat.test.crio_redhat-test-crio_0",syscall="swapoff"} 3'
 }
 
 @test "seccomp notifier with custom profile" {
 	# Run with enabled feature set
-	create_runtime_with_allowed_annotation seccomp io.kubernetes.cri-o.seccompNotifierAction
-	start_crio
+	setup_crio
+	create_runtime_with_allowed_annotation seccomp seccomp-notifier-action.crio.io
+	start_crio_no_setup
 
 	# Run with custom profile
 	sed -e 's/"chmod",//' -e 's/"fchmod",//' -e 's/"fchmodat",//g' \
@@ -92,7 +89,7 @@ function teardown() {
 		"$TESTDATA"/container_sleep.json > "$TESTDIR"/container.json
 
 	# Enable the annotation in the sandbox
-	jq '.annotations += { "io.kubernetes.cri-o.seccompNotifierAction": "stop" }' \
+	jq '.annotations += { "seccomp-notifier-action.crio.io": "stop" }' \
 		"$TESTDATA"/sandbox_config.json > "$TESTDIR"/sandbox.json
 
 	CTR=$(crictl run "$TESTDIR"/container.json "$TESTDIR"/sandbox.json)
@@ -105,7 +102,7 @@ function teardown() {
 	sleep 6 # wait until the notifier stop the workload
 
 	# Assert
-	grep -q "Got seccomp notifier message for container ID: $CTR (syscall = swapoff)" "$CRIO_LOG"
+	grep -q "Seccomp blocked syscall 'swapoff' in container $CTR" "$CRIO_LOG"
 	# Check if container exited
 	crictl inspect "$CTR" | jq -e '.status.state == "CONTAINER_EXITED"'
 	crictl inspect "$CTR" | jq -e '.status.reason == "seccomp killed"'
@@ -125,13 +122,13 @@ function teardown() {
 		"$TESTDATA"/container_sleep.json > "$TESTDIR"/container.json
 
 	# Enable the annotation in the sandbox
-	jq '.annotations += { "io.kubernetes.cri-o.seccompNotifierAction": "stop" }' \
+	jq '.annotations += { "seccomp-notifier-action.crio.io": "stop" }' \
 		"$TESTDATA"/sandbox_config.json > "$TESTDIR"/sandbox.json
 
 	CTR=$(crictl run "$TESTDIR"/container.json "$TESTDIR"/sandbox.json)
 	run ! crictl exec -s "$CTR" chmod 777 .
 
 	# Assert
-	run ! grep -q "Got seccomp notifier message for container ID: $CTR" "$CRIO_LOG"
+	run ! grep -q "Seccomp blocked syscall .* in container $CTR" "$CRIO_LOG"
 	crictl inspect "$CTR" | jq -e '.status.state == "CONTAINER_RUNNING"'
 }

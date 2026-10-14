@@ -17,13 +17,13 @@ ExecStart=/usr/local/bin/crio \
           $CRIO_METRICS_OPTIONS
 ExecReload=/bin/kill -s HUP $MAINPID
 TasksMax=infinity
-LimitNOFILE=1048576
 LimitNPROC=1048576
 LimitCORE=infinity
 OOMScoreAdjust=-999
 TimeoutStartSec=0
 Restart=on-failure
 RestartSec=10
+WatchdogSec=60s
 
 [Install]
 WantedBy=multi-user.target

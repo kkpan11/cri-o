@@ -3,9 +3,10 @@
   set_fact:
     supports_python3: true
     cacheable: true
-  when: (ansible_distribution == 'RedHat' and ansible_distribution_major_version|int >= 8) or
-        (ansible_distribution == 'CentOS' and ansible_distribution_major_version|int >= 8) or
-        (ansible_distribution == 'Fedora' and ansible_distribution_major_version|int >= 30)
+  when:
+    (ansible_distribution == 'RedHat' and ansible_distribution_major_version|int >= 8) or
+    (ansible_distribution == 'CentOS' and ansible_distribution_major_version|int >= 8) or
+    (ansible_distribution == 'Fedora' and ansible_distribution_major_version|int >= 30)
 
 - name: Make sure we have all required packages
   become: yes
@@ -13,6 +14,7 @@
     state: present
     enablerepo: powertools
     name:
+      - conntrack-tools
       - container-selinux
       - curl
       - expect
@@ -35,14 +37,13 @@
       - libxslt-devel
       - libcap-devel
       - make
-      - mlocate
       - nfs-utils
+      - nftables
       - nmap-ncat
       - openssl
       - openssl-devel
       - pkgconfig
       - python3
-      - python-rhsm-certificates
       - redhat-rpm-config
       - rpcbind
       - rsync
@@ -60,6 +61,7 @@
     name:
       - glibc-static
       - gpgme-devel
+      - json-c-devel
   when: ansible_distribution == 'CentOS' and ansible_distribution_release == "Stream" and ansible_distribution_major_version|int > 8
 
 - name: Install optional packages For RHEL
@@ -70,6 +72,7 @@
     name:
       - glibc-static
       - gpgme-devel
+      - json-c-devel
   when: ansible_distribution == 'RedHat'
 
 - name: Install optional packages For Fedora/CentOS 8
@@ -80,6 +83,7 @@
     name:
       - glibc-static
       - gpgme-devel
+      - json-c-devel
   when: ansible_distribution != 'RedHat' and (ansible_distribution == 'CentOS' and ansible_distribution_version != 9)
 
 - name: Add Fedora specific packages
@@ -90,6 +94,12 @@
       - btrfs-progs-devel
       - gpgme-devel
       - glibc-static
+      # required to test the crun-wasm workflow.
+      - crun-wasm
+      # required for crun-wasm and other Rust-based tools.
+      - rust
+      - cargo
+      - cargo-c
   when: ansible_distribution in ['Fedora']
 
 - name: Add python-boto for RHEL and CentOS
@@ -98,13 +108,13 @@
     name: "{{ item }}"
     state: present
   with_items:
-   - python-boto
+    - python-boto
   when: (supports_python3 is not defined or not supports_python3) and ansible_distribution in ['RedHat', 'CentOS']
 
 - name: Update all packages
   become: yes
   package:
-    name: '*'
+    name: "*"
     state: latest
   when: supports_python3 is not defined or not supports_python3
 

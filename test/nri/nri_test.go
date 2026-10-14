@@ -49,18 +49,18 @@ func TestPluginSynchronization(stdT *testing.T) {
 		},
 	)
 
-	var (
-		t = nriTest{
-			plugins: []*plugin{nil},
-		}
-		containerCount = 3
-		pods           []string
-		ctrs           []string
-	)
+	t := nriTest{
+		plugins: []*plugin{nil},
+	}
+
+	const containerCount = 3
+
+	pods := make([]string, 0, containerCount)
+	ctrs := make([]string, 0, containerCount)
 
 	t.Setup(stdT)
 
-	for i := 0; i < containerCount; i++ {
+	for range containerCount {
 		pod, ctr := t.runContainer()
 		pods = append(pods, pod)
 		ctrs = append(ctrs, ctr)
@@ -120,18 +120,34 @@ func TestContainerEvents(stdT *testing.T) {
 	require.NotNil(t, p.WaitEvent(RunPodEvent(pod), timeout), "pod creation event")
 
 	ctr := t.createContainer(pod)
-	require.NotNil(t, p.WaitEvent(CreateContainerEvent(pod, ctr), 0), "container creation event")
-	require.NotNil(t, p.WaitEvent(PostCreateContainerEvent(pod, ctr), timeout), "container post-creation event")
+	require.NotNil(
+		t,
+		p.WaitEvent(CreateContainerEvent(pod, ctr), timeout),
+		"container creation event",
+	)
+	require.NotNil(
+		t,
+		p.WaitEvent(PostCreateContainerEvent(pod, ctr), timeout),
+		"container post-creation event",
+	)
 
 	t.startContainer(ctr)
-	require.NotNil(t, p.WaitEvent(StartContainerEvent(pod, ctr), 0), "container start event")
-	require.NotNil(t, p.WaitEvent(PostStartContainerEvent(pod, ctr), timeout), "container post-start event")
+	require.NotNil(t, p.WaitEvent(StartContainerEvent(pod, ctr), timeout), "container start event")
+	require.NotNil(
+		t,
+		p.WaitEvent(PostStartContainerEvent(pod, ctr), timeout),
+		"container post-start event",
+	)
 
 	t.stopContainer(ctr)
-	require.NotNil(t, p.WaitEvent(StopContainerEvent(pod, ctr), 0), "container stop event")
+	require.NotNil(t, p.WaitEvent(StopContainerEvent(pod, ctr), timeout), "container stop event")
 
 	t.removeContainer(ctr)
-	require.NotNil(t, p.WaitEvent(RemoveContainerEvent(pod, ctr), 0), "container removal event")
+	require.NotNil(
+		t,
+		p.WaitEvent(RemoveContainerEvent(pod, ctr), timeout),
+		"container removal event",
+	)
 
 	t.stopPod(pod)
 	t.removePod(pod)
@@ -149,8 +165,9 @@ func TestMountInjection(stdT *testing.T) {
 		testFile    = "test.out"
 		injectMount = func(p *plugin, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 			if err := os.Chmod(testDir, 0o777); err != nil {
-				return nil, nil, fmt.Errorf("failed to change permissions: %v", err)
+				return nil, nil, fmt.Errorf("failed to change permissions: %w", err)
 			}
+
 			adjust := &api.ContainerAdjustment{}
 			adjust.AddMount(
 				&api.Mount{
@@ -160,6 +177,7 @@ func TestMountInjection(stdT *testing.T) {
 					Options:     []string{"bind"},
 				},
 			)
+
 			return adjust, nil, nil
 		}
 
@@ -196,6 +214,7 @@ func TestEnvironmentInjection(stdT *testing.T) {
 		injectEnv = func(p *plugin, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 			adjust := &api.ContainerAdjustment{}
 			adjust.AddEnv("TEST_VARIABLE", "TEST_VALUE")
+
 			return adjust, nil, nil
 		}
 
@@ -216,7 +235,7 @@ func TestEnvironmentInjection(stdT *testing.T) {
 	stdout, _, exitCode := t.execShellScript(ctr, "set -e; echo $TEST_VARIABLE")
 	expected := "TEST_VALUE\n"
 
-	require.Equal(t, exitCode, int32(0), "exit code 0")
+	require.Equal(t, int32(0), exitCode, "exit code 0")
 	require.Equal(t, expected, string(stdout), "test output")
 }
 
@@ -234,10 +253,12 @@ func TestAnnotationInjection(stdT *testing.T) {
 		injectAnnotation = func(p *plugin, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 			adjust := &api.ContainerAdjustment{}
 			adjust.AddAnnotation(testKey, testValue)
+
 			return adjust, nil, nil
 		}
 		saveContainer = func(p *plugin, pod *api.PodSandbox, ctr *api.Container) error {
 			annotated = ctr
+
 			return nil
 		}
 
@@ -257,10 +278,14 @@ func TestAnnotationInjection(stdT *testing.T) {
 	t.Setup(stdT)
 	t.StartPlugins(WaitForPluginSync)
 	pod, ctr := t.runContainer()
-	require.NotNil(t, t.plugins[0].WaitEvent(PostCreateContainerEvent(pod, ctr), eventTimeout), "container post-creation event")
+	require.NotNil(
+		t,
+		t.plugins[0].WaitEvent(PostCreateContainerEvent(pod, ctr), eventTimeout),
+		"container post-creation event",
+	)
 
-	require.True(t, annotated != nil, "received post-create event")
-	require.True(t, annotated.GetAnnotations()[testKey] == testValue, "annotation updated")
+	require.NotNil(t, annotated, "received post-create event")
+	require.Equal(t, annotated.GetAnnotations()[testKey], testValue, "annotation updated")
 }
 
 func TestDeviceInjection(stdT *testing.T) {
@@ -282,6 +307,7 @@ func TestDeviceInjection(stdT *testing.T) {
 				Gid:      api.UInt32(uint32(22)),
 				FileMode: api.FileMode(uint32(0o0664)),
 			})
+
 			return adjust, nil, nil
 		}
 
@@ -302,7 +328,7 @@ func TestDeviceInjection(stdT *testing.T) {
 	stdout, _, exitCode := t.execShellScript(ctr, "set -e; stat -c %F-%a-%u:%g-%t:%T /dev/pie")
 	expected := "character special file-664-11:22-1f:29\n"
 
-	require.Equal(t, exitCode, int32(0), "exit code 0")
+	require.Equal(t, int32(0), exitCode, "exit code 0")
 	require.Equal(t, expected, string(stdout), "test output")
 }
 
@@ -319,6 +345,7 @@ func TestCpusetAdjustment(stdT *testing.T) {
 		func() *api.ContainerAdjustment {
 			adjust := &api.ContainerAdjustment{}
 			adjust.SetLinuxCPUSetCPUs(availableCpuset[1])
+
 			return adjust
 		},
 		"set -e; grep Cpus_allowed_list: /proc/self/status",
@@ -339,6 +366,7 @@ func TestMemsetAdjustment(stdT *testing.T) {
 		func() *api.ContainerAdjustment {
 			adjust := &api.ContainerAdjustment{}
 			adjust.SetLinuxCPUSetMems(availableMemset[1])
+
 			return adjust
 		},
 		"set -e; grep Mems_allowed_list: /proc/self/status",
@@ -346,7 +374,11 @@ func TestMemsetAdjustment(stdT *testing.T) {
 	)
 }
 
-func testXxxsetAdjustment(stdT *testing.T, adjust func() *api.ContainerAdjustment, testScript, expectedResult string) {
+func testXxxsetAdjustment(
+	stdT *testing.T,
+	adjust func() *api.ContainerAdjustment,
+	testScript, expectedResult string,
+) {
 	handler := func(*plugin, *api.PodSandbox, *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 		return adjust(), nil, nil
 	}
@@ -366,7 +398,7 @@ func testXxxsetAdjustment(stdT *testing.T, adjust func() *api.ContainerAdjustmen
 
 	stdout, _, exitCode := t.execShellScript(ctr, testScript)
 	t.Logf("*** got stdout %s, exitCode %d", stdout, exitCode)
-	require.Equal(t, exitCode, int32(0), "exit code 0")
+	require.Equal(t, int32(0), exitCode, "exit code 0")
 	require.Equal(t, expectedResult, string(stdout), "test output")
 }
 
@@ -383,12 +415,14 @@ func TestCpusetAdjustmentUpdate(stdT *testing.T) {
 		func() *api.ContainerAdjustment {
 			adjust := &api.ContainerAdjustment{}
 			adjust.SetLinuxCPUSetCPUs(availableCpuset[1])
+
 			return adjust
 		},
 		func(ctr0 string) *api.ContainerUpdate {
 			update := &api.ContainerUpdate{}
 			update.SetContainerId(ctr0)
 			update.SetLinuxCPUSetCPUs(availableCpuset[0])
+
 			return update
 		},
 		"set -e; grep Cpus_allowed_list: /proc/self/status",
@@ -410,12 +444,14 @@ func TestMemsetAdjustmentUpdate(stdT *testing.T) {
 		func() *api.ContainerAdjustment {
 			adjust := &api.ContainerAdjustment{}
 			adjust.SetLinuxCPUSetMems(availableMemset[1])
+
 			return adjust
 		},
 		func(ctr0 string) *api.ContainerUpdate {
 			update := &api.ContainerUpdate{}
 			update.SetContainerId(ctr0)
 			update.SetLinuxCPUSetMems(availableMemset[0])
+
 			return update
 		},
 		"set -e; grep Mems_allowed_list: /proc/self/status",
@@ -424,7 +460,12 @@ func TestMemsetAdjustmentUpdate(stdT *testing.T) {
 	)
 }
 
-func testXxxsetAdjustmentUpdate(stdT *testing.T, adjust func() *api.ContainerAdjustment, update func(string) *api.ContainerUpdate, testScript, expectedAdjustResult, expectedUpdateResult string) {
+func testXxxsetAdjustmentUpdate(
+	stdT *testing.T,
+	adjust func() *api.ContainerAdjustment,
+	update func(string) *api.ContainerUpdate,
+	testScript, expectedAdjustResult, expectedUpdateResult string,
+) {
 	skipTestForCondition(stdT,
 		map[string]bool{
 			"no runtime connection":           crio == nil,
@@ -436,6 +477,7 @@ func testXxxsetAdjustmentUpdate(stdT *testing.T, adjust func() *api.ContainerAdj
 	handler := func(p *plugin, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 		if ctr0 == "" {
 			ctr0 = ctr.GetId()
+
 			return adjust(), nil, nil
 		} else {
 			return nil, []*api.ContainerUpdate{update(ctr0)}, nil
@@ -457,13 +499,13 @@ func testXxxsetAdjustmentUpdate(stdT *testing.T, adjust func() *api.ContainerAdj
 
 	stdout, _, exitCode := t.execShellScript(ctr, testScript)
 	t.Logf("*** got stdout %s, exitCode %d", stdout, exitCode)
-	require.Equal(t, exitCode, int32(0), "exit code 0")
+	require.Equal(t, int32(0), exitCode, "exit code 0")
 	require.Equal(t, expectedAdjustResult, string(stdout), "test output")
 
 	t.runContainer()
 	stdout, _, exitCode = t.execShellScript(ctr, testScript)
 	t.Logf("*** got stdout %s, exitCode %d", stdout, exitCode)
-	require.Equal(t, exitCode, int32(0), "exit code 0")
+	require.Equal(t, int32(0), exitCode, "exit code 0")
 	require.Equal(t, expectedUpdateResult, string(stdout), "test output")
 }
 
@@ -485,6 +527,7 @@ func skipTestForCondition(t *testing.T, skipChecks ...map[string]bool) {
 
 type idgen struct {
 	sync.Mutex
+
 	uid int
 	pod int
 	ctr int

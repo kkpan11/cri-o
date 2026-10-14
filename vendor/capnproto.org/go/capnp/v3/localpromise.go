@@ -1,9 +1,5 @@
 package capnp
 
-import (
-	"context"
-)
-
 // ClientHook for a promise that will be resolved to some other capability
 // at some point. Buffers calls in a queue until the promsie is fulfilled,
 // then forwards them.
@@ -12,59 +8,35 @@ type localPromise struct {
 }
 
 // NewLocalPromise returns a client that will eventually resolve to a capability,
-// supplied via the fulfiller.
+// supplied via the resolver.
 func NewLocalPromise[C ~ClientKind]() (C, Resolver[C]) {
-	lp := newLocalPromise()
-	p, f := NewPromisedClient(lp)
-	return C(p), localResolver[C]{
-		lp:             lp,
-		clientResolver: f,
+	aq := NewAnswerQueue(Method{})
+	f := NewPromise(Method{}, aq, aq)
+	p := f.Answer().Client().AddRef()
+
+	c := C(p)
+	r := localResolver[C]{
+		p: f,
+		c: c,
 	}
-}
-
-func newLocalPromise() localPromise {
-	return localPromise{aq: NewAnswerQueue(Method{})}
-}
-
-func (lp localPromise) Send(ctx context.Context, s Send) (*Answer, ReleaseFunc) {
-	return lp.aq.PipelineSend(ctx, nil, s)
-}
-
-func (lp localPromise) Recv(ctx context.Context, r Recv) PipelineCaller {
-	return lp.aq.PipelineRecv(ctx, nil, r)
-}
-
-func (lp localPromise) Brand() Brand {
-	return Brand{}
-}
-
-func (lp localPromise) Shutdown() {}
-
-func (lp localPromise) String() string {
-	return "localPromise{...}"
-}
-
-func (lp localPromise) Fulfill(c Client) {
-	msg, seg := NewSingleSegmentMessage(nil)
-	capID := msg.AddCap(c)
-	lp.aq.Fulfill(NewInterface(seg, capID).ToPtr())
-}
-
-func (lp localPromise) Reject(err error) {
-	lp.aq.Reject(err)
+	return c, r
 }
 
 type localResolver[C ~ClientKind] struct {
-	lp             localPromise
-	clientResolver Resolver[Client]
+	p *Promise
+	c C
 }
 
 func (lf localResolver[C]) Fulfill(c C) {
-	lf.lp.Fulfill(Client(c))
-	lf.clientResolver.Fulfill(Client(c))
+	msg, seg := NewSingleSegmentMessage(nil)
+	Client(lf.c).AttachReleaser(lf.p.ReleaseClients)
+	Client(lf.c).AttachReleaser(msg.Release)
+	capID := msg.CapTable().Add(Client(c))
+	iface := NewInterface(seg, capID)
+	lf.p.Fulfill(iface.ToPtr())
 }
 
 func (lf localResolver[C]) Reject(err error) {
-	lf.lp.Reject(err)
-	lf.clientResolver.Reject(err)
+	Client(lf.c).AttachReleaser(lf.p.ReleaseClients)
+	lf.p.Reject(err)
 }

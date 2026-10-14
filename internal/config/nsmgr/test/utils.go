@@ -1,15 +1,18 @@
+//go:build test
+
 package nsmgr_test
 
 import (
 	"path/filepath"
 	"time"
 
+	"github.com/opencontainers/runtime-spec/specs-go"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
 	"github.com/cri-o/cri-o/internal/config/nsmgr"
 	"github.com/cri-o/cri-o/internal/oci"
 	"github.com/cri-o/cri-o/internal/storage"
 	"github.com/cri-o/cri-o/internal/storage/references"
-	"github.com/opencontainers/runtime-spec/specs-go"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
 type SpoofedNamespace struct {
@@ -29,6 +32,7 @@ func (s *SpoofedNamespace) Path() string {
 	if s.EmptyPath {
 		return ""
 	}
+
 	return filepath.Join("tmp", string(s.NsType))
 }
 
@@ -52,14 +56,20 @@ var AllSpoofedNamespaces = []nsmgr.Namespace{
 }
 
 func ContainerWithPid(pid int) (*oci.Container, error) {
-	imageName, err := references.ParseRegistryImageReferenceFromOutOfProcessData("example.com/some-image:latest")
+	imageName, err := references.ParseRegistryImageReferenceFromOutOfProcessData(
+		"example.com/some-image:latest",
+	)
 	if err != nil {
 		return nil, err
 	}
-	imageID, err := storage.ParseStorageImageIDFromOutOfProcessData("2a03a6059f21e150ae84b0973863609494aad70f0a80eaeb64bddd8d92465812")
+
+	imageID, err := storage.ParseStorageImageIDFromOutOfProcessData(
+		"2a03a6059f21e150ae84b0973863609494aad70f0a80eaeb64bddd8d92465812",
+	)
 	if err != nil {
 		return nil, err
 	}
+
 	testContainer, err := oci.NewContainer("testid", "testname", "",
 		"/container/logs", map[string]string{},
 		map[string]string{}, map[string]string{}, "image",
@@ -69,12 +79,12 @@ func ContainerWithPid(pid int) (*oci.Container, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	cstate := &oci.ContainerState{}
 	cstate.State = specs.State{
 		Pid: pid,
 	}
-	// eat error here because callers may send invalid pids to test against
-	_ = cstate.SetInitPid(pid) // nolint:errcheck
+	_ = cstate.SetInitPid(pid) //nolint:errcheck // callers may send invalid pids to test against
 	testContainer.SetState(cstate)
 
 	return testContainer, nil

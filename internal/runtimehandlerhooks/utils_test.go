@@ -7,6 +7,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"k8s.io/utils/cpuset"
 )
 
 var _ = Describe("Utils", func() {
@@ -16,10 +17,12 @@ var _ = Describe("Utils", func() {
 			mask string
 			set  bool
 		}
+
 		type Expected struct {
 			mask    string
 			invMask string
 		}
+
 		type TestData struct {
 			input    Input
 			expected Expected
@@ -27,7 +30,11 @@ var _ = Describe("Utils", func() {
 
 		DescribeTable("testing cpu mask",
 			func(c TestData) {
-				mask, invMask, err := UpdateIRQSmpAffinityMask(c.input.cpus, c.input.mask, c.input.set)
+				mask, invMask, err := calcIRQSMPAffinityMask(
+					cpuSetOrDie(c.input.cpus),
+					c.input.mask,
+					c.input.set,
+				)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(mask).To(Equal(c.expected.mask))
 				Expect(invMask).To(Equal(c.expected.invMask))
@@ -62,6 +69,7 @@ var _ = Describe("Utils", func() {
 			It("Should not let the file grow unbounded", func() {
 				fakeFile, err := writeTempFile(confTemplate)
 				Expect(err).ToNot(HaveOccurred())
+
 				defer os.Remove(fakeFile)
 
 				fakeData := "000000000,0000000fa" // doesn't need to be valid
@@ -72,7 +80,7 @@ var _ = Describe("Utils", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				attempts := 10 // random number, no special meaning
-				for idx := 0; idx < attempts; idx++ {
+				for idx := range attempts {
 					data := fmt.Sprintf("000000000,0000000%02x", idx)
 					err = updateIrqBalanceConfigFile(fakeFile, data)
 					Expect(err).ToNot(HaveOccurred())
@@ -81,7 +89,9 @@ var _ = Describe("Utils", func() {
 					Expect(err).ToNot(HaveOccurred())
 
 					// we should replace the line in place
-					Expect(curLineCount).To(Equal(refLineCount), "irqbalance file grown from %d to %d lines", refLineCount, curLineCount)
+					Expect(
+						curLineCount,
+					).To(Equal(refLineCount), "irqbalance file grown from %d to %d lines", refLineCount, curLineCount)
 				}
 			})
 		})
@@ -93,12 +103,16 @@ func countLines(fileName string) (int, error) {
 	if err != nil {
 		return -1, err
 	}
+
 	defer file.Close()
+
 	fileScanner := bufio.NewScanner(file)
 	lineCount := 0
+
 	for fileScanner.Scan() {
 		lineCount++
 	}
+
 	return lineCount, nil
 }
 
@@ -108,13 +122,30 @@ func writeTempFile(content string) (string, error) {
 		return "", err
 	}
 
+	name := f.Name()
 	if _, err := f.WriteString(content); err != nil {
+		f.Close()
+		os.Remove(name)
+
 		return "", err
 	}
+
 	if err := f.Close(); err != nil {
+		os.Remove(name)
+
 		return "", err
 	}
-	return f.Name(), nil
+
+	return name, nil
+}
+
+func cpuSetOrDie(cpus string) cpuset.CPUSet {
+	set, err := cpuset.Parse(cpus)
+	if err != nil {
+		panic(err)
+	}
+
+	return set
 }
 
 const confTemplate = `# irqbalance is a daemon process that distributes interrupts across

@@ -119,8 +119,7 @@ function teardown() {
 
 	start_crio
 
-	run -1 crictl stop "$ctr_id"
-	[[ "${output}" == *"not found"* ]]
+	crictl stop "$ctr_id"
 }
 
 @test "crio restore with bad state and pod removed" {
@@ -171,8 +170,7 @@ function teardown() {
 
 	output=$(crictl inspect -o table "$ctr_id")
 	[[ "${output}" == *"CONTAINER_EXITED"* ]]
-	# TODO: may be cri-tool should display Exit Code
-	#[[ "${output}" == *"Exit Code: 255"* ]]
+	[[ "${output}" == *"Exit Code: 137"* ]]
 
 	crictl stopp "$pod_id"
 	crictl rmp "$pod_id"
@@ -411,4 +409,37 @@ function teardown() {
 
 	output=$(crictl inspect -o table "$ctr_id" | grep ^State)
 	[[ "${output}" == "${ctr_status_info}" ]]
+}
+
+@test "crio restore imageRef for containers" {
+	start_crio
+	[[ -n "$REDIS_IMAGEREF" ]]
+
+	ctr_id=$(crictl run "$TESTDATA"/container_config.json "$TESTDATA"/sandbox_config.json)
+
+	imageRef=$(crictl inspect -o json "$ctr_id" | jq -r '.status.imageRef')
+	[[ "$imageRef" == "$REDIS_IMAGEREF" ]]
+
+	stop_crio
+	start_crio
+
+	imageRef=$(crictl inspect -o json "$ctr_id" | jq -r '.status.imageRef')
+	[[ "$imageRef" == "$REDIS_IMAGEREF" ]]
+}
+
+@test "crio restore volumes for containers" {
+	start_crio
+
+	jq --arg path "$TESTDIR" \
+		'.mounts = [{
+			host_path: $path,
+			container_path: "/host"
+		}]' \
+		"$TESTDATA/container_redis.json" > "$TESTDIR/container.json"
+	ctr_id=$(crictl run "$TESTDIR/container.json" "$TESTDATA/sandbox_config.json")
+	crictl inspect "$ctr_id" | jq -e '.status.mounts != []'
+
+	stop_crio
+	start_crio
+	crictl inspect "$ctr_id" | jq -e '.status.mounts != []'
 }

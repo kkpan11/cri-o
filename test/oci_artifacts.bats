@@ -1,0 +1,383 @@
+#!/usr/bin/env bats
+# vim:set ft=bash :
+
+load helpers
+
+function setup() {
+	setup_test
+}
+
+function teardown() {
+	cleanup_test
+}
+
+ARTIFACT_REPO=quay.io/crio/artifact
+ARTIFACT_IMAGE="$ARTIFACT_REPO:singlefile"
+ARTIFACT_IMAGE_SUBPATH="$ARTIFACT_REPO:subpath"
+
+@test "should be able to pull and list an OCI artifact" {
+	start_crio
+	cleanup_images
+	crictl_pull $ARTIFACT_IMAGE
+
+	# Should get listed as filtered artifact
+	run crictl images -q $ARTIFACT_IMAGE
+	[ "$output" != "" ]
+
+	# Should be available on the whole list
+	crictl images | grep -qE "$ARTIFACT_REPO.*singlefile"
+}
+
+@test "should be able to inspect an OCI artifact" {
+	start_crio
+	crictl_pull $ARTIFACT_IMAGE
+
+	crictl inspecti $ARTIFACT_IMAGE |
+		jq -e '
+		(.status.pinned == false) and
+		(.status.repoDigests | length == 1) and
+		(.status.repoTags | length == 1) and
+		(.status.size != "0")'
+}
+
+@test "should be able to inspect an OCI artifact with other references" {
+	start_crio
+	crictl_pull $ARTIFACT_IMAGE
+
+	# canonical name
+	digestedRef=$(crictl inspecti $ARTIFACT_IMAGE | jq -r '.status.repoDigests[0]')
+	crictl inspecti "$digestedRef"
+
+	# digest (long and short)
+	imageId=$(crictl inspecti $ARTIFACT_IMAGE | jq -r '.status.id')
+	crictl inspecti "$imageId"
+	crictl inspecti "${imageId:0:12}"
+}
+
+@test "should be able to remove an OCI artifact" {
+	start_crio
+	crictl_pull $ARTIFACT_IMAGE
+	crictl rmi $ARTIFACT_IMAGE
+
+	[ "$(crictl images -q $ARTIFACT_IMAGE | wc -l)" == 0 ]
+}
+
+@test "should be able to mount OCI Artifact" {
+	start_crio
+	crictl_pull $ARTIFACT_IMAGE
+	pod_id=$(crictl runp "$TESTDATA"/sandbox_config.json)
+	jq --arg ARTIFACT_IMAGE "$ARTIFACT_IMAGE" \
+		'.mounts = [ {
+      container_path: "/root/artifact",
+      image: { image: $ARTIFACT_IMAGE },
+    } ] |
+    .command = ["sleep", "3600"]' \
+		"$TESTDATA"/container_config.json > "$TESTDIR/container_config.json"
+	ctr_id=$(crictl create "$pod_id" "$TESTDIR/container_config.json" "$TESTDATA/sandbox_config.json")
+	crictl start "$ctr_id"
+
+	# The artifact should be mounted
+	run crictl exec --sync "$ctr_id" cat /root/artifact/artifact.txt
+	[[ "$output" == "hello artifact" ]]
+
+	# The mount should be read-only
+	run ! crictl exec --sync "$ctr_id" sh -c "echo 'test' > /root/artifact/artifact.txt"
+	[[ "$output" == *"Read-only file system"* ]]
+}
+
+@test "should be able to mount artifact with multiple files on directory" {
+	start_crio
+	IMAGE="$ARTIFACT_REPO:multiplefiles"
+	crictl_pull $IMAGE
+	pod_id=$(crictl runp "$TESTDATA"/sandbox_config.json)
+	jq --arg ARTIFACT_IMAGE "$IMAGE" \
+		'.mounts = [ {
+      container_path: "/root/artifact",
+      image: { image: $ARTIFACT_IMAGE },
+    } ] |
+    .command = ["sleep", "3600"]' \
+		"$TESTDATA"/container_config.json > "$TESTDIR/container_config.json"
+	ctr_id=$(crictl create "$pod_id" "$TESTDIR/container_config.json" "$TESTDATA/sandbox_config.json")
+	crictl start "$ctr_id"
+
+	# The artifacts should be mounted
+	run crictl exec --sync "$ctr_id" cat /root/artifact/artifact.txt
+	[[ "$output" == "hello artifact" ]]
+	run crictl exec --sync "$ctr_id" cat /root/artifact/artifact.sh
+	[[ "$output" == *"echo hello artifact" ]]
+}
+
+@test "should be able to relabel selinux label" {
+	skip_if_selinux_disabled
+	skip_if_vm_runtime
+	start_crio
+	crictl_pull $ARTIFACT_IMAGE
+	pod_id=$(crictl runp "$TESTDATA"/sandbox_config.json)
+	jq --arg ARTIFACT_IMAGE "$ARTIFACT_IMAGE" \
+		'.mounts = [ {
+      container_path: "/root/artifact",
+      image: { image: $ARTIFACT_IMAGE },
+      selinux_relabel: true,
+    } ] |
+    .command = ["sleep", "3600"] |
+    .linux.security_context.selinux_options = {"level": "s0:c100,c200"}' \
+		"$TESTDATA"/container_config.json > "$TESTDIR/container_config.json"
+	ctr_id=$(crictl create "$pod_id" "$TESTDIR/container_config.json" "$TESTDATA/sandbox_config.json")
+	crictl start "$ctr_id"
+
+	# The artifact should be mounted
+	run crictl exec --sync "$ctr_id" ls -laZ /root/artifact/artifact.txt
+	[[ "$output" == *"s0:c100,c200"* ]]
+}
+
+@test "should return error when mounting artifact on file path" {
+	start_crio
+	crictl_pull "$ARTIFACT_IMAGE"
+	pod_id=$(crictl runp "$TESTDATA"/sandbox_config.json)
+	jq --arg ARTIFACT_IMAGE "$ARTIFACT_IMAGE" \
+		'.mounts = [ {
+      container_path: "/root/original-ks.cfg",
+      image: { image: $ARTIFACT_IMAGE },
+    } ]' \
+		"$TESTDATA"/container_config.json > "$TESTDIR/container_config.json"
+	run ! crictl create "$pod_id" "$TESTDIR/container_config.json" "$TESTDATA/sandbox_config.json"
+}
+
+@test "should return error when running executable" {
+	start_crio
+	IMAGE="$ARTIFACT_REPO:exec"
+	crictl_pull $IMAGE
+	pod_id=$(crictl runp "$TESTDATA"/sandbox_config.json)
+	jq --arg ARTIFACT_IMAGE "$IMAGE" \
+		'.mounts = [ {
+        container_path: "/root/artifact",
+        image: { image: $ARTIFACT_IMAGE },
+      } ] |
+      .command = ["sleep", "3600"]' \
+		"$TESTDATA"/container_config.json > "$TESTDIR/container_config.json"
+	ctr_id=$(crictl create "$pod_id" "$TESTDIR/container_config.json" "$TESTDATA/sandbox_config.json")
+	crictl start "$ctr_id"
+
+	run ! crictl exec --sync "$ctr_id" /root/artifact/artifact.sh
+}
+
+@test "should return error when removing image that is in use" {
+	start_crio
+	crictl_pull "$ARTIFACT_IMAGE"
+	pod_id=$(crictl runp "$TESTDATA"/sandbox_config.json)
+	jq --arg ARTIFACT_IMAGE "$ARTIFACT_IMAGE" \
+		'.mounts = [ {
+      container_path: "/root/artifact",
+      image: { image: $ARTIFACT_IMAGE },
+    } ] |
+    .command = ["sleep", "3600"]' \
+		"$TESTDATA"/container_config.json > "$TESTDIR/container_config.json"
+	ctr_id=$(crictl create "$pod_id" "$TESTDIR/container_config.json" "$TESTDATA/sandbox_config.json")
+	crictl start "$ctr_id"
+	run ! crictl rmi "$ARTIFACT_IMAGE"
+	# After the container stopped, it should be able to be removed.
+	crictl stop "$ctr_id"
+	crictl rm "$ctr_id"
+	crictl rmi "$ARTIFACT_IMAGE"
+}
+
+@test "should return error when the OCP Artifact Mount is disabled" {
+	ARTIFACT_CONFIG="$CRIO_CONFIG_DIR/00-disable-artifact.conf"
+	cat << EOF > "$ARTIFACT_CONFIG"
+[crio.image]
+oci_artifact_mount_support = false
+EOF
+	start_crio
+	crictl_pull $ARTIFACT_IMAGE
+	pod_id=$(crictl runp "$TESTDATA"/sandbox_config.json)
+	jq --arg ARTIFACT_IMAGE "$ARTIFACT_IMAGE" \
+		'.mounts = [ {
+      container_path: "/root/artifact",
+      image: { image: $ARTIFACT_IMAGE },
+    } ] |
+    .command = ["sleep", "3600"]' \
+		"$TESTDATA"/container_config.json > "$TESTDIR/container_config.json"
+	run ! crictl create "$pod_id" "$TESTDIR/container_config.json" "$TESTDATA/sandbox_config.json"
+
+	rm -f "$ARTIFACT_CONFIG"
+}
+
+@test "should be able to mount OCI Artifact with sub path" {
+	start_crio
+	crictl_pull $ARTIFACT_IMAGE_SUBPATH
+	pod_id=$(crictl runp "$TESTDATA"/sandbox_config.json)
+	jq --arg ARTIFACT_IMAGE_SUBPATH "$ARTIFACT_IMAGE_SUBPATH" \
+		'.mounts = [ {
+      container_path: "/root/artifact",
+      image: { image: $ARTIFACT_IMAGE_SUBPATH },
+      image_sub_path: "subpath"
+    } ] |
+    .command = ["sleep", "3600"]' \
+		"$TESTDATA"/container_config.json > "$TESTDIR/container_config.json"
+	ctr_id=$(crictl create "$pod_id" "$TESTDIR/container_config.json" "$TESTDATA/sandbox_config.json")
+	crictl start "$ctr_id"
+
+	# The artifact should get mounted with the correct sub path
+	run crictl exec --sync "$ctr_id" cat /root/artifact/2
+	[[ "$output" == "2" ]]
+
+	run crictl exec --sync "$ctr_id" cat /root/artifact/3
+	[[ "$output" == "3" ]]
+}
+
+@test "should fail to mount OCI Artifact with sub path if not existing" {
+	start_crio
+	crictl_pull $ARTIFACT_IMAGE_SUBPATH
+	pod_id=$(crictl runp "$TESTDATA"/sandbox_config.json)
+	jq --arg ARTIFACT_IMAGE_SUBPATH "$ARTIFACT_IMAGE_SUBPATH" \
+		'.mounts = [ {
+      container_path: "/root/artifact",
+      image: { image: $ARTIFACT_IMAGE_SUBPATH },
+      image_sub_path: "subpath-not-existing"
+    } ] |
+    .command = ["sleep", "3600"]' \
+		"$TESTDATA"/container_config.json > "$TESTDIR/container_config.json"
+	run ! crictl create "$pod_id" "$TESTDIR/container_config.json" "$TESTDATA/sandbox_config.json"
+
+	[[ "$output" == *"ImageVolumeMountFailed"*"does not exist in OCI artifact volume"* ]]
+}
+
+@test "artifact should be pinned when matching pinned_images" {
+	cat << EOF > "$CRIO_CONFIG_DIR/99-pinned-artifact.conf"
+[crio.image]
+pinned_images = [ "$ARTIFACT_IMAGE" ]
+EOF
+
+	start_crio
+	crictl_pull "$ARTIFACT_IMAGE"
+
+	crictl inspecti "$ARTIFACT_IMAGE" |
+		jq -e '.status.pinned == true'
+}
+
+@test "artifact should be pinned when matching pinned_images glob pattern" {
+	cat << EOF > "$CRIO_CONFIG_DIR/99-pinned-artifact.conf"
+[crio.image]
+pinned_images = [ "quay.io/crio/artifact*" ]
+EOF
+
+	start_crio
+	crictl_pull "$ARTIFACT_IMAGE"
+
+	crictl inspecti "$ARTIFACT_IMAGE" |
+		jq -e '.status.pinned == true'
+}
+
+@test "artifact should not be pinned when pinned_images does not match" {
+	cat << EOF > "$CRIO_CONFIG_DIR/99-pinned-artifact.conf"
+[crio.image]
+pinned_images = [ "quay.io/crio/nonexistent:latest" ]
+EOF
+
+	start_crio
+	crictl_pull "$ARTIFACT_IMAGE"
+
+	crictl inspecti "$ARTIFACT_IMAGE" |
+		jq -e '.status.pinned == false'
+}
+
+@test "artifact pinned status should update after config reload" {
+	start_crio
+	crictl_pull "$ARTIFACT_IMAGE"
+
+	# Initially not pinned
+	crictl inspecti "$ARTIFACT_IMAGE" |
+		jq -e '.status.pinned == false'
+
+	# Add pinned_images config and reload
+	printf '[crio.image]\npinned_images = ["%s"]\n' "$ARTIFACT_IMAGE" > "$CRIO_CONFIG_DIR"/01-pin-artifact
+	reload_crio
+	wait_for_log "Configuration reload completed"
+
+	# Now should be pinned
+	crictl inspecti "$ARTIFACT_IMAGE" |
+		jq -e '.status.pinned == true'
+}
+
+@test "artifact pinned status should be removed after config reload" {
+	cat << EOF > "$CRIO_CONFIG_DIR/99-pinned-artifact.conf"
+[crio.image]
+pinned_images = [ "$ARTIFACT_IMAGE" ]
+EOF
+
+	start_crio
+	crictl_pull "$ARTIFACT_IMAGE"
+
+	# Initially pinned
+	crictl inspecti "$ARTIFACT_IMAGE" |
+		jq -e '.status.pinned == true'
+
+	# Remove pinned_images config and reload
+	printf '[crio.image]\npinned_images = []\n' > "$CRIO_CONFIG_DIR"/99-pinned-artifact.conf
+	reload_crio
+	wait_for_log "Configuration reload completed"
+
+	# Now should not be pinned
+	crictl inspecti "$ARTIFACT_IMAGE" |
+		jq -e '.status.pinned == false'
+}
+
+@test "should treat bare tag in OCI layout as unknown reference" {
+	start_crio
+	crictl_pull $ARTIFACT_IMAGE
+
+	# Remember the artifact's image ID before we tamper with the layout.
+	imageId=$(crictl inspecti $ARTIFACT_IMAGE | jq -r '.status.id')
+
+	# Simulate an OCI layout written by an external tool (e.g. skopeo) that
+	# stores only the tag portion in org.opencontainers.image.ref.name.
+	local main_index="$TESTDIR/crio/artifacts/index.json"
+	jq '.manifests |= map(
+		if .annotations["org.opencontainers.image.ref.name"] then
+			.annotations["org.opencontainers.image.ref.name"] = "1.14.4"
+		else . end)' \
+		"$main_index" > "$main_index.tmp" && mv "$main_index.tmp" "$main_index"
+
+	# The artifact should appear with no repoTags and not the wrong
+	# docker.io/library/1.14.4 normalization.
+	crictl inspecti "$imageId" |
+		jq -e '(.status.repoTags | length == 0) and
+		       (.status.repoDigests | all(startswith("unknown@")))'
+}
+
+@test "should preserve fully qualified artifact name from OCI layout" {
+	start_crio
+	crictl_pull $ARTIFACT_IMAGE
+
+	crictl images | grep -qE "$ARTIFACT_REPO.*singlefile"
+
+	crictl inspecti $ARTIFACT_IMAGE |
+		jq -e '(.status.repoTags | length == 1) and
+		       (.status.repoTags[0] == "quay.io/crio/artifact:singlefile")'
+}
+
+@test "should pull multi-architecture image" {
+	start_crio
+
+	# TODO(bitoku): use an image in quay.io/crio once quay.io supports multiarch artifacts
+	# This version doesn't have to be updated. It's specified only to keep the test consistent.
+	MULTIARCH_ARTIFACT="ghcr.io/cri-o/bundle:v1.32.4"
+	crictl_pull "$MULTIARCH_ARTIFACT"
+
+	jq --arg ARTIFACT_IMAGE "$MULTIARCH_ARTIFACT" \
+		'.mounts = [ {
+      container_path: "/root/artifact",
+      image: { image: $ARTIFACT_IMAGE },
+    } ] |
+    .command = ["sleep", "3600"]' \
+		"$TESTDATA"/container_config.json > "$TESTDIR/container_config.json"
+	ctr_id=$(crictl run "$TESTDIR/container_config.json" "$TESTDATA/sandbox_config.json")
+	run crictl exec "$ctr_id" sha256sum /root/artifact/cri-o/bin/crio
+
+	# Architecture-specific hash expectations
+	if [[ "$ARCH" == "aarch64" ]]; then
+		[[ "$output" == *"f18a492aeef00b307d6962c876de4839148c34e73035ba619e848298dc849d3a"* ]]
+	else
+		[[ "$output" == *"ae5d192303e5f9a357c6ea39308338956b62b8830fd05f0460796db2215c2b35"* ]]
+	fi
+}

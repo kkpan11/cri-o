@@ -1,7 +1,6 @@
-<!-- markdownlint-disable-next-line MD041 -->
-![CRI-O logo](https://github.com/cri-o/cri-o/blob/main/logo/crio-logo.svg?raw=true)
-
 # CRI-O Installation Instructions
+
+![CRI-O logo](https://github.com/cri-o/cri-o/blob/main/logo/crio-logo.svg?raw=true)
 
 This guide will walk you through the installation of [CRI-O](https://github.com/cri-o/cri-o),
 an Open Container Initiative-based implementation of the
@@ -10,92 +9,75 @@ It is assumed you are running a Linux machine.
 
 ## Table of Contents
 
-<!-- TOC start -->
+<!-- toc -->
 
-- [CRI-O Installation Instructions](#cri-o-installation-instructions)
-  - [Table of Contents](#table-of-contents)
-  - [Install packaged versions of CRI-O](#install-packaged-versions-of-cri-o)
-    - [Installation Instructions](#installation-instructions)
-  - [Build and install CRI-O from source](#build-and-install-cri-o-from-source)
-    - [Runtime dependencies](#runtime-dependencies)
-    - [Build and Run Dependencies](#build-and-run-dependencies)
-      - [Fedora - RHEL 7 - CentOS](#fedora---rhel-7---centos)
-        - [Required](#required)
-      - [RHEL 8](#rhel-8)
-      - [Debian - Raspbian - Ubuntu](#debian---raspbian---ubuntu)
-        - [Debian up to buster - Raspbian - Ubuntu up to 18.04](#debian-up-to-buster---raspbian---ubuntu-up-to-1804)
-        - [Debian bullseye or higher - Ubuntu 20.04 or higher](#debian-bullseye-or-higher---ubuntu-2004-or-higher)
-    - [Get Source Code](#get-source-code)
-    - [Build](#build)
-      - [Install with Ansible](#install-with-ansible)
-      - [Build Tags](#build-tags)
-    - [Static builds](#static-builds)
-    - [Download conmon](#download-conmon)
-  - [Setup CNI networking](#setup-cni-networking)
-  - [CRI-O configuration](#cri-o-configuration)
-    - [Validate registries in registries.conf](#validate-registries-in-registriesconf)
-    - [Optional - Modify verbosity of logs](#optional---modify-verbosity-of-logs)
-    - [Optional - Modify capabilities and sysctls](#optional---modify-capabilities-and-sysctls)
-  - [Starting CRI-O](#starting-cri-o)
-  - [Using CRI-O](#using-cri-o)
-  - [Updating CRI-O](#updating-cri-o)
-    - [openSUSE](#opensuse)
-    - [Fedora 31 or later](#fedora-31-or-later)
-    - [Other yum based operating systems](#other-yum-based-operating-systems)
-    - [APT based operating systems](#apt-based-operating-systems)
-
-<!-- TOC end -->
+- [Install packaged versions of CRI-O](#install-packaged-versions-of-cri-o)
+- [Install CRI-O on Flatcar with Sysexts](#install-cri-o-on-flatcar-with-sysexts)
+- [Build and install CRI-O from source](#build-and-install-cri-o-from-source)
+  - [Runtime dependencies](#runtime-dependencies)
+  - [Build and Run Dependencies](#build-and-run-dependencies)
+    - [Fedora - RHEL 7 - CentOS](#fedora---rhel-7---centos)
+      - [Required](#required)
+    - [RHEL 8](#rhel-8)
+    - [Debian - Raspbian - Ubuntu](#debian---raspbian---ubuntu)
+      - [Debian up to buster - Raspbian - Ubuntu up to 18.04](#debian-up-to-buster---raspbian---ubuntu-up-to-1804)
+      - [Debian up to bullseye - Ubuntu up to 22.04](#debian-up-to-bullseye---ubuntu-up-to-2204)
+      - [Debian bookworm or higher - Ubuntu 24.04 or higher](#debian-bookworm-or-higher---ubuntu-2404-or-higher)
+  - [Get Source Code](#get-source-code)
+  - [Build](#build)
+    - [Install with Ansible](#install-with-ansible)
+    - [Build Tags](#build-tags)
+    - [Container-based build environment](#container-based-build-environment)
+  - [Static builds](#static-builds)
+  - [Download conmon](#download-conmon)
+- [Setup CNI networking](#setup-cni-networking)
+- [CRI-O configuration](#cri-o-configuration)
+  - [Validate registries in registries.conf](#validate-registries-in-registriesconf)
+  - [Optional - Modify verbosity of logs](#optional---modify-verbosity-of-logs)
+  - [Optional - Modify capabilities and sysctls](#optional---modify-capabilities-and-sysctls)
+- [Starting CRI-O](#starting-cri-o)
+- [Using CRI-O](#using-cri-o)
+- [Updating CRI-O](#updating-cri-o)
+  - [openSUSE](#opensuse)
+  - [Fedora 31 or later](#fedora-31-or-later)
+  - [Other yum based operating systems](#other-yum-based-operating-systems)
+  - [APT based operating systems](#apt-based-operating-systems)
+  <!-- /toc -->
 
 ## Install packaged versions of CRI-O
 
 CRI-O follows the [Kubernetes support cycle](https://kubernetes.io/docs/setup/release/version-skew-policy/#supported-versions)
-of three minor releases.
-CRI-O also attempts to package for the following operating systems:
+of three minor releases. CRI-O also attempts to package generically for Debian
+(deb) and Red Hat (RPM) based distributions and package managers.
 
-```text
-Fedora 31+
-openSUSE
-CentOS 9 Stream
-CentOS 8
-CentOS 8 Stream
-CentOS 7
-Debian 10
-Debian 11
-Debian 12
-Rasbian 10
-Rasbian 11
-xUbuntu 22.04
-xUbuntu 21.10
-xUbuntu 20.04
-xUbuntu 18.04
-```
-
-To install, choose a supported version for your operating system, and export it
-as a variable, like so: `export VERSION=1.19`
-
-We also save releases as subprojects. If you'd, for instance, like to use `1.24.5`
-you can set `export VERSION=1.24.5` and
-`export SUBVERSION=$(echo $VERSION | awk -F'.' '{print $1"."$2}')`
-
-Packaging for CRI-O is done best-effort, and is largely driven by requests.
 If there's a version or operating system that is missing, please [open an issue](https://github.com/cri-o/cri-o/issues/new).
 
-### Installation Instructions
+For more information, please follow the instructions in the [CRI-O packaging repository](https://github.com/cri-o/packaging/blob/main/README.md).
 
-For 1.29 and above, please follow the instructions in the [CRI-O packaging repository.](https://github.com/cri-o/packaging/blob/main/README.md).
+## Install CRI-O on Flatcar with Sysexts
 
-For 1.28 and earlier, please read our [legacy installation document](./install-legacy.md).
+Installing CRI-O on Flatcar Container Linux with support for systemd
+extensions (sysexts), enabling a supported installation method for
+environments that utilize Flatcar.
+
+See the [Flatcar documentation](https://flatcar.github.io/sysext-bakery/#ready-to-use-system-extensions-for-flatcar-and-other-distros)
+for more information on how to install.
 
 ## Build and install CRI-O from source
 
 ### Runtime dependencies
 
-- runc, Clear Containers runtime, or any other OCI compatible runtime
+- runc, crun or any other OCI compatible runtime
 - iproute
-- iptables
+- nftables (on newer distros)
+- iptables (on distros that don't support nftables, or for backward-compatibility)
 
-Latest version of `runc` is expected to be installed on the system. It is picked
+Latest version of `crun` is expected to be installed on the system. It is picked
 up as the default runtime by CRI-O.
+
+CRI-O will prefer nftables (if it is available) for new pod HostPort
+mappings, but will also attempt to clean up old iptables-based
+mappings when deleting a pod, if iptables is installed.
 
 ### Build and Run Dependencies
 
@@ -108,7 +90,6 @@ Fedora, RHEL 7, CentOS and related distributions:
 ```shell
 yum install -y \
   containers-common \
-  device-mapper-devel \
   git \
   glib2-devel \
   glibc-devel \
@@ -121,7 +102,7 @@ yum install -y \
   libselinux-devel \
   pkgconfig \
   make \
-  runc
+  crun
 ```
 
 **Please note**:
@@ -129,6 +110,12 @@ yum install -y \
 - `CentOS 8` (or higher): `pkgconfig` package is replaced by `pkgconf-pkg-config`
 - By default btrfs is not enabled. To add the btrfs support, install the
   following package: `btrfs-progs-devel`
+- `CentOS 8`: `gpgme-devel` can be
+  installed with the powertools repo.
+  (`yum install -y gpgme-devel --enablerepo=powertools`)
+- `CentOS 9`: `gpgme-devel` can be
+  installed with the CodeReadyBuilder (crb) repo.
+  (`yum install -y gpgme-devel --enablerepo=crb`)
 - It is possible the distribution packaged version of runc is out of date.
 - If you'd like to get the latest and greatest runc, consider using
   the one found in [devel:kubic:libcontainers:stable](https://build.opensuse.org/project/show/devel:kubic:libcontainers:stable)
@@ -152,20 +139,21 @@ subscription-manager repos --enable=codeready-builder-for-rhel-8-x86_64-rpms
 Follow [this guide to subscribe to the repositories](https://access.redhat.com/solutions/265523)
 if not already subscribed.
 
-This requires Go version 1.18 or greater. Follow [these instructions to install Go](https://go.dev/doc/install)
+This requires Go version as mentioned in the
+[go.mod](https://github.com/cri-o/cri-o/blob/main/go.mod) file.
+Follow [these instructions to install Go](https://go.dev/doc/install)
 
 Install dependencies:
 
 ```shell
 yum install -y \
   containers-common \
-  device-mapper-devel \
   git \
   make \
   glib2-devel \
   glibc-devel \
   glibc-static \
-  runc
+  crun
 ```
 
 Install go-md2man:
@@ -204,7 +192,6 @@ apt install -y  \
   containers-common \
   git \
   libassuan-dev \
-  libdevmapper-dev \
   libglib2.0-dev \
   libc6-dev \
   libgpgme11-dev \
@@ -222,7 +209,7 @@ apt install -y  \
   make
 ```
 
-##### Debian bullseye or higher - Ubuntu 20.04 or higher
+##### Debian up to bullseye - Ubuntu up to 22.04
 
 ```shell
 apt-get update -qq && apt-get install -y \
@@ -230,7 +217,6 @@ apt-get update -qq && apt-get install -y \
   containers-common \
   git \
   libassuan-dev \
-  libdevmapper-dev \
   libglib2.0-dev \
   libc6-dev \
   libgpgme-dev \
@@ -247,14 +233,40 @@ apt-get update -qq && apt-get install -y \
   make
 ```
 
+##### Debian bookworm or higher - Ubuntu 24.04 or higher
+
+```shell
+apt update -qq && apt install -y \
+  libbtrfs-dev \
+  golang-go \
+  golang-github-containers-common \
+  git \
+  libassuan-dev \
+  libglib2.0-dev \
+  libc6-dev \
+  libgpgme-dev \
+  libgpg-error-dev \
+  libseccomp-dev \
+  libsystemd-dev \
+  libselinux1-dev \
+  pkg-config \
+  go-md2man \
+  crun \
+  libudev-dev \
+  software-properties-common \
+  gcc \
+  make
+```
+
 **Caveats and Notes:**
 
 If using an older release or a long-term support release, be careful to
 double-check that the version of `runc` is new enough (running `runc --version`
 should produce `spec: 1.0.0` or greater), or else build your own.
 
-Be careful to double-check that the version of golang is new enough, version
-1.12.x or higher is required. If needed, newer golang versions are available at
+Be careful to check the golang version inside the
+[go.mod](https://github.com/cri-o/cri-o/blob/main/go.mod) file.
+If needed, newer golang versions are available at
 [the official download website](https://golang.org/dl).
 
 ### Get Source Code
@@ -292,7 +304,7 @@ sudo make install
 An [Ansible Role](https://github.com/alvistack/ansible-role-cri_o) is also
 available to automate the above steps:
 
-``` bash
+```bash
 sudo su -
 mkdir -p ~/.ansible/roles
 cd ~/.ansible/roles
@@ -318,26 +330,50 @@ make BUILDTAGS='seccomp apparmor'
 | selinux   | selinux process and mount labeling | libselinux |
 | apparmor  | apparmor profile support           |            |
 
-`CRI-O` manages images with [containers/image](https://github.com/containers/image),
+`CRI-O` manages images with [container-libs/image](https://github.com/containers/container-libs/tree/main/image),
 which uses the following buildtags.
 
 <!-- markdownlint-disable MD013 -->
+
 | Build Tag                    | Feature                                     | Dependency |
 | ---------------------------- | ------------------------------------------- | ---------- |
 | containers_image_openpgp     | use native golang pgp instead of cgo        |            |
 | containers_image_ostree_stub | disable use of ostree as an image transport |            |
 
-`CRI-O` also uses [containers/storage](https://github.com/containers/storage) for managing container storage.
+`CRI-O` also uses [container-libs/storage](https://github.com/containers/container-libs/tree/main/storage) for managing container storage.
 
-| Build Tag                        | Feature                                         | Dependency   |
-| -------------------------------- | ----------------------------------------------- | ------------ |
-| exclude_graphdriver_btrfs        | exclude btrfs as a storage option               |              |
-| btrfs_noversion                  | for building btrfs version < 3.16.1             | btrfs        |
-| exclude_graphdriver_devicemapper | exclude devicemapper as a storage option        |              |
-| libdm_no_deferred_remove         | don't compile deferred remove with devicemapper | devicemapper |
-| exclude_graphdriver_overlay      | exclude overlay as a storage option             |              |
-| ostree                           | build storage using ostree                      | ostree       |
+| Build Tag                   | Feature                             | Dependency |
+| --------------------------- | ----------------------------------- | ---------- |
+| exclude_graphdriver_btrfs   | exclude btrfs as a storage option   |            |
+| btrfs_noversion             | for building btrfs version < 3.16.1 | btrfs      |
+| exclude_graphdriver_overlay | exclude overlay as a storage option |            |
+| ostree                      | build storage using ostree          | ostree     |
+
 <!-- markdownlint-enable MD013 -->
+
+#### Container-based build environment
+
+As an alternative to installing build dependencies on the host, a
+`Containerfile` is provided to create a container image with all
+required build dependencies. This can be used to build CRI-O and run
+unit tests without modifying the host system.
+
+Note that integration tests cannot be run in a container as CRI-O
+requires a full system environment.
+
+Build the container image:
+
+```shell
+podman build -f hack/Containerfile.dev -t crio-dev .
+```
+
+Then use it to build and test:
+
+```shell
+podman run --rm -v .:/src:Z crio-dev make all
+podman run --rm -v .:/src:Z crio-dev make lint
+podman run --rm -v .:/src:Z crio-dev make testunit
+```
 
 ### Static builds
 
@@ -345,18 +381,19 @@ It is possible to build a statically linked binary of CRI-O by using the
 officially provided [nix](https://nixos.org/nix) package and the derivation of
 it [within this repository](../nix). The builds are completely reproducible and
 will create a `x86_64`/`amd64` or `aarch64`/`arm64`, `ppc64le` or `s390x`
-stripped ELF binary for [glibc](https://www.gnu.org/software/libc). These
-binaries are integration tested as well and support the following features:
+stripped ELF binary for [glibc](https://www.gnu.org/software/libc) or [musl
+libc (for `s390x`)](https://www.musl-libc.org/). These binaries are
+integration tested (for `amd64` and `arm64`) as well and support the
+following features:
 
 - apparmor
 - btrfs
-- device mapper
 - gpgme
 - seccomp
 - selinux
 
 To build the binaries locally either [install the nix package
-manager](https://nixos.org/nix/download.html) or use the `make build-static`
+manager](https://nixos.org/download) or use the `make build-static`
 target which relies on the nixos/nix container image.
 
 The overall build process can take a tremendous amount of CPU time depending on
@@ -369,26 +406,26 @@ installed nix package manager, simply run the following command from the root
 directory of this repository:
 
 ```shell
-nix build -f nix
+nix build
 ```
 
 The resulting binaries should be now available in `result/bin`. To build the arm
 variant of the binaries, just run:
 
 ```shell
-nix build -f nix/default-arm64.nix
+nix build .#crio-arm64
 ```
 
 Similarly, the ppc64le variant of binaries can be built using:
 
 ```shell
-nix build -f nix/default-ppc64le.nix
+nix build .#crio-ppc64le
 ```
 
 In the same way, the s390x variant of binaries can be built using:
 
 ```shell
-nix build -f nix/default-s390x.nix
+nix build .#crio-s390x
 ```
 
 ### Download conmon
@@ -427,9 +464,10 @@ sudo make install.config
 ### Validate registries in registries.conf
 
 Edit `/etc/containers/registries.conf` and verify that the registries option has
-valid values in it.  For example:
+valid values in it. For example:
 
 <!-- markdownlint-disable MD013 -->
+
 ```conf
 [registries.search]
 registries = ['registry.access.redhat.com', 'registry.fedoraproject.org', 'quay.io', 'docker.io']
@@ -440,9 +478,10 @@ registries = []
 [registries.block]
 registries = []
 ```
+
 <!-- markdownlint-enable MD013 -->
 
-For more information about this file see [registries.conf(5)](https://github.com/containers/image/blob/main/docs/containers-registries.conf.5.md).
+For more information about this file see [registries.conf(5)](https://github.com/containers/container-libs/blob/main/image/docs/containers-registries.conf.5.md).
 
 ### Optional - Modify verbosity of logs
 
@@ -499,7 +538,7 @@ sudo make install.systemd
 
 And let systemd take care of running CRI-O:
 
-``` bash
+```bash
 sudo systemctl daemon-reload
 sudo systemctl enable crio
 sudo systemctl start crio
@@ -515,6 +554,7 @@ sudo systemctl start crio
 ## Updating CRI-O
 
 <!-- markdownlint-disable MD024 -->
+
 ### openSUSE
 
 ```shell
@@ -538,45 +578,6 @@ sudo yum update cri-o
 
 ### APT based operating systems
 
-If updating to a patch version (for example, ``VERSION=1.8.3``
-  ), run
-
 ```shell
-apt upgrade cri-o cri-o-runc
+sudo apt upgrade cri-o
 ```
-<!-- markdownlint-enable MD024 -->
-
-Otherwise, be sure that the environment variable ```$OS``` is set to the
-appropriate value from the following table for your operating system.
-To install on the following operating systems, set the environment variable ```$OS```
-to the appropriate value from the following table:
-
-| Operating system | $OS               |
-| ---------------- | ----------------- |
-| Debian Unstable  | `Debian_Unstable` |
-| Debian Testing   | `Debian_Testing`  |
-| Debian 11        | `Debian_11`       |
-| Debian 10        | `Debian_10`       |
-| Ubuntu 22.04     | `xUbuntu_22.04`   |
-| Ubuntu 21.10     | `xUbuntu_21.10`   |
-| Ubuntu 21.04     | `xUbuntu_21.04`   |
-| Ubuntu 20.10     | `xUbuntu_20.10`   |
-| Ubuntu 20.04     | `xUbuntu_20.04`   |
-| Ubuntu 18.04     | `xUbuntu_18.04`   |
-
-To upgrade, choose a supported version for your operating system,
-and export it as a variable, like so:
-`export VERSION=1.18`, and run the following as root
-
-<!-- markdownlint-disable MD013 -->
-```shell
-rm /etc/apt/sources.list.d/devel:kubic:libcontainers:stable:cri-o:$VERSION.list
-
-echo "deb http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/$VERSION/$OS/ /" > /etc/apt/sources.list.d/devel:kubic:libcontainers:stable:cri-o:$VERSION.list
-
-curl -L https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable:cri-o:$VERSION/$OS/Release.key | apt-key add -
-
-apt update
-apt install cri-o cri-o-runc
-```
-<!-- markdownlint-enable MD013 -->

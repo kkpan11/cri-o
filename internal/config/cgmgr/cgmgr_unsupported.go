@@ -1,10 +1,11 @@
 //go:build !linux
-// +build !linux
 
 package cgmgr
 
 import (
 	"errors"
+
+	"github.com/cri-o/cri-o/internal/lib/stats"
 )
 
 type CgroupManager interface {
@@ -16,19 +17,18 @@ type CgroupManager interface {
 	// the cgroup path for that containerID. If parentCgroup is empty, it
 	// uses the default parent for that particular manager
 	ContainerCgroupPath(string, string) string
-	// cgroup parent, cgroup path, error
-	SandboxCgroupPath(string, string) string
+	// cgroup parent, cgroup path, minimum container memory, error
+	SandboxCgroupPath(string, string, int64) string
 	// RemoveSandboxCgroup takes the sandbox parent, and sandbox ID.
 	// It removes the cgroup for that sandbox, which is useful when spoofing an infra container
 	RemoveSandboxCgroup(sbParent, containerID string) error
 	// ContainerCgroupStats takes the sandbox parent, and container ID.
 	// It creates a new cgroup if one does not already exist.
 	// It returns the cgroup stats for that container.
-	ContainerCgroupStats(sbParent, containerID string) (*CgroupStats, error)
+	ContainerCgroupStats(sbParent, containerID string) (*stats.CgroupStats, error)
 }
 
-type NullCgroupManager struct {
-}
+type NullCgroupManager struct{}
 
 func InitializeCgroupManager(cgroupManager string) (CgroupManager, error) {
 	return nil, errors.New("not implemented yet")
@@ -49,7 +49,7 @@ func MoveProcessToContainerCgroup(containerPid, commandPid int) error {
 }
 
 // VerifyMemoryIsEnough verifies that the cgroup memory limit is above a specified minimum memory limit.
-func VerifyMemoryIsEnough(memoryLimit int64) error {
+func VerifyMemoryIsEnough(memoryLimit, containerMinMemory int64) error {
 	return nil
 }
 
@@ -65,11 +65,11 @@ func (*NullCgroupManager) ContainerCgroupPath(string, string) string {
 	return ""
 }
 
-func (*NullCgroupManager) SandboxCgroupPath(string, string) string {
+func (*NullCgroupManager) SandboxCgroupPath(string, string, int64) string {
 	return ""
 }
 
-func (*NullCgroupManager) ContainerCgroupStats(sbParent, containerID string) (*CgroupStats, error) {
+func (*NullCgroupManager) ContainerCgroupStats(sbParent, containerID string) (*stats.CgroupStats, error) {
 	return nil, nil
 }
 

@@ -1,0 +1,26 @@
+name: release-branch-forward
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
+permissions:
+  contents: read
+
+jobs:
+  release-branch-forward:
+    permissions:
+      actions: write
+      contents: write
+    if: github.ref == 'refs/heads/main' && github.repository == 'cri-o/cri-o'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make release-branch-forward
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: false
