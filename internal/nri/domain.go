@@ -5,10 +5,10 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/cri-o/cri-o/internal/log"
+	nri "github.com/containerd/nri/pkg/adaptation"
 	"github.com/sirupsen/logrus"
 
-	nri "github.com/containerd/nri/pkg/adaptation"
+	"github.com/cri-o/cri-o/internal/log"
 )
 
 // Domain implements the functions the generic NRI interface
@@ -19,13 +19,13 @@ type Domain interface {
 	GetName() string
 
 	// ListPodSandboxes list all pods.
-	ListPodSandboxes() []PodSandbox
+	ListPodSandboxes(context.Context) []PodSandbox
 
 	// ListContainer list all containers.
 	ListContainers() []Container
 
 	// GetPodSandbox returns the pod for the given ID.
-	GetPodSandbox(string) (PodSandbox, bool)
+	GetPodSandbox(context.Context, string) (PodSandbox, bool)
 
 	// GetContainer returns the container for the given ID.
 	GetContainer(string) (Container, bool)
@@ -45,6 +45,7 @@ func SetDomain(d Domain) {
 
 type domainTable struct {
 	sync.Mutex
+
 	domain Domain
 }
 
@@ -55,11 +56,11 @@ func (t *domainTable) set(d Domain) {
 	t.domain = d
 }
 
-func (t *domainTable) listPodSandboxes() []PodSandbox {
+func (t *domainTable) listPodSandboxes(ctx context.Context) []PodSandbox {
 	t.Lock()
 	defer t.Unlock()
 
-	return t.domain.ListPodSandboxes()
+	return t.domain.ListPodSandboxes(ctx)
 }
 
 func (t *domainTable) listContainers() []Container {
@@ -69,14 +70,18 @@ func (t *domainTable) listContainers() []Container {
 	return t.domain.ListContainers()
 }
 
-func (t *domainTable) updateContainers(ctx context.Context, updates []*nri.ContainerUpdate) ([]*nri.ContainerUpdate, error) {
+func (t *domainTable) updateContainers(
+	ctx context.Context,
+	updates []*nri.ContainerUpdate,
+) ([]*nri.ContainerUpdate, error) {
 	var failed []*nri.ContainerUpdate
 
 	for _, u := range updates {
 		err := t.domain.UpdateContainer(ctx, u)
 		if err != nil {
-			log.Errorf(ctx, "NRI update of container %s failed: %v", u.ContainerId, err)
-			if !u.IgnoreFailure {
+			log.Errorf(ctx, "NRI update of container %s failed: %v", u.GetContainerId(), err)
+
+			if !u.GetIgnoreFailure() {
 				failed = append(failed, u)
 			}
 		}
@@ -89,13 +94,16 @@ func (t *domainTable) updateContainers(ctx context.Context, updates []*nri.Conta
 	return nil, nil
 }
 
-func (t *domainTable) evictContainers(ctx context.Context, evict []*nri.ContainerEviction) ([]*nri.ContainerEviction, error) {
+func (t *domainTable) evictContainers(
+	ctx context.Context,
+	evict []*nri.ContainerEviction,
+) ([]*nri.ContainerEviction, error) {
 	var failed []*nri.ContainerEviction
 
 	for _, e := range evict {
 		err := t.domain.EvictContainer(ctx, e)
 		if err != nil {
-			log.Errorf(ctx, "NRI eviction of container %s failed: %v", e.ContainerId, err)
+			log.Errorf(ctx, "NRI eviction of container %s failed: %v", e.GetContainerId(), err)
 			failed = append(failed, e)
 		}
 	}

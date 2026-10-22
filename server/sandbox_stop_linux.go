@@ -1,32 +1,39 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
-	"github.com/containers/storage"
+	"go.podman.io/storage"
+	"golang.org/x/sync/errgroup"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+	kubeletTypes "k8s.io/kubelet/pkg/types"
+
 	"github.com/cri-o/cri-o/internal/lib/sandbox"
 	"github.com/cri-o/cri-o/internal/linklogs"
 	"github.com/cri-o/cri-o/internal/log"
 	oci "github.com/cri-o/cri-o/internal/oci"
-	ann "github.com/cri-o/cri-o/pkg/annotations"
-	"golang.org/x/net/context"
-	"golang.org/x/sync/errgroup"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
-	kubeletTypes "k8s.io/kubelet/pkg/types"
+	v2 "github.com/cri-o/cri-o/pkg/annotations/v2"
 )
 
 func (s *Server) stopPodSandbox(ctx context.Context, sb *sandbox.Sandbox) error {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
+
 	stopMutex := sb.StopMutex()
+
 	stopMutex.Lock()
 	defer stopMutex.Unlock()
 
 	// Unlink logs if they were linked
 	sbAnnotations := sb.Annotations()
-	if emptyDirVolName, ok := sbAnnotations[ann.LinkLogsAnnotation]; ok {
-		if err := linklogs.UnmountPodLogs(ctx, sb.Labels()[kubeletTypes.KubernetesPodUIDLabel], emptyDirVolName); err != nil {
+	if emptyDirVolName, ok := v2.GetAnnotationValue(sbAnnotations, v2.LinkLogs); ok {
+		if err := linklogs.UnmountPodLogs(
+			ctx,
+			sb.Labels()[kubeletTypes.KubernetesPodUIDLabel],
+			emptyDirVolName,
+		); err != nil {
 			log.Warnf(ctx, "Failed to unlink logs: %v", err)
 		}
 	}
@@ -38,42 +45,57 @@ func (s *Server) stopPodSandbox(ctx context.Context, sb *sandbox.Sandbox) error 
 
 	if sb.Stopped() {
 		log.Infof(ctx, "Stopped pod sandbox (already stopped): %s", sb.ID())
+
 		return nil
 	}
 
-	podInfraContainer := sb.InfraContainer()
-	containers := sb.Containers().List()
-	containers = append(containers, podInfraContainer)
+	// Calculate the timeout once. Regular containers get most of the timeout,
+	// reserving a small amount for infra container shutdown. The infra container
+	// will use the full totalTimeout, allowing it to use any time saved from
+	// containers stopping earlier than their allocated timeout.
+	totalTimeout := stopTimeoutFromContext(ctx)
 
-	const maxWorkers = 128
-	var waitGroup errgroup.Group
-	for i := 0; i < len(containers); i += maxWorkers {
-		max := i + maxWorkers
-		if len(containers) < max {
-			max = len(containers)
-		}
-		for _, ctr := range containers[i:max] {
-			cStatus := ctr.State()
-			if cStatus.Status != oci.ContainerStateStopped {
-				if ctr.ID() == podInfraContainer.ID() {
-					continue
-				}
-				c := ctr
-				waitGroup.Go(func() error {
-					if err := s.stopContainer(ctx, c, int64(10)); err != nil {
-						return fmt.Errorf("failed to stop container for pod sandbox %s: %v", sb.ID(), err)
-					}
-					return nil
-				})
-			}
-		}
-		if err := waitGroup.Wait(); err != nil {
-			return err
-		}
+	const infraReservedTimeout int64 = 1 // 1 second reserved for infra container
+
+	var containerTimeout int64
+
+	if totalTimeout < infraReservedTimeout*2 {
+		// If total timeout is too small, split evenly
+		containerTimeout = totalTimeout / 2
+	} else {
+		// Reserve fixed time for infra, give rest to containers
+		containerTimeout = totalTimeout - infraReservedTimeout
 	}
 
-	if err := s.stopContainer(ctx, podInfraContainer, int64(10)); err != nil && !errors.Is(err, storage.ErrContainerUnknown) {
-		return fmt.Errorf("failed to stop infra container for pod sandbox %s: %v", sb.ID(), err)
+	errorGroup := &errgroup.Group{}
+
+	for _, ctr := range sb.Containers().List() {
+		if ctr.State().Status == oci.ContainerStateStopped {
+			continue
+		}
+
+		// Because ctr is reused across iterations, all goroutines can end up
+		// calling stopContainer on the last container in the list instead of
+		// their respective one. We fix that by:
+		stopCtr := ctr
+
+		errorGroup.Go(func() error {
+			return s.stopContainer(ctx, stopCtr, containerTimeout)
+		})
+	}
+
+	if err := errorGroup.Wait(); err != nil {
+		return fmt.Errorf("stop containers in parallel: %w", err)
+	}
+
+	podInfraContainer := sb.InfraContainer()
+	if err := s.stopContainer(
+		ctx,
+		podInfraContainer,
+		totalTimeout,
+	); err != nil && !errors.Is(err, storage.ErrContainerUnknown) &&
+		!errors.Is(err, oci.ErrContainerStopped) {
+		return fmt.Errorf("failed to stop infra container for pod sandbox %s: %w", sb.ID(), err)
 	}
 
 	if err := sb.RemoveManagedNamespaces(); err != nil {
@@ -94,7 +116,11 @@ func (s *Server) stopPodSandbox(ctx context.Context, sb *sandbox.Sandbox) error 
 	if podInfraContainer.Spoofed() {
 		// event generation would be needed in case of a spoofed infra container where there is no
 		// exit process that hits the handleExit() code.
-		s.generateCRIEvent(ctx, sb.InfraContainer(), types.ContainerEventType_CONTAINER_STOPPED_EVENT)
+		s.generateCRIEvent(
+			ctx,
+			sb.InfraContainer(),
+			types.ContainerEventType_CONTAINER_STOPPED_EVENT,
+		)
 	}
 
 	return nil

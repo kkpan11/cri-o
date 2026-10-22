@@ -51,22 +51,27 @@ func DefunctProcessesForPath(path string) (defunctCount uint, retErr error) {
 		stat, err := processStats(path, name)
 		if err != nil {
 			logrus.Warnf("Failed to get the status of process with PID %s: %v", name, err)
+
 			continue
 		}
+
 		if stat.State == "Z" {
 			logrus.Debugf("Found defunct process with PID %s (%s)", name, stat.Comm)
+
 			defunctCount++
 		}
 	}
+
 	return defunctCount, nil
 }
 
-// processStats returns status information of a process as defined in /proc/[pid]/stat
+// processStats returns status information of a process as defined in /proc/[pid]/stat.
 func processStats(fsPath, pid string) (*Stat, error) {
 	bytes, err := os.ReadFile(filepath.Join(fsPath, pid, "stat"))
 	if err != nil {
 		return nil, err
 	}
+
 	data := string(bytes)
 
 	// /proc/[PID]/stat format is described in proc(5). The second field is process name,

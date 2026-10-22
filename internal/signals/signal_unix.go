@@ -1,5 +1,4 @@
 //go:build !windows
-// +build !windows
 
 package signals
 
@@ -9,7 +8,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Platform specific signal synonyms
+// Platform specific signal synonyms.
 var (
 	Term os.Signal = unix.SIGTERM
 	Hup  os.Signal = unix.SIGHUP

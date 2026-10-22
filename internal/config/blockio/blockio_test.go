@@ -3,14 +3,16 @@ package blockio_test
 import (
 	"os"
 
-	"github.com/cri-o/cri-o/internal/config/blockio"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/cri-o/cri-o/internal/config/blockio"
 )
 
 func tempFileWithData(data string) string {
 	f := t.MustTempFile("")
 	Expect(os.WriteFile(f, []byte(data), 0o644)).To(Succeed())
+
 	return f
 }
 
@@ -30,7 +32,7 @@ var _ = t.Describe("New", func() {
 	})
 })
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Load", func() {
 	t.Describe("non-existent file", func() {
 		It("should return an error and disable blockio", func() {
@@ -52,6 +54,7 @@ var _ = t.Describe("Load", func() {
 			// Given
 			sut := blockio.New()
 			Expect(sut).NotTo(BeNil())
+
 			f := tempFileWithData(`classes:
 - Weight: 10
 `)
@@ -70,6 +73,7 @@ var _ = t.Describe("Load", func() {
 			sut := blockio.New()
 			Expect(sut).NotTo(BeNil())
 			Expect(sut.Enabled()).NotTo(BeTrue())
+
 			f := tempFileWithData(`classes:
   lowprio:
   - Weight: 20

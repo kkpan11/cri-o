@@ -7,8 +7,9 @@ import (
 	"strings"
 
 	"github.com/blang/semver/v4"
-	"github.com/cri-o/cri-o/utils/cmdrunner"
 	"github.com/sirupsen/logrus"
+
+	"github.com/cri-o/cri-o/utils/cmdrunner"
 )
 
 var (
@@ -22,27 +23,44 @@ type ConmonManager struct {
 	supportsLogGlobalSizeMax bool
 }
 
-// this function is heavily based on github.com/containers/common#probeConmon
+// this function is heavily based on go.podman.io/common#probeConmon.
 func New(conmonPath string) (*ConmonManager, error) {
 	if !path.IsAbs(conmonPath) {
 		return nil, fmt.Errorf("conmon path is not absolute: %s", conmonPath)
 	}
+
 	out, err := cmdrunner.CombinedOutput(conmonPath, "--version")
 	if err != nil {
 		return nil, fmt.Errorf("get conmon version: %w", err)
 	}
+
 	fields := strings.Fields(string(out))
+
+	// conmonrs prints "version: x.y.z" as its first line. It is not a drop-in
+	// replacement for conmon and has to be configured with the pod runtime type.
+	if len(fields) > 0 && fields[0] == "version:" {
+		return nil, fmt.Errorf(
+			"monitor path %q points to conmonrs, which requires runtime_type = %q instead of %q",
+			conmonPath, "pod", "oci",
+		)
+	}
+
 	if len(fields) < 3 {
-		return nil, fmt.Errorf("conmon version output too short: expected three fields, got %d in %s", len(fields), out)
+		return nil, fmt.Errorf(
+			"conmon version output too short: expected three fields, got %d in %s",
+			len(fields),
+			out,
+		)
 	}
 
 	c := new(ConmonManager)
 	if err := c.parseConmonVersion(fields[2]); err != nil {
-		return nil, fmt.Errorf("get conmon version: %w", err)
+		return nil, fmt.Errorf("parse conmon version: %w", err)
 	}
 
 	c.initializeSupportsSync()
 	c.initializeSupportsLogGlobalSizeMax(conmonPath)
+
 	return c, nil
 }
 
@@ -51,7 +69,9 @@ func (c *ConmonManager) parseConmonVersion(versionString string) error {
 	if err != nil {
 		return err
 	}
+
 	c.conmonVersion = parsedVersion
+
 	return nil
 }
 
@@ -61,8 +81,10 @@ func (c *ConmonManager) initializeSupportsLogGlobalSizeMax(conmonPath string) {
 		// Read help output as a fallback in case the feature was backported to conmon,
 		// but the version wasn't bumped.
 		helpOutput, err := cmdrunner.CombinedOutput(conmonPath, "--help")
-		c.supportsLogGlobalSizeMax = err == nil && bytes.Contains(helpOutput, []byte("--log-global-size-max"))
+		c.supportsLogGlobalSizeMax = err == nil &&
+			bytes.Contains(helpOutput, []byte("--log-global-size-max"))
 	}
+
 	verb := "does not"
 	if c.supportsLogGlobalSizeMax {
 		verb = "does"
@@ -78,6 +100,7 @@ func (c *ConmonManager) SupportsLogGlobalSizeMax() bool {
 func (c *ConmonManager) initializeSupportsSync() {
 	c.supportsSync = c.conmonVersion.GTE(versionSupportsSync)
 	verb := "does not"
+
 	if c.supportsSync {
 		verb = "does"
 	}

@@ -1,11 +1,11 @@
 //go:build !linux
-// +build !linux
 
 package oci
 
 import (
 	"context"
 	"os"
+	"os/exec"
 	"syscall"
 
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -40,4 +40,8 @@ func (c *Container) SetSeccompProfilePath(pp string) {
 // SeccompProfilePath returns the seccomp profile path
 func (c *Container) SeccompProfilePath() string {
 	return ""
+}
+
+// setSysProcAttr is a no-op on non-Linux platforms.
+func setSysProcAttr(_ *exec.Cmd, _ uintptr) {
 }

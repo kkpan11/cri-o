@@ -1,5 +1,4 @@
 //go:build linux
-// +build linux
 
 package node
 
@@ -7,11 +6,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 
-	"github.com/containers/common/pkg/cgroups"
-	libctrcgroups "github.com/opencontainers/runc/libcontainer/cgroups"
+	libctrcgroups "github.com/opencontainers/cgroups"
+	"go.podman.io/common/pkg/cgroups"
 )
+
+const cgroupRoot = "/sys/fs/cgroup"
 
 var (
 	cgroupHasMemorySwapOnce sync.Once
@@ -28,11 +30,13 @@ var (
 
 func CgroupIsV2() bool {
 	var cgroupIsV2 bool
+
 	cgroupIsV2, cgroupIsV2Err = cgroups.IsCgroup2UnifiedMode()
+
 	return cgroupIsV2
 }
 
-// CgroupHasMemorySwap returns whether the memory swap controller is present
+// CgroupHasMemorySwap returns whether the memory swap controller is present.
 func CgroupHasMemorySwap() bool {
 	cgroupHasMemorySwapOnce.Do(func() {
 		if CgroupIsV2() {
@@ -40,14 +44,19 @@ func CgroupHasMemorySwap() bool {
 			if err != nil {
 				cgroupHasMemorySwapErr = err
 				cgroupHasMemorySwap = false
+
 				return
 			}
-			memSwap := filepath.Join("/sys/fs/cgroup", cg[""], "memory.swap.current")
+
+			memSwap := filepath.Join(cgroupRoot, cg[""], "memory.swap.current")
 			if _, err := os.Stat(memSwap); err != nil {
 				cgroupHasMemorySwap = false
+
 				return
 			}
+
 			cgroupHasMemorySwap = true
+
 			return
 		}
 
@@ -55,23 +64,27 @@ func CgroupHasMemorySwap() bool {
 		if err != nil {
 			cgroupHasMemorySwapErr = errors.New("node not configured with memory swap")
 			cgroupHasMemorySwap = false
+
 			return
 		}
 
 		cgroupHasMemorySwap = true
 	})
+
 	return cgroupHasMemorySwap
 }
 
-// CgroupHasHugetlb returns whether the hugetlb controller is present
+// CgroupHasHugetlb returns whether the hugetlb controller is present.
 func CgroupHasHugetlb() bool {
 	checkRelevantControllers()
+
 	return cgroupHasHugetlb
 }
 
-// CgroupHasPid returns whether the pid controller is present
+// CgroupHasPid returns whether the pid controller is present.
 func CgroupHasPid() bool {
 	checkRelevantControllers()
+
 	return cgroupHasPid
 }
 
@@ -90,17 +103,17 @@ func checkRelevantControllers() {
 				enabled: &cgroupHasHugetlb,
 			},
 		}
+
 		ctrls, err := libctrcgroups.GetAllSubsystems()
 		if err != nil {
 			cgroupControllerErr = err
+
 			return
 		}
+
 		for _, toCheck := range relevantControllers {
-			for _, ctrl := range ctrls {
-				if ctrl == toCheck.name {
-					*toCheck.enabled = true
-					break
-				}
+			if slices.Contains(ctrls, toCheck.name) {
+				*toCheck.enabled = true
 			}
 		}
 	})

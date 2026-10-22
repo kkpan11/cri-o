@@ -2,35 +2,35 @@ package oci
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
-	"github.com/cri-o/cri-o/internal/config/cgmgr"
+	"github.com/docker/go-units"
+	rspec "github.com/opencontainers/runtime-spec/specs-go"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"k8s.io/cri-streaming/pkg/streaming/remotecommand"
+
+	"github.com/cri-o/cri-o/internal/config/seccomp"
+	"github.com/cri-o/cri-o/internal/lib/stats"
 	"github.com/cri-o/cri-o/internal/log"
 	"github.com/cri-o/cri-o/pkg/config"
-	rspec "github.com/opencontainers/runtime-spec/specs-go"
-	"golang.org/x/net/context"
-	"k8s.io/client-go/tools/remotecommand"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
 const (
-	// ContainerStateCreated represents the created state of a container
+	// ContainerStateCreated represents the created state of a container.
 	ContainerStateCreated = "created"
-	// ContainerStatePaused represents the paused state of a container
+	// ContainerStatePaused represents the paused state of a container.
 	ContainerStatePaused = "paused"
-	// ContainerStateRunning represents the running state of a container
+	// ContainerStateRunning represents the running state of a container.
 	ContainerStateRunning = "running"
-	// ContainerStateStopped represents the stopped state of a container
+	// ContainerStateStopped represents the stopped state of a container.
 	ContainerStateStopped = "stopped"
-	// ContainerCreateTimeout represents the value of container creating timeout
-	ContainerCreateTimeout = 240 * time.Second
 
 	// killContainerTimeout is the timeout that we wait for the container to
 	// be SIGKILLed.
@@ -69,8 +69,8 @@ type RuntimeImpl interface {
 	UpdateContainerStatus(context.Context, *Container) error
 	PauseContainer(context.Context, *Container) error
 	UnpauseContainer(context.Context, *Container) error
-	ContainerStats(context.Context, *Container, string) (*cgmgr.CgroupStats, error)
-	SignalContainer(context.Context, *Container, syscall.Signal) error
+	CgroupStats(context.Context, *Container, string) (*stats.CgroupStats, error)
+	DiskStats(context.Context, *Container, string) (*stats.DiskStats, error)
 	AttachContainer(context.Context, *Container, io.Reader, io.WriteCloser, io.WriteCloser,
 		bool, <-chan remotecommand.TerminalSize) error
 	PortForwardContainer(context.Context, *Container, string,
@@ -78,9 +78,22 @@ type RuntimeImpl interface {
 	ReopenContainerLog(context.Context, *Container) error
 	CheckpointContainer(context.Context, *Container, *rspec.Spec, bool) error
 	RestoreContainer(context.Context, *Container, string, string) error
+	IsContainerAlive(*Container) bool
+	// ProbeMonitor is used to check the liveness of the container monitor process.
+	ProbeMonitor(context.Context, *Container) error
+	ServeExecContainer(
+		context.Context,
+		*Container,
+		[]string,
+		bool,
+		bool,
+		bool,
+		bool,
+	) (string, error)
+	ServeAttachContainer(context.Context, *Container, bool, bool, bool) (string, error)
 }
 
-// New creates a new Runtime with options provided
+// New creates a new Runtime with options provided.
 func New(c *config.Config) (*Runtime, error) {
 	execNotifyDir := filepath.Join(c.ContainerAttachSocketDir, "exec-pid-dir")
 	if err := os.MkdirAll(execNotifyDir, 0o750); err != nil {
@@ -110,6 +123,7 @@ func (r *Runtime) ValidateRuntimeHandler(handler string) (*config.RuntimeHandler
 		return nil, fmt.Errorf("failed to find runtime handler %s from runtime list %v",
 			handler, r.config.Runtimes)
 	}
+
 	if runtimeHandler.RuntimePath == "" {
 		return nil, fmt.Errorf("empty runtime path for runtime handler %s", handler)
 	}
@@ -154,6 +168,7 @@ func (r *Runtime) PlatformRuntimePath(handler, platform string) (string, error) 
 	if err != nil {
 		return "", err
 	}
+
 	if runtimePath, ok := rh.PlatformRuntimePaths[platform]; ok {
 		return runtimePath, nil
 	}
@@ -183,13 +198,43 @@ func (r *Runtime) RuntimeType(runtimeHandler string) (string, error) {
 	return rh.RuntimeType, nil
 }
 
+// Seccomp returns the seccomp config for the specified handler. Falls back to the runtime seccomp config if not exist.
+func (r *Runtime) Seccomp(handler string) (*seccomp.Config, error) {
+	rh, err := r.getRuntimeHandler(handler)
+	if err != nil {
+		return nil, err
+	}
+
+	if rh.RuntimeSeccomp() != nil {
+		return rh.RuntimeSeccomp(), nil
+	}
+
+	return r.config.Seccomp(), nil
+}
+
 // Timezone returns the timezone configured inside the container.
 func (r *Runtime) Timezone() string {
 	return r.config.Timezone
 }
 
+// GetContainerMinMemory returns the minimum memory for a container
+// for a given runtime handler.
+func (r *Runtime) GetContainerMinMemory(runtimeHandler string) (int64, error) {
+	rh, err := r.getRuntimeHandler(runtimeHandler)
+	if err != nil {
+		return int64(0), err
+	}
+	// We can skip error checking since the value was checked
+	// at the time of initializing the runtime handlers features.
+	value, _ := units.RAMInBytes( //nolint:errcheck // value validated at init
+		rh.ContainerMinMemory,
+	)
+
+	return value, nil
+}
+
 // RuntimeSupportsIDMap returns whether the runtime of runtimeHandler supports the "runtime features"
-// command, and that the output of that command advertises IDMapped mounts as an option
+// command, and that the output of that command advertises IDMapped mounts as an option.
 func (r *Runtime) RuntimeSupportsIDMap(runtimeHandler string) bool {
 	rh, err := r.getRuntimeHandler(runtimeHandler)
 	if err != nil {
@@ -199,6 +244,38 @@ func (r *Runtime) RuntimeSupportsIDMap(runtimeHandler string) bool {
 	return rh.RuntimeSupportsIDMap()
 }
 
+// RuntimeSupportsRROMounts returns whether the runtime of runtimeHandler supports
+// the "runtime features" command and that the output advertises support for the
+// Recursive Read-only (RRO) mount as an option.
+func (r *Runtime) RuntimeSupportsRROMounts(runtimeHandler string) bool {
+	rh, err := r.getRuntimeHandler(runtimeHandler)
+	if err != nil {
+		return false
+	}
+
+	return rh.RuntimeSupportsRROMounts()
+}
+
+// RuntimeDefaultAnnotations returns the default annotations for this runtime handler.
+func (r *Runtime) RuntimeDefaultAnnotations(runtimeHandler string) (map[string]string, error) {
+	rh, err := r.getRuntimeHandler(runtimeHandler)
+	if err != nil {
+		return nil, err
+	}
+
+	return rh.RuntimeDefaultAnnotations(), nil
+}
+
+// RuntimeStreamWebsockets returns the configured websocket streaming option for this handler.
+func (r *Runtime) RuntimeStreamWebsockets(runtimeHandler string) (bool, error) {
+	rh, err := r.getRuntimeHandler(runtimeHandler)
+	if err != nil {
+		return false, err
+	}
+
+	return rh.RuntimeStreamWebsockets(), nil
+}
+
 func (r *Runtime) newRuntimeImpl(c *Container) (RuntimeImpl, error) {
 	rh, err := r.getRuntimeHandler(c.runtimeHandler)
 	if err != nil {
@@ -206,7 +283,7 @@ func (r *Runtime) newRuntimeImpl(c *Container) (RuntimeImpl, error) {
 	}
 
 	if rh.RuntimeType == config.RuntimeTypeVM {
-		return newRuntimeVM(rh, r.config.RuntimeConfig.ContainerExitsDir), nil
+		return newRuntimeVM(rh, r.config.ContainerExitsDir), nil
 	}
 
 	if rh.RuntimeType == config.RuntimeTypePod {
@@ -218,27 +295,36 @@ func (r *Runtime) newRuntimeImpl(c *Container) (RuntimeImpl, error) {
 	return newRuntimeOCI(r, rh), nil
 }
 
-// RuntimeImpl returns the runtime implementation for a given container
+// RuntimeImpl returns the runtime implementation for a given container.
 func (r *Runtime) RuntimeImpl(c *Container) (RuntimeImpl, error) {
 	r.runtimeImplMapMutex.RLock()
 	impl, ok := r.runtimeImplMap[c.ID()]
 	r.runtimeImplMapMutex.RUnlock()
+
 	if ok {
 		return impl, nil
 	}
 
 	r.runtimeImplMapMutex.Lock()
 	defer r.runtimeImplMapMutex.Unlock()
+
 	impl, err := r.newRuntimeImpl(c)
 	if err != nil {
 		return nil, err
 	}
+
 	r.runtimeImplMap[c.ID()] = impl
+
 	return impl, nil
 }
 
 // CreateContainer creates a container.
-func (r *Runtime) CreateContainer(ctx context.Context, c *Container, cgroupParent string, restore bool) error {
+func (r *Runtime) CreateContainer(
+	ctx context.Context,
+	c *Container,
+	cgroupParent string,
+	restore bool,
+) error {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
 	// Instantiate a new runtime implementation for this new container
@@ -259,6 +345,7 @@ func (r *Runtime) CreateContainer(ctx context.Context, c *Container, cgroupParen
 func (r *Runtime) StartContainer(ctx context.Context, c *Container) error {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
+
 	impl, err := r.RuntimeImpl(c)
 	if err != nil {
 		return err
@@ -268,9 +355,18 @@ func (r *Runtime) StartContainer(ctx context.Context, c *Container) error {
 }
 
 // ExecContainer prepares a streaming endpoint to execute a command in the container.
-func (r *Runtime) ExecContainer(ctx context.Context, c *Container, cmd []string, stdin io.Reader, stdout, stderr io.WriteCloser, tty bool, resizeChan <-chan remotecommand.TerminalSize) error {
+func (r *Runtime) ExecContainer(
+	ctx context.Context,
+	c *Container,
+	cmd []string,
+	stdin io.Reader,
+	stdout, stderr io.WriteCloser,
+	tty bool,
+	resizeChan <-chan remotecommand.TerminalSize,
+) error {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
+
 	impl, err := r.RuntimeImpl(c)
 	if err != nil {
 		return err
@@ -280,9 +376,15 @@ func (r *Runtime) ExecContainer(ctx context.Context, c *Container, cmd []string,
 }
 
 // ExecSyncContainer execs a command in a container and returns it's stdout, stderr and return code.
-func (r *Runtime) ExecSyncContainer(ctx context.Context, c *Container, command []string, timeout int64) (*types.ExecSyncResponse, error) {
+func (r *Runtime) ExecSyncContainer(
+	ctx context.Context,
+	c *Container,
+	command []string,
+	timeout int64,
+) (*types.ExecSyncResponse, error) {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
+
 	impl, err := r.RuntimeImpl(c)
 	if err != nil {
 		return nil, err
@@ -291,10 +393,15 @@ func (r *Runtime) ExecSyncContainer(ctx context.Context, c *Container, command [
 	return impl.ExecSyncContainer(ctx, c, command, timeout)
 }
 
-// UpdateContainer updates container resources
-func (r *Runtime) UpdateContainer(ctx context.Context, c *Container, res *rspec.LinuxResources) error {
+// UpdateContainer updates container resources.
+func (r *Runtime) UpdateContainer(
+	ctx context.Context,
+	c *Container,
+	res *rspec.LinuxResources,
+) error {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
+
 	impl, err := r.RuntimeImpl(c)
 	if err != nil {
 		return err
@@ -307,6 +414,7 @@ func (r *Runtime) UpdateContainer(ctx context.Context, c *Container, res *rspec.
 func (r *Runtime) StopContainer(ctx context.Context, c *Container, timeout int64) error {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
+
 	impl, err := r.RuntimeImpl(c)
 	if err != nil {
 		return err
@@ -319,9 +427,11 @@ func (r *Runtime) StopContainer(ctx context.Context, c *Container, timeout int64
 func (r *Runtime) DeleteContainer(ctx context.Context, c *Container) (err error) {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
+
 	r.runtimeImplMapMutex.RLock()
 	impl, ok := r.runtimeImplMap[c.ID()]
 	r.runtimeImplMapMutex.RUnlock()
+
 	if !ok {
 		if impl, err = r.newRuntimeImpl(c); err != nil {
 			return err
@@ -343,6 +453,7 @@ func (r *Runtime) DeleteContainer(ctx context.Context, c *Container) (err error)
 func (r *Runtime) UpdateContainerStatus(ctx context.Context, c *Container) error {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
+
 	impl, err := r.RuntimeImpl(c)
 	if err != nil {
 		return err
@@ -355,6 +466,7 @@ func (r *Runtime) UpdateContainerStatus(ctx context.Context, c *Container) error
 func (r *Runtime) PauseContainer(ctx context.Context, c *Container) error {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
+
 	impl, err := r.RuntimeImpl(c)
 	if err != nil {
 		return err
@@ -367,6 +479,7 @@ func (r *Runtime) PauseContainer(ctx context.Context, c *Container) error {
 func (r *Runtime) UnpauseContainer(ctx context.Context, c *Container) error {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
+
 	impl, err := r.RuntimeImpl(c)
 	if err != nil {
 		return err
@@ -376,33 +489,60 @@ func (r *Runtime) UnpauseContainer(ctx context.Context, c *Container) error {
 }
 
 // ContainerStats provides statistics of a container.
-func (r *Runtime) ContainerStats(ctx context.Context, c *Container, cgroup string) (*cgmgr.CgroupStats, error) {
+func (r *Runtime) ContainerStats(
+	ctx context.Context,
+	c *Container,
+	cgroup string,
+) (*stats.CgroupStats, error) {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
+
 	impl, err := r.RuntimeImpl(c)
 	if err != nil {
 		return nil, err
 	}
 
-	return impl.ContainerStats(ctx, c, cgroup)
-}
-
-// SignalContainer sends a signal to a container process.
-func (r *Runtime) SignalContainer(ctx context.Context, c *Container, sig syscall.Signal) error {
-	ctx, span := log.StartSpan(ctx)
-	defer span.End()
-	impl, err := r.RuntimeImpl(c)
+	cgroupStats, err := impl.CgroupStats(ctx, c, cgroup)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return impl.SignalContainer(ctx, c, sig)
+	if cgroupStats == nil {
+		return nil, fmt.Errorf("no cgroup stats available for container %s", c.ID())
+	}
+
+	return cgroupStats, nil
+}
+
+// DiskStats provides disk statistics for a container.
+func (r *Runtime) DiskStats(
+	ctx context.Context,
+	c *Container,
+	cgroup string,
+) (*stats.DiskStats, error) {
+	ctx, span := log.StartSpan(ctx)
+	defer span.End()
+
+	impl, err := r.RuntimeImpl(c)
+	if err != nil {
+		return nil, err
+	}
+
+	return impl.DiskStats(ctx, c, cgroup)
 }
 
 // AttachContainer attaches IO to a running container.
-func (r *Runtime) AttachContainer(ctx context.Context, c *Container, inputStream io.Reader, outputStream, errorStream io.WriteCloser, tty bool, resizeChan <-chan remotecommand.TerminalSize) error {
+func (r *Runtime) AttachContainer(
+	ctx context.Context,
+	c *Container,
+	inputStream io.Reader,
+	outputStream, errorStream io.WriteCloser,
+	tty bool,
+	resizeChan <-chan remotecommand.TerminalSize,
+) error {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
+
 	impl, err := r.RuntimeImpl(c)
 	if err != nil {
 		return err
@@ -412,9 +552,16 @@ func (r *Runtime) AttachContainer(ctx context.Context, c *Container, inputStream
 }
 
 // PortForwardContainer forwards the specified port provides statistics of a container.
-func (r *Runtime) PortForwardContainer(ctx context.Context, c *Container, netNsPath string, port int32, stream io.ReadWriteCloser) error {
+func (r *Runtime) PortForwardContainer(
+	ctx context.Context,
+	c *Container,
+	netNsPath string,
+	port int32,
+	stream io.ReadWriteCloser,
+) error {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
+
 	impl, err := r.RuntimeImpl(c)
 	if err != nil {
 		return err
@@ -427,6 +574,7 @@ func (r *Runtime) PortForwardContainer(ctx context.Context, c *Container, netNsP
 func (r *Runtime) ReopenContainerLog(ctx context.Context, c *Container) error {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
+
 	impl, err := r.RuntimeImpl(c)
 	if err != nil {
 		return err
@@ -444,11 +592,22 @@ type ExecSyncError struct {
 }
 
 func (e *ExecSyncError) Error() string {
-	return fmt.Sprintf("command error: %+v, stdout: %s, stderr: %s, exit code %d", e.Err, e.Stdout.Bytes(), e.Stderr.Bytes(), e.ExitCode)
+	return fmt.Sprintf(
+		"command error: %+v, stdout: %s, stderr: %s, exit code %d",
+		e.Err,
+		e.Stdout.Bytes(),
+		e.Stderr.Bytes(),
+		e.ExitCode,
+	)
 }
 
 // CheckpointContainer checkpoints a container.
-func (r *Runtime) CheckpointContainer(ctx context.Context, c *Container, specgen *rspec.Spec, leaveRunning bool) error {
+func (r *Runtime) CheckpointContainer(
+	ctx context.Context,
+	c *Container,
+	specgen *rspec.Spec,
+	leaveRunning bool,
+) error {
 	impl, err := r.RuntimeImpl(c)
 	if err != nil {
 		return err
@@ -458,11 +617,60 @@ func (r *Runtime) CheckpointContainer(ctx context.Context, c *Container, specgen
 }
 
 // RestoreContainer restores a container.
-func (r *Runtime) RestoreContainer(ctx context.Context, c *Container, cgroupParent, mountLabel string) error {
+func (r *Runtime) RestoreContainer(
+	ctx context.Context,
+	c *Container,
+	cgroupParent, mountLabel string,
+) error {
 	impl, err := r.RuntimeImpl(c)
 	if err != nil {
 		return err
 	}
 
 	return impl.RestoreContainer(ctx, c, cgroupParent, mountLabel)
+}
+
+func (r *Runtime) IsContainerAlive(c *Container) (bool, error) {
+	impl, err := r.RuntimeImpl(c)
+	if err != nil {
+		return false, err
+	}
+
+	return impl.IsContainerAlive(c), nil
+}
+
+func (r *Runtime) ProbeMonitor(ctx context.Context, c *Container) error {
+	impl, err := r.RuntimeImpl(c)
+	if err != nil {
+		return err
+	}
+
+	return impl.ProbeMonitor(ctx, c)
+}
+
+func (r *Runtime) ServeExecContainer(
+	ctx context.Context,
+	c *Container,
+	cmd []string,
+	tty, stdin, stdout, stderr bool,
+) (string, error) {
+	impl, err := r.RuntimeImpl(c)
+	if err != nil {
+		return "", err
+	}
+
+	return impl.ServeExecContainer(ctx, c, cmd, tty, stdin, stdout, stderr)
+}
+
+func (r *Runtime) ServeAttachContainer(
+	ctx context.Context,
+	c *Container,
+	stdin, stdout, stderr bool,
+) (string, error) {
+	impl, err := r.RuntimeImpl(c)
+	if err != nil {
+		return "", err
+	}
+
+	return impl.ServeAttachContainer(ctx, c, stdin, stdout, stderr)
 }

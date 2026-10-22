@@ -1,5 +1,4 @@
 //go:build !linux
-// +build !linux
 
 package device
 
@@ -23,4 +22,8 @@ func (d *Config) LoadDevices(devsFromConfig []string) error {
 // Devices returns the devices saved in the Config
 func (d *Config) Devices() []Device {
 	return nil
+}
+
+func DevicesFromAnnotation(annotation string, allowedDevices []string) ([]Device, error) {
+	return []Device{}, nil
 }

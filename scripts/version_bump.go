@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"os"
@@ -11,11 +12,15 @@ import (
 
 func main() {
 	var bumpType string
+
 	var versionFile string
+
+	var specFile string
 
 	// Define command-line flags for bump type and version file
 	flag.StringVar(&bumpType, "bump", "", "Version bump type: major, minor, or patch")
 	flag.StringVar(&versionFile, "f", "../internal/version/version.go", "Path to the version file")
+	flag.StringVar(&specFile, "spec", "../contrib/test/ci/cri-o.spec", "Path to the spec file")
 	flag.Parse()
 
 	// Read the current version from the version.go file
@@ -34,11 +39,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Update the version in the spec file
+	if err := updateSpecVersion(specFile, currentVersion, newVersion); err != nil {
+		fmt.Printf("Error updating spec version: %q\n", err)
+		os.Exit(1)
+	}
+
 	fmt.Printf("Version bumped from %q to %q\n", currentVersion, newVersion)
 }
 
 func getCurrentVersion(versionFile string) (string, error) {
-	versionPattern := `const\s+Version\s+=\s+"(.+)"`
+	// Matches both the legacy "const Version" declaration and the "var
+	// Version" declaration used so downstream builds can override the
+	// value via -ldflags -X.
+	versionPattern := `(?:const|var)\s+Version\s+=\s+"(.+)"`
 
 	// Read the content of the version file
 	content, err := os.ReadFile(versionFile)
@@ -48,6 +62,7 @@ func getCurrentVersion(versionFile string) (string, error) {
 
 	// Find the version string using regex
 	re := regexp.MustCompile(versionPattern)
+
 	matches := re.FindStringSubmatch(string(content))
 	if len(matches) < 2 {
 		return "", fmt.Errorf("unable to find version in %q", versionFile)
@@ -82,12 +97,33 @@ func incrementVersionPart(part string) string {
 	if err != nil {
 		return "0"
 	}
+
 	num++
+
 	return strconv.Itoa(num)
 }
 
+func updateSpecVersion(specFile, oldVersion, newVersion string) error {
+	content, err := os.ReadFile(specFile)
+	if err != nil {
+		return err
+	}
+
+	old := []byte("Version: " + oldVersion)
+	if !bytes.Contains(content, old) {
+		return fmt.Errorf("version %s not found in %s", oldVersion, specFile)
+	}
+
+	newContent := bytes.Replace(content, old, []byte("Version: "+newVersion), 1)
+
+	return os.WriteFile(specFile, newContent, 0o644)
+}
+
 func updateVersion(versionFile, newVersion string) error {
-	versionPattern := `const\s+Version\s+=\s+".+"`
+	// Capture the "const"/"var" keyword and surrounding whitespace so the
+	// replacement doesn't clobber a "var Version" declaration back into a
+	// "const" one.
+	versionPattern := `(const|var)(\s+Version\s+=\s+)".+"`
 
 	// Read the content of the version file
 	content, err := os.ReadFile(versionFile)
@@ -97,7 +133,7 @@ func updateVersion(versionFile, newVersion string) error {
 
 	// Replace the version string with the new version using regex
 	re := regexp.MustCompile(versionPattern)
-	newContent := re.ReplaceAll(content, []byte(fmt.Sprintf(`const Version = %q`, newVersion)))
+	newContent := re.ReplaceAll(content, fmt.Appendf(nil, `${1}${2}%q`, newVersion))
 
 	// Write the updated content back to the version file
 	if err := os.WriteFile(versionFile, newContent, 0o644); err != nil {
