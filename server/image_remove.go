@@ -3,62 +3,176 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
+
+	storagetypes "go.podman.io/storage"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	"github.com/cri-o/cri-o/internal/log"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"github.com/cri-o/cri-o/internal/ociartifact"
+	"github.com/cri-o/cri-o/internal/storage"
 )
 
 // RemoveImage removes the image.
-func (s *Server) RemoveImage(ctx context.Context, req *types.RemoveImageRequest) (*types.RemoveImageResponse, error) {
+func (s *Server) RemoveImage(
+	ctx context.Context,
+	req *types.RemoveImageRequest,
+) (*types.RemoveImageResponse, error) {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
+
 	imageRef := ""
-	img := req.Image
+	img := req.GetImage()
+
 	if img != nil {
-		imageRef = img.Image
+		imageRef = img.GetImage()
 	}
+
 	if imageRef == "" {
 		return nil, errors.New("no image specified")
 	}
+
 	if err := s.removeImage(ctx, imageRef); err != nil {
 		return nil, err
 	}
+
 	return &types.RemoveImageResponse{}, nil
 }
 
-func (s *Server) removeImage(ctx context.Context, imageRef string) error {
-	var deleted bool
+func (s *Server) removeImage(ctx context.Context, imageRef string) (untagErr error) {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
 
-	// FIXME: The CRI API definition says
-	//      This call is idempotent, and must not return an error if the image has
-	//      already been removed.
-	// and this code doesn’t seem to conform to that.
+	imageManager := s.StorageImageManager()
 
-	// Actually Kubelet is only ever calling this with full image IDs.
-	// So we don't really need to accept ID prefixes nor short names;
-	// or is there another user?!
+	if matches := imageManager.HeuristicallyTryResolvingStringAsIDPrefix(
+		imageRef,
+	); len(
+		matches,
+	) > 0 {
+		for _, match := range matches {
+			if err := s.volumeInUse(match.ID.IDStringForOutOfProcessConsumptionOnly()); err != nil {
+				return err
+			}
+		}
 
-	if id := s.StorageImageServer().HeuristicallyTryResolvingStringAsIDPrefix(imageRef); id != nil {
-		return s.StorageImageServer().DeleteImage(s.config.SystemContext, *id)
+		for _, match := range matches {
+			if err := match.Server.DeleteImage(s.config.SystemContext, *match.ID); err != nil {
+				if errors.Is(err, storagetypes.ErrImageUnknown) ||
+					errors.Is(err, storagetypes.ErrNotAnImage) {
+					// The RemoveImage RPC is idempotent, and must not return an
+					// error if the image has already been removed. Ref:
+					// https://github.com/kubernetes/cri-api/blob/c20fa40/pkg/apis/runtime/v1/api.proto#L156-L157
+					continue
+				}
+
+				return fmt.Errorf("delete image: %w", err)
+			}
+		}
+
+		return nil
 	}
 
-	potentialMatches, err := s.StorageImageServer().CandidatesForPotentiallyShortImageName(s.config.SystemContext, imageRef)
+	var (
+		deleted   bool
+		statusErr error
+	)
+
+	// Proceed with the default store for name-based search.
+	// Runtime-pulled images being deleted along with the pod that uses them,
+	// we only try to clean the default store here.
+	imageService, err := s.StorageImageServer(nil)
 	if err != nil {
 		return err
 	}
-	for _, name := range potentialMatches {
-		err = s.StorageImageServer().UntagImage(s.config.SystemContext, name)
-		if err != nil {
-			log.Debugf(ctx, "Error deleting image %s: %v", name, err)
-			continue
-		}
-		deleted = true
-		break
-	}
-	if !deleted && err != nil {
+
+	potentialMatches, err := imageService.CandidatesForPotentiallyShortImageName(
+		s.config.SystemContext,
+		imageRef,
+	)
+	if err != nil {
 		return err
 	}
+
+	for _, name := range potentialMatches {
+		var status *storage.ImageResult
+
+		status, statusErr = imageService.ImageStatusByName(s.config.SystemContext, name)
+		if statusErr != nil {
+			log.Warnf(ctx, "Error getting image status %s: %v", name, statusErr)
+
+			continue
+		}
+
+		if err := s.volumeInUse(status.ID.IDStringForOutOfProcessConsumptionOnly()); err != nil {
+			return err
+		}
+
+		untagErr = imageService.UntagImage(s.config.SystemContext, name)
+		if untagErr != nil {
+			log.Debugf(ctx, "Error deleting image %s: %v", name, untagErr)
+
+			continue
+		}
+
+		deleted = true
+
+		break
+	}
+
+	if !deleted && untagErr != nil {
+		if errors.Is(untagErr, storagetypes.ErrImageUnknown) ||
+			errors.Is(untagErr, storagetypes.ErrNotAnImage) {
+			return nil
+		}
+
+		return untagErr
+	}
+
+	artifact, err := s.ArtifactStore().Status(ctx, imageRef)
+	if errors.Is(err, ociartifact.ErrNotFound) {
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to get artifact: %w", err)
+	}
+
+	if err := s.volumeInUse(artifact.Digest().Encoded()); err != nil {
+		return err
+	}
+
+	if err := s.ArtifactStore().
+		Remove(ctx, imageRef); err != nil &&
+		!errors.Is(err, ociartifact.ErrNotFound) {
+		log.Errorf(ctx, "Unable to remove artifact: %v", err)
+	}
+
+	if errors.Is(statusErr, storagetypes.ErrNotAnImage) {
+		// The RemoveImage RPC is idempotent, and must not return an
+		// error if the image has already been removed. Ref:
+		// https://github.com/kubernetes/cri-api/blob/c20fa40/pkg/apis/runtime/v1/api.proto#L156-L157
+		return nil
+	}
+
+	return nil
+}
+
+// volumeInUse returns nil if it's not in use.
+// It doesn't check if it's used as a container image because the check is done in storage pkg instead.
+func (s *Server) volumeInUse(digest string) error {
+	containerList, err := s.ContainerServer.ListContainers()
+	if err != nil {
+		return fmt.Errorf("error listing containers: %w", err)
+	}
+
+	for _, container := range containerList {
+		for _, volume := range container.Volumes() {
+			if volume.Image.GetImage() == digest {
+				return fmt.Errorf("the image is in use by %s", container.ID())
+			}
+		}
+	}
+
 	return nil
 }

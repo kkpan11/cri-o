@@ -8,7 +8,7 @@ As a rule of thumb, code should be tested thoroughly with unit tests.
 Integration tests on the other hand are meant to test a specific feature end
 to end.
 
-Integration tests are written in *bash* using the
+Integration tests are written in _bash_ using the
 [bats](https://github.com/bats-core/bats-core) framework.
 
 ## Running integration tests
@@ -44,7 +44,7 @@ cd bats
 You will also need to install the [CNI](https://github.com/containernetworking/cni)
 plugins as the default pod test template runs without host networking.
 
-Check instruction [here](/contrib/cni/README.md#cni-plugin-installation-from-source)
+Check the [CNI plugin installation instructions](/contrib/cni/README.md#cni-plugin-installation-from-source).
 
 Then you can run the tests on your host:
 

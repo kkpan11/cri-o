@@ -1,24 +1,41 @@
 package cnimgr
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/cri-o/ocicni/pkg/ocicni"
+	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
+type PodNetworkLister func() ([]*ocicni.PodNetwork, error)
+
+var errShutdown = errors.New("CNI manager shut down")
+
 type CNIManager struct {
 	// cniPlugin is the internal OCI CNI plugin
-	plugin    ocicni.CNIPlugin
-	lastError error
-	watchers  []chan bool
-	shutdown  bool
-	mutex     sync.RWMutex
+	plugin              ocicni.CNIPlugin
+	lastError           error
+	watchers            []chan bool
+	mutex               sync.RWMutex
+	cancel              context.CancelFunc
+	initPollInterval    time.Duration
+	monitorPollInterval time.Duration
+	gracePeriod         time.Duration
+	firstFailureTime    time.Time
+
+	validPodList PodNetworkLister
 }
 
-func New(defaultNetwork, networkDir string, pluginDirs ...string) (*CNIManager, error) {
+func New(
+	defaultNetwork, networkDir string,
+	gracePeriod time.Duration,
+	pluginDirs ...string,
+) (*CNIManager, error) {
 	// Init CNI plugin
 	plugin, err := ocicni.InitCNI(
 		defaultNetwork, networkDir, pluginDirs...,
@@ -26,33 +43,122 @@ func New(defaultNetwork, networkDir string, pluginDirs ...string) (*CNIManager, 
 	if err != nil {
 		return nil, fmt.Errorf("initialize CNI plugin: %w", err)
 	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
 	mgr := &CNIManager{
-		plugin: plugin,
+		plugin:              plugin,
+		lastError:           errors.New("plugin status uninitialized"),
+		cancel:              cancel,
+		initPollInterval:    500 * time.Millisecond,
+		monitorPollInterval: 5 * time.Second,
+		gracePeriod:         gracePeriod,
 	}
-	go mgr.pollUntilReady()
+
+	go mgr.pollContinuously(ctx)
+
 	return mgr, nil
 }
 
-func (c *CNIManager) pollUntilReady() {
-	// nolint:errcheck,staticcheck
-	_ = wait.PollInfinite(500*time.Millisecond, c.pollFunc)
+// pollUntilReady runs Phase 1: fast poll until the plugin is ready for the
+// first time. This handles startup synchronization, triggers deferred GC,
+// and notifies watchers that are blocking pod creation.
+func (c *CNIManager) pollUntilReady(ctx context.Context) {
+	//nolint:errcheck // error is intentionally ignored, status is tracked via lastError
+	wait.PollUntilContextCancel(ctx, c.initPollInterval, true,
+		func(ctx context.Context) (bool, error) {
+			return c.statusPollFunc(ctx, true)
+		})
 }
 
-func (c *CNIManager) pollFunc() (bool, error) {
+func (c *CNIManager) pollContinuously(ctx context.Context) {
+	c.pollUntilReady(ctx)
+
+	if c.gracePeriod <= 0 {
+		logrus.Infof(
+			"Continuous CNI STATUS monitoring is disabled (cni_status_grace_period is %v)",
+			c.gracePeriod,
+		)
+
+		return
+	}
+
+	logrus.Infof(
+		"Continuous CNI STATUS monitoring enabled (grace period: %v, poll interval: %v)",
+		c.gracePeriod,
+		c.monitorPollInterval,
+	)
+
+	// Phase 2: slow poll to continuously monitor plugin health.
+	// If the plugin becomes unhealthy, lastError is set so that
+	// ReadyOrError() reports not-ready and kubelet sees NetworkReady=false.
+	//nolint:errcheck // error is intentionally ignored, status is tracked via lastError
+	wait.PollUntilContextCancel(ctx, c.monitorPollInterval, true,
+		func(ctx context.Context) (bool, error) {
+			return c.statusPollFunc(ctx, false)
+		})
+}
+
+func (c *CNIManager) statusPollFunc(ctx context.Context, isStartup bool) (bool, error) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	if c.shutdown {
-		return true, nil
-	}
-	if err := c.plugin.Status(); err != nil {
+
+	if err := c.plugin.StatusWithContext(ctx); err != nil {
+		// During Phase 2 monitoring, apply a grace period before reporting
+		// unhealthy. This tolerates brief CNI disruptions (e.g. OVN-K
+		// daemonset rollout where the plugin is unavailable for ~10-15s).
+		if !isStartup && c.lastError == nil {
+			if c.firstFailureTime.IsZero() {
+				c.firstFailureTime = time.Now()
+				logrus.Warnf(
+					"CNI plugin status check failed, will report unhealthy after grace period (%v): %v",
+					c.gracePeriod,
+					err,
+				)
+			}
+
+			if time.Since(c.firstFailureTime) < c.gracePeriod {
+				return false, nil
+			}
+
+			logrus.Errorf("CNI plugin unhealthy beyond grace period (%v): %v", c.gracePeriod, err)
+		}
+
 		c.lastError = err
+
 		return false, nil
 	}
-	c.lastError = nil
-	for _, watcher := range c.watchers {
-		watcher <- true
+
+	c.firstFailureTime = time.Time{}
+
+	if c.lastError != nil {
+		logrus.Infof("CNI plugin is now healthy (was: %v)", c.lastError)
+
+		c.lastError = nil
+		// on startup, GC might have been attempted before the plugin was
+		// actually ready so we might have deferred it until now, which is
+		// still a good time to do it as the relevant context is equivalent:
+		// the same list of pods is valid and stable because new pods can't
+		// be created until the plugin is announced as ready
+		if isStartup {
+			if err := c.doGC(ctx); err != nil {
+				logrus.Warnf("Garbage collect stale network resources failed: %v", err)
+			}
+		}
+		// Notify any waiters blocked on pod creation that the plugin is
+		// now ready. Non-blocking send avoids deadlock if a watcher was
+		// abandoned (e.g. timed-out pod creation) and the buffer is full.
+		for _, watcher := range c.watchers {
+			select {
+			case watcher <- true:
+			default:
+			}
+		}
+
+		c.watchers = nil
 	}
-	return true, nil
+
+	return isStartup, nil
 }
 
 // ReadyOrError returns nil if the plugin is ready,
@@ -60,33 +166,93 @@ func (c *CNIManager) pollFunc() (bool, error) {
 func (c *CNIManager) ReadyOrError() error {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
+
 	return c.lastError
 }
 
-// Plugin returns the CNI plugin
+// Plugin returns the CNI plugin.
 func (c *CNIManager) Plugin() ocicni.CNIPlugin {
 	return c.plugin
 }
 
 // Add watcher creates a new watcher for the CNI manager
 // said watcher will send a `true` value if the CNI plugin was successfully ready
-// or `false` if the server shutdown first
+// or `false` if the server shutdown first.
 func (c *CNIManager) AddWatcher() chan bool {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+
 	watcher := make(chan bool, 1)
-	c.watchers = append(c.watchers, watcher)
+
+	switch {
+	case c.lastError == nil:
+		watcher <- true
+	case errors.Is(c.lastError, errShutdown):
+		watcher <- false
+	default:
+		c.watchers = append(c.watchers, watcher)
+	}
 
 	return watcher
 }
 
 // Shutdown shuts down the CNI manager, and notifies the watcher
-// that the CNI manager is not ready
+// that the CNI manager is not ready.
 func (c *CNIManager) Shutdown() {
+	if c.cancel != nil {
+		c.cancel()
+	}
+
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	c.shutdown = true
+
+	c.lastError = errShutdown
+
+	// Non-blocking send: the buffer may already contain a `true` from a
+	// recent recovery notification. In that case the consumer will read
+	// `true` and proceed, which is acceptable since the plugin was ready
+	// at that point; the shutdown will be caught by subsequent operations.
 	for _, watcher := range c.watchers {
-		watcher <- false
+		select {
+		case watcher <- false:
+		default:
+		}
 	}
+
+	c.watchers = nil
+}
+
+// GC calls the plugin's GC to clean up any resources concerned with stale pods
+// (pod other than the ones provided by validPodList). The call to the plugin
+// will be deferred until it is ready logging any errors then and returning nil
+// error here.
+func (c *CNIManager) GC(ctx context.Context, validPodList PodNetworkLister) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	c.validPodList = validPodList
+
+	if c.lastError != nil {
+		// on startup, GC might be attempted before the plugin is actually ready
+		// so defer until it is (see statusPollFunc)
+		return nil
+	}
+
+	return c.doGC(ctx)
+}
+
+func (c *CNIManager) doGC(ctx context.Context) error {
+	if c.validPodList == nil {
+		return nil
+	}
+
+	validPods, err := c.validPodList()
+	if err != nil {
+		return err
+	}
+	// give a GC call 30s
+	stopCtx, stopCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer stopCancel()
+
+	return c.plugin.GC(stopCtx, validPods)
 }

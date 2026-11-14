@@ -1,21 +1,99 @@
 package config_test
 
 import (
-	"github.com/cri-o/cri-o/pkg/config"
+	"context"
+	"os"
+	"strings"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/runtime-tools/generate"
+
+	"github.com/cri-o/cri-o/pkg/config"
 )
 
-// Helper function for pointer reference
-func pointer[A any](m A) *A {
-	return &m
-}
-
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Workloads config", func() {
 	BeforeEach(beforeEach)
+
+	It("should require integer workload resources in TOML", func() {
+		// Given
+		f := t.MustTempFile("workload-config")
+		contents := `
+[crio.runtime.workloads.management]
+activation_annotation = "target.workload.openshift.io/management"
+[crio.runtime.workloads.management.resources]
+cpushares = "5"
+cpuquota = 10000
+cpuperiod = 100000
+cpulimit = 100
+`
+
+		// When
+		By("rejecting a quoted numeric value")
+		Expect(os.WriteFile(f, []byte(contents), 0o600)).To(Succeed())
+		err := sut.UpdateFromFile(context.Background(), f)
+
+		// Then
+		Expect(err).To(MatchError(ContainSubstring("incompatible types")))
+
+		// When
+		By("loading and validating integer values")
+
+		contents = strings.Replace(contents, `cpushares = "5"`, "cpushares = 5", 1)
+		Expect(os.WriteFile(f, []byte(contents), 0o600)).To(Succeed())
+		err = sut.UpdateFromFile(context.Background(), f)
+
+		// Then
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sut.Workloads.Validate()).To(Succeed())
+		Expect(sut.Workloads["management"].Resources).To(Equal(&config.Resources{
+			CPUShares: 5,
+			CPUQuota:  10000,
+			CPUPeriod: 100000,
+			CPULimit:  100,
+		}))
+	})
+
+	It("should require integer workload resources in annotations", func() {
+		// Given
+		workloads := config.Workloads{
+			"management": &config.WorkloadConfig{
+				ActivationAnnotation: "target.workload.openshift.io/management",
+				AnnotationPrefix:     "resources.workload.openshift.io",
+			},
+		}
+		g := &generate.Generator{
+			Config: &rspec.Spec{
+				Linux: &rspec.Linux{
+					Resources: &rspec.LinuxResources{},
+				},
+			},
+		}
+		annotations := map[string]string{
+			"target.workload.openshift.io/management":  "true",
+			"resources.workload.openshift.io/limitbox": `{"cpushares": "5"}`,
+		}
+
+		// When
+		By("rejecting a quoted numeric value")
+
+		err := workloads.MutateSpecGivenAnnotations("limitbox", g, annotations)
+
+		// Then
+		Expect(err).To(MatchError(ContainSubstring("cannot unmarshal string")))
+
+		// When
+		By("applying an integer value")
+
+		annotations["resources.workload.openshift.io/limitbox"] = `{"cpushares": 5}`
+		err = workloads.MutateSpecGivenAnnotations("limitbox", g, annotations)
+
+		// Then
+		Expect(err).NotTo(HaveOccurred())
+		Expect(g.Config.Linux.Resources.CPU.Shares).To(Equal(new(uint64(5))))
+	})
 
 	It("should fail on invalid cpuset", func() {
 		// Given
@@ -144,9 +222,9 @@ var _ = t.Describe("Workloads config", func() {
 					CPUPeriod: 50000,
 				},
 				expectedCPUSet:    "0-1",
-				expectedCPUQuota:  pointer(int64(20)),
-				expectedCPUShare:  pointer(uint64(15)),
-				expectedCPUPeriod: pointer(uint64(50000)),
+				expectedCPUQuota:  new(int64(20)),
+				expectedCPUShare:  new(uint64(15)),
+				expectedCPUPeriod: new(uint64(50000)),
 			},
 		}
 
@@ -193,8 +271,8 @@ var _ = t.Describe("Workloads config", func() {
 					resourceContainerAnnotation: "{\"cpushares\":15,\"cpulimit\":35}",
 					workloadTargetAnnotation:    "{\"effect\":\"PreferredDuringScheduling\"}",
 				},
-				expectedCPUQuota: pointer(int64(3500)),
-				expectedCPUShare: pointer(uint64(15)),
+				expectedCPUQuota: new(int64(3500)),
+				expectedCPUShare: new(uint64(15)),
 			},
 			{
 				description: "when cpulimit is present it should override cpuquota",
@@ -202,8 +280,8 @@ var _ = t.Describe("Workloads config", func() {
 					resourceContainerAnnotation: "{\"cpushares\":35,\"cpulimit\":105,\"cpuquota\":35}",
 					workloadTargetAnnotation:    "{\"effect\":\"PreferredDuringScheduling\"}",
 				},
-				expectedCPUQuota: pointer(int64(10500)),
-				expectedCPUShare: pointer(uint64(35)),
+				expectedCPUQuota: new(int64(10500)),
+				expectedCPUShare: new(uint64(35)),
 			},
 			{
 				description: "when cpuquota is present",
@@ -211,8 +289,8 @@ var _ = t.Describe("Workloads config", func() {
 					resourceContainerAnnotation: "{\"cpushares\":25,\"cpuquota\":35}",
 					workloadTargetAnnotation:    "{\"effect\":\"PreferredDuringScheduling\"}",
 				},
-				expectedCPUQuota: pointer(int64(35)),
-				expectedCPUShare: pointer(uint64(25)),
+				expectedCPUQuota: new(int64(35)),
+				expectedCPUShare: new(uint64(25)),
 			},
 			{
 				description: "when only cpuperiod is present",
@@ -220,8 +298,8 @@ var _ = t.Describe("Workloads config", func() {
 					resourceContainerAnnotation: "{\"cpushares\":65,\"cpuperiod\":50000}",
 					workloadTargetAnnotation:    "{\"effect\":\"PreferredDuringScheduling\"}",
 				},
-				expectedCPUPeriod: pointer(uint64(50000)),
-				expectedCPUShare:  pointer(uint64(65)),
+				expectedCPUPeriod: new(uint64(50000)),
+				expectedCPUShare:  new(uint64(65)),
 			},
 			{
 				description: "when only cpushares is present",
@@ -229,7 +307,7 @@ var _ = t.Describe("Workloads config", func() {
 					resourceContainerAnnotation: "{\"cpushares\":45}",
 					workloadTargetAnnotation:    "{\"effect\":\"PreferredDuringScheduling\"}",
 				},
-				expectedCPUShare: pointer(uint64(45)),
+				expectedCPUShare: new(uint64(45)),
 			},
 		}
 
@@ -262,5 +340,39 @@ var _ = t.Describe("Workloads config", func() {
 				Expect(g.Config.Linux.Resources.CPU.Cpus).To(Equal(""))
 			})
 		}
+	})
+
+	It("should mutate container spec from annotation without default resources", func() {
+		const (
+			workloadsKey                = "management"
+			containerName               = "limitbox"
+			resourceContainerPrefix     = "resources.workload.openshift.io"
+			resourceContainerAnnotation = resourceContainerPrefix + "/" + containerName
+			workloadTargetAnnotation    = "target.workload.openshift.io/" + workloadsKey
+		)
+
+		workloads := config.Workloads{
+			workloadsKey: &config.WorkloadConfig{
+				AnnotationPrefix:     resourceContainerPrefix,
+				ActivationAnnotation: workloadTargetAnnotation,
+			},
+		}
+		g := &generate.Generator{
+			Config: &rspec.Spec{
+				Linux: &rspec.Linux{
+					Resources: &rspec.LinuxResources{},
+				},
+			},
+		}
+		annotations := map[string]string{
+			resourceContainerAnnotation: "{\"cpushares\":15}",
+			workloadTargetAnnotation:    "{\"effect\":\"PreferredDuringScheduling\"}",
+		}
+
+		err := workloads.MutateSpecGivenAnnotations(containerName, g, annotations)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(g.Config.Linux.Resources.CPU.Shares).ToNot(BeNil())
+		GinkgoWriter.Printf("cpushares=%d\n", *g.Config.Linux.Resources.CPU.Shares)
+		Expect(*g.Config.Linux.Resources.CPU.Shares).To(Equal(uint64(15)))
 	})
 })

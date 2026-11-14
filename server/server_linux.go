@@ -10,26 +10,30 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cri-o/cri-o/internal/config/seccomp"
-	"github.com/cri-o/cri-o/internal/log"
-
-	"github.com/cri-o/cri-o/server/metrics"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+
+	"github.com/cri-o/cri-o/internal/config/seccomp"
+	"github.com/cri-o/cri-o/internal/log"
+	"github.com/cri-o/cri-o/internal/oci"
+	"github.com/cri-o/cri-o/server/metrics"
 )
 
 func (s *Server) startSeccompNotifierWatcher(ctx context.Context) error {
 	logrus.Info("Starting seccomp notifier watcher")
+
 	s.seccompNotifierChan = make(chan seccomp.Notification)
 
 	// Restore or cleanup
 	notifierPath := s.config.Seccomp().NotifierPath()
+
 	info, err := os.Stat(notifierPath)
 	if err == nil && info.IsDir() {
 		if err := filepath.Walk(notifierPath, func(path string, info fs.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
+
 			if info.IsDir() {
 				return nil
 			}
@@ -38,24 +42,34 @@ func (s *Server) startSeccompNotifierWatcher(ctx context.Context) error {
 
 			if err := os.RemoveAll(path); err != nil {
 				logrus.Error("Unable to remove path: %w", err)
+
 				return nil
 			}
 
-			ctr, err := s.ContainerServer.GetContainerFromShortID(ctx, id)
+			ctr, err := s.GetContainerFromShortID(ctx, id)
 			if err != nil {
 				logrus.Warnf("Skipping not existing seccomp notifier container ID: %s", id)
+
 				return nil
 			}
 
 			if ctr.State().Status != specs.StateRunning {
 				logrus.Warnf("Skipping container %s because it is not running any more", id)
+
 				return nil
 			}
 
 			// Restart the notifier
-			notifier, err := seccomp.NewNotifier(context.Background(), s.seccompNotifierChan, id, path, ctr.Annotations())
+			notifier, err := seccomp.NewNotifier(
+				ctx,
+				s.seccompNotifierChan,
+				id,
+				path,
+				ctr.Annotations(),
+			)
 			if err != nil {
 				logrus.Errorf("Unable to run restored notifier: %v", err)
+
 				return nil
 			}
 
@@ -82,22 +96,35 @@ func (s *Server) startSeccompNotifierWatcher(ctx context.Context) error {
 			ctx := msg.Ctx()
 			id := msg.ContainerID()
 			syscall := msg.Syscall()
+			ctr := s.GetContainer(ctx, id)
 
-			log.Infof(ctx, "Got seccomp notifier message for container ID: %s (syscall = %s)", id, syscall)
+			if ctr == nil {
+				log.Warnf(ctx, "Seccomp blocked syscall '%s' in container %s", syscall, id)
+				// The container name is unavailable, but the metric should still be emitted.
+				metrics.Instance().MetricContainersSeccompNotifierCountTotalInc(id, syscall)
+
+				continue
+			}
+
+			log.Infof(ctx, "Seccomp blocked syscall '%s' in container %s (%s)",
+				syscall, id, oci.LabelsToDescription(ctr.Labels()))
 
 			result, ok := s.seccompNotifiers.Load(id)
 			if !ok {
 				log.Errorf(ctx, "Unable to get notifier for container ID")
+
 				continue
 			}
+
 			notifier, ok := result.(*seccomp.Notifier)
 			if !ok {
 				log.Errorf(ctx, "Notifier is not a seccomp notifier type")
+
 				continue
 			}
+
 			notifier.AddSyscall(syscall)
 
-			ctr := s.ContainerServer.GetContainer(ctx, id)
 			usedSyscalls := notifier.UsedSyscalls()
 
 			if notifier.StopContainers() {
@@ -124,18 +151,21 @@ func (s *Server) startSeccompNotifierWatcher(ctx context.Context) error {
 }
 
 // configureMaxThreads sets the Go runtime max threads threshold
-// which is 90% of the kernel setting from /proc/sys/kernel/threads-max
+// which is 90% of the kernel setting from /proc/sys/kernel/threads-max.
 func configureMaxThreads() error {
 	mt, err := os.ReadFile("/proc/sys/kernel/threads-max")
 	if err != nil {
 		return fmt.Errorf("read max threads file: %w", err)
 	}
+
 	mtint, err := strconv.Atoi(strings.TrimSpace(string(mt)))
 	if err != nil {
 		return err
 	}
+
 	maxThreads := (mtint / 100) * 90
 	debug.SetMaxThreads(maxThreads)
 	logrus.Debugf("Golang's threads limit set to %d", maxThreads)
+
 	return nil
 }

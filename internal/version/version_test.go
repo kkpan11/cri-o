@@ -12,6 +12,62 @@ var _ = t.Describe("Version", func() {
 	tempFileName := "tempVersionFile"
 	tempVersion := "1.1.1"
 	tempVersion2 := "1.13.1"
+	testInfo := Info{
+		Version:         "1.0.0",
+		GitCommit:       "abcdef123456",
+		GitCommitDate:   "2024-08-13T12:34:56Z",
+		GitTreeState:    "clean",
+		BuildDate:       "2024-08-13T12:34:56Z",
+		GoVersion:       "go1.20.5",
+		Compiler:        "gc",
+		Platform:        "linux/amd64",
+		Linkmode:        "external",
+		BuildTags:       []string{"tag1", "tag2"},
+		LDFlags:         "-X main.Version=1.0.0",
+		SeccompEnabled:  true,
+		AppArmorEnabled: false,
+		Dependencies:    []string{"dep1", "dep2"},
+	}
+	testInfoStr := `Version:        1.0.0
+GitCommit:      abcdef123456
+GitCommitDate:  2024-08-13T12:34:56Z
+GitTreeState:   clean
+BuildDate:      2024-08-13T12:34:56Z
+GoVersion:      go1.20.5
+Compiler:       gc
+Platform:       linux/amd64
+Linkmode:       external
+BuildTags:
+  tag1
+  tag2
+LDFlags:          -X main.Version=1.0.0
+SeccompEnabled:   true
+AppArmorEnabled:  false
+Dependencies:
+  dep1
+  dep2`
+	testJSONInfoStr := `{
+  "version": "1.0.0",
+  "gitCommit": "abcdef123456",
+  "gitCommitDate": "2024-08-13T12:34:56Z",
+  "gitTreeState": "clean",
+  "buildDate": "2024-08-13T12:34:56Z",
+  "goVersion": "go1.20.5",
+  "compiler": "gc",
+  "platform": "linux/amd64",
+  "linkmode": "external",
+  "buildTags": [
+    "tag1",
+    "tag2"
+  ],
+  "ldFlags": "-X main.Version=1.0.0",
+  "seccompEnabled": true,
+  "appArmorEnabled": false,
+  "dependencies": [
+    "dep1",
+    "dep2"
+  ]
+}`
 
 	t.Describe("test setting version", func() {
 		It("should succeed to parse version", func() {
@@ -22,11 +78,19 @@ var _ = t.Describe("Version", func() {
 			_, err = parseVersionConstant("1.1.1-dev", "biglonggitcommit")
 			Expect(err).ToNot(HaveOccurred())
 		})
+		It("should succeed to parse downstream NVR version strings", func() {
+			v, err := parseVersionConstant("1.35.7-8.git1a2b3c4.el10", "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(v.Major).To(Equal(uint64(1)))
+			Expect(v.Minor).To(Equal(uint64(35)))
+			Expect(v.Patch).To(Equal(uint64(7)))
+		})
 		It("should succeed to parse the version with a git commit", func() {
 			gitCommit := "\"myfavoritecommit\""
 			v, err := parseVersionConstant(tempVersion, gitCommit)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(v.Build).To(HaveLen(1))
+
 			trimmed := strings.Trim(gitCommit, "\"")
 			Expect(v.Build[0]).To(Equal(trimmed))
 		})
@@ -52,6 +116,7 @@ var _ = t.Describe("Version", func() {
 
 			err := writeVersionFile(tempFileName, gitCommit, version)
 			defer os.Remove(tempFileName)
+
 			Expect(err).ToNot(HaveOccurred())
 
 			versionBytes, err := os.ReadFile(tempFileName)
@@ -66,7 +131,7 @@ var _ = t.Describe("Version", func() {
 			Expect(string(versionBytes)).To(Equal(string(versionConstantJSON)))
 		})
 		It("should create dir for version file", func() {
-			filename := "/tmp/crio/temp-testing-file"
+			filename := t.MustTempFile("temp-testing-file-")
 			err := writeVersionFile(filename, "", tempVersion)
 			Expect(err).ToNot(HaveOccurred())
 
@@ -104,6 +169,7 @@ var _ = t.Describe("Version", func() {
 
 			err := writeVersionFile(tempFileName, "", oldVersion)
 			defer os.Remove(tempFileName)
+
 			Expect(err).ToNot(HaveOccurred())
 
 			upgrade, err := shouldCrioWipe(tempFileName, newVersion)
@@ -119,6 +185,23 @@ var _ = t.Describe("Version", func() {
 
 			err := writeVersionFile(tempFileName, "", oldVersion)
 			defer os.Remove(tempFileName)
+
+			Expect(err).ToNot(HaveOccurred())
+
+			upgrade, err := shouldCrioWipe(tempFileName, newVersion)
+			Expect(upgrade).To(BeFalse())
+			Expect(err).ToNot(HaveOccurred())
+		})
+		It("should not wipe when version only differs by NVR release tag", func() {
+			oldVersion := "1.33.13"
+			newVersion := "1.33.13-3.git1a2b3c4.el9"
+
+			tempFileName := tempFileName
+			_ = t.MustTempFile(tempFileName)
+
+			err := writeVersionFile(tempFileName, "", oldVersion)
+			defer os.Remove(tempFileName)
+
 			Expect(err).ToNot(HaveOccurred())
 
 			upgrade, err := shouldCrioWipe(tempFileName, newVersion)
@@ -134,6 +217,7 @@ var _ = t.Describe("Version", func() {
 
 			err := writeVersionFile(tempFileName, "", oldVersion)
 			defer os.Remove(tempFileName)
+
 			Expect(err).ToNot(HaveOccurred())
 
 			upgrade, err := shouldCrioWipe(tempFileName, newVersion)
@@ -149,6 +233,7 @@ var _ = t.Describe("Version", func() {
 
 			err := writeVersionFile(tempFileName, "", oldVersion)
 			defer os.Remove(tempFileName)
+
 			Expect(err).ToNot(HaveOccurred())
 
 			upgrade, err := shouldCrioWipe(tempFileName, newVersion)
@@ -168,6 +253,32 @@ var _ = t.Describe("Version", func() {
 			upgrade, err := shouldCrioWipe(tempFileName, newVersion)
 			Expect(upgrade).To(BeTrue())
 			Expect(err).To(HaveOccurred())
+		})
+	})
+	t.Describe("test build-time version overrides", func() {
+		It("should reflect a value injected into the Version variable via -ldflags -X", func() {
+			// Simulates build-time -ldflags -X injection. Proves Get()
+			// reads from the package-level var, not a stale copy.
+			original := Version
+			defer func() { Version = original }()
+
+			injected := "1.33.13-3.git1a2b3c4.el9"
+			Version = injected
+
+			info, err := Get(false)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(info.Version).To(Equal(injected))
+		})
+	})
+	t.Describe("test generating string from info", func() {
+		It("should succeed returning a formatted string", func() {
+			infoString := testInfo.String()
+			Expect(infoString).To(Equal(testInfoStr))
+		})
+		It("should succeed returning a JSON document", func() {
+			jsonInfoString, err := testInfo.JSONString()
+			Expect(jsonInfoString).To(Equal(testJSONInfoStr))
+			Expect(err).ToNot(HaveOccurred())
 		})
 	})
 })

@@ -27,7 +27,10 @@ coverage:
         if_ci_failed: error
     changes: false
 
-comment:
-  layout: "header, diff"
-  behavior: default
-  require_changes: false
+comment: false
+
+# Keep the coverage of a flag from the parent commit if it has no upload, for
+# example when the integration tests got skipped or failed.
+flag_management:
+  default_rules:
+    carryforward: true

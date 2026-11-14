@@ -3,10 +3,10 @@ package storage
 import (
 	"fmt"
 
-	"github.com/containers/image/v5/docker/reference"
-	istorage "github.com/containers/image/v5/storage"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/storage"
+	"go.podman.io/image/v5/docker/reference"
+	istorage "go.podman.io/image/v5/storage"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/storage"
 )
 
 // StorageImageID is a stable identifier for a (deduplicated) image in a local storage.
@@ -29,6 +29,7 @@ func newExactStorageImageID(rawImageID string) StorageImageID {
 	if !reference.IsFullIdentifier(rawImageID) {
 		panic(fmt.Sprintf("internal error, invalid input %q to newExactStorageImageID", rawImageID))
 	}
+
 	return StorageImageID{privateID: rawImageID}
 }
 
@@ -47,6 +48,7 @@ func parseStorageImageID(input string) (StorageImageID, error) {
 	if !reference.IsFullIdentifier(input) {
 		return StorageImageID{}, fmt.Errorf("%q is not a valid image ID", input)
 	}
+
 	return newExactStorageImageID(input), nil
 }
 
@@ -69,6 +71,7 @@ func (id StorageImageID) ensureInitialized() {
 // StorageImageID intentionally does not implement String(). Use typed values wherever possible.
 func (id StorageImageID) IDStringForOutOfProcessConsumptionOnly() string {
 	id.ensureInitialized()
+
 	return id.privateID
 }
 

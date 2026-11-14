@@ -13,7 +13,7 @@ import (
 // ResourceCleaner is a structure that tracks
 // how to cleanup a resource.
 // CleanupFuncs can be added to it, and it can be told to
-// Cleanup the resource
+// Cleanup the resource.
 type ResourceCleaner struct {
 	funcs []cleanupFunc
 }
@@ -22,12 +22,12 @@ type ResourceCleaner struct {
 // the associated resource.
 type cleanupFunc func() error
 
-// NewResourceCleaner creates a new ResourceCleaner
+// NewResourceCleaner creates a new ResourceCleaner.
 func NewResourceCleaner() *ResourceCleaner {
 	return &ResourceCleaner{}
 }
 
-// Add adds a new CleanupFunc to the ResourceCleaner
+// Add adds a new CleanupFunc to the ResourceCleaner.
 func (r *ResourceCleaner) Add(ctx context.Context, description string, fn func() error) {
 	// Create a retry task on top of the provided function
 	task := func() error {
@@ -38,6 +38,7 @@ func (r *ResourceCleaner) Add(ctx context.Context, description string, fn func()
 				description,
 			)
 		}
+
 		return err
 	}
 
@@ -46,13 +47,14 @@ func (r *ResourceCleaner) Add(ctx context.Context, description string, fn func()
 }
 
 // Cleanup cleans up the resource, running
-// the cleanup funcs in opposite chronological order
+// the cleanup funcs in opposite chronological order.
 func (r *ResourceCleaner) Cleanup() error {
 	for _, f := range r.funcs {
 		if err := f(); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -66,14 +68,16 @@ func retry(ctx context.Context, description string, fn func() error) error {
 	}
 
 	waitErr := wait.ExponentialBackoff(backoff, func() (bool, error) {
-		log.Infof(ctx, description)
+		log.Infof(ctx, "%s", description)
+
 		if err := fn(); err != nil {
 			log.Errorf(ctx, "Failed to cleanup (probably retrying): %v", err)
+
 			return false, nil
 		}
+
 		return true, nil
 	})
-
 	if waitErr != nil {
 		return fmt.Errorf("wait on retry: %w", waitErr)
 	}

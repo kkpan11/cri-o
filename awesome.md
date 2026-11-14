@@ -6,19 +6,17 @@ and collects useful resources about CRI-O.
 ## Contents
 
 <!-- markdownlint-disable-file MD039 MD051 -->
-<!-- TOC start -->
 
-- [Awesome CRI-O ](#awesome-cri-o-)
-  - [Contents](#contents)
-  - [Resources](#resources)
-    - [Articles](#articles)
-    - [Community](#community)
-    - [Podcasts](#podcasts)
-    - [Videos](#videos)
-    - [Tutorials](#tutorials)
-    - [Websites](#websites)
+<!-- toc -->
 
-<!-- TOC end -->
+- [Resources](#resources)
+  - [Articles](#articles)
+  - [Community](#community)
+  - [Podcasts](#podcasts)
+  - [Videos](#videos)
+  - [Tutorials](#tutorials)
+  - [Websites](#websites)
+  <!-- /toc -->
 
 ## Resources
 

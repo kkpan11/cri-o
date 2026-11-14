@@ -1,29 +1,34 @@
 package config_test
 
 import (
+	"context"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
-	"github.com/containers/common/pkg/apparmor"
-	"github.com/cri-o/cri-o/pkg/config"
+	conmonrsClient "github.com/containers/conmon-rs/pkg/client"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.podman.io/common/pkg/apparmor"
+
+	"github.com/cri-o/cri-o/pkg/config"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Config", func() {
 	BeforeEach(beforeEach)
 
 	t.Describe("Reload", func() {
-		modifyDefaultConfig := func(old, new string) {
+		modifyDefaultConfig := func(old, updated string) {
 			filePath := t.MustTempFile("config")
 			Expect(sut.ToFile(filePath)).To(Succeed())
-			Expect(sut.UpdateFromFile(filePath)).To(Succeed())
+			Expect(sut.UpdateFromFile(context.Background(), filePath)).To(Succeed())
 
 			read, err := os.ReadFile(filePath)
 			Expect(err).ToNot(HaveOccurred())
 
-			newContents := strings.ReplaceAll(string(read), old, new)
+			newContents := strings.ReplaceAll(string(read), old, updated)
 			err = os.WriteFile(filePath, []byte(newContents), 0)
 			Expect(err).ToNot(HaveOccurred())
 		}
@@ -32,10 +37,10 @@ var _ = t.Describe("Config", func() {
 			// Given
 			filePath := t.MustTempFile("config")
 			Expect(sut.ToFile(filePath)).To(Succeed())
-			Expect(sut.UpdateFromFile(filePath)).To(Succeed())
+			Expect(sut.UpdateFromFile(context.Background(), filePath)).To(Succeed())
 
 			// When
-			err := sut.Reload()
+			err := sut.Reload(context.Background())
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -49,7 +54,7 @@ var _ = t.Describe("Config", func() {
 			)
 
 			// When
-			err := sut.Reload()
+			err := sut.Reload(context.Background())
 
 			// Then
 			Expect(err).To(HaveOccurred())
@@ -63,7 +68,7 @@ var _ = t.Describe("Config", func() {
 			)
 
 			// When
-			err := sut.Reload()
+			err := sut.Reload(context.Background())
 
 			// Then
 			Expect(err).To(HaveOccurred())
@@ -77,7 +82,7 @@ var _ = t.Describe("Config", func() {
 			)
 
 			// When
-			err := sut.Reload()
+			err := sut.Reload(context.Background())
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -97,6 +102,7 @@ var _ = t.Describe("Config", func() {
 		It("should succeed with config change", func() {
 			// Given
 			const newLogLevel = "fatal"
+
 			newConfig := defaultConfig()
 			newConfig.LogLevel = newLogLevel
 
@@ -134,6 +140,7 @@ var _ = t.Describe("Config", func() {
 		It("should succeed with config change", func() {
 			// Given
 			const newLogFilter = "fatal"
+
 			newConfig := defaultConfig()
 			newConfig.LogFilter = newLogFilter
 
@@ -171,6 +178,7 @@ var _ = t.Describe("Config", func() {
 		It("should succeed with pause_image change", func() {
 			// Given
 			const newPauseImage = "my-pause"
+
 			newConfig := defaultConfig()
 			newConfig.PauseImage = newPauseImage
 
@@ -185,6 +193,7 @@ var _ = t.Describe("Config", func() {
 		It("should fail with invalid pause_image change", func() {
 			// Given
 			const newPauseImage = "//THIS=is!invalid"
+
 			newConfig := defaultConfig()
 			newConfig.PauseImage = newPauseImage
 
@@ -198,6 +207,7 @@ var _ = t.Describe("Config", func() {
 		It("should succeed with pause_command change", func() {
 			// Given
 			const newPauseCommand = "/new-pause"
+
 			newConfig := defaultConfig()
 			newConfig.PauseCommand = newPauseCommand
 
@@ -328,6 +338,7 @@ var _ = t.Describe("Config", func() {
 		It("should succeed with config change", func() {
 			// Given
 			const profile = "unconfined"
+
 			newConfig := defaultConfig()
 			newConfig.ApparmorProfile = profile
 
@@ -341,6 +352,12 @@ var _ = t.Describe("Config", func() {
 	})
 
 	t.Describe("ReloadRuntimes", func() {
+		var existingRuntimePath string
+
+		BeforeEach(func() {
+			existingRuntimePath = filepath.Join(t.EnsureRuntimeDeps(), config.DefaultRuntime)
+		})
+
 		It("should succeed without any config change", func() {
 			// Given
 			// When
@@ -352,6 +369,7 @@ var _ = t.Describe("Config", func() {
 
 		It("should fail for invalid default_runtime", func() {
 			// Given
+			defaultRuntime := sut.Runtimes[config.DefaultRuntime]
 			newConfig := &config.Config{}
 			newConfig.DefaultRuntime = "invalid"
 
@@ -360,12 +378,32 @@ var _ = t.Describe("Config", func() {
 
 			// Then
 			Expect(err).To(HaveOccurred())
+			Expect(sut.DefaultRuntime).To(Equal(config.DefaultRuntime))
+			Expect(sut.Runtimes).To(HaveLen(1))
+			Expect(sut.Runtimes[config.DefaultRuntime]).To(BeIdenticalTo(defaultRuntime))
+		})
+
+		It("should keep the runtimes if a new one fails the validation", func() {
+			// Given
+			defaultRuntime := sut.Runtimes[config.DefaultRuntime]
+			newConfig := &config.Config{}
+			newConfig.Runtimes = config.Runtimes{
+				config.DefaultRuntime: {RuntimePath: invalidPath},
+			}
+
+			// When
+			err := sut.ReloadRuntimes(newConfig)
+
+			// Then
+			Expect(err).To(HaveOccurred())
+			Expect(sut.Runtimes).To(HaveLen(1))
+			Expect(sut.Runtimes[config.DefaultRuntime]).To(BeIdenticalTo(defaultRuntime))
 		})
 
 		It("should add a new runtime", func() {
 			// Given
 			newRuntimeHandler := &config.RuntimeHandler{
-				RuntimePath:                  "/usr/bin/runc",
+				RuntimePath:                  existingRuntimePath,
 				PrivilegedWithoutHostDevices: true,
 			}
 			newConfig := &config.Config{}
@@ -377,13 +415,14 @@ var _ = t.Describe("Config", func() {
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
-			Expect(sut.Runtimes).To(HaveKeyWithValue("new", newRuntimeHandler))
+			Expect(sut.Runtimes).To(HaveKey("new"))
+			Expect(sut.Runtimes["new"].PrivilegedWithoutHostDevices).To(BeTrue())
 		})
 
 		It("should change the default runtime", func() {
 			// Given
 			sut.Runtimes["existing"] = &config.RuntimeHandler{
-				RuntimePath: "/usr/bin/runc",
+				RuntimePath: existingRuntimePath,
 			}
 			newConfig := &config.Config{}
 			newConfig.Runtimes = sut.Runtimes
@@ -397,15 +436,57 @@ var _ = t.Describe("Config", func() {
 			Expect(sut.DefaultRuntime).To(Equal("existing"))
 		})
 
+		It("should replace the default runtime together with the runtimes", func() {
+			// Given
+			newConfig := &config.Config{}
+			newConfig.Runtimes = config.Runtimes{
+				"renamed": {RuntimePath: existingRuntimePath},
+			}
+			newConfig.DefaultRuntime = "renamed"
+
+			done := make(chan struct{})
+			readerDone := make(chan struct{})
+
+			// A concurrent CRI call which resolves the default handler.
+			go func() {
+				defer GinkgoRecover()
+				defer close(readerDone)
+
+				for {
+					select {
+					case <-done:
+						return
+					default:
+						runtimes, defaultRuntime := sut.RuntimeHandlers()
+						Expect(runtimes).To(HaveKey(defaultRuntime))
+					}
+				}
+			}()
+
+			// When
+			err := sut.ReloadRuntimes(newConfig)
+
+			close(done)
+			<-readerDone
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+
+			runtimes, defaultRuntime := sut.RuntimeHandlers()
+			Expect(defaultRuntime).To(Equal("renamed"))
+			Expect(runtimes).To(HaveLen(1))
+			Expect(runtimes).To(HaveKey("renamed"))
+		})
+
 		It("should overwrite existing runtime", func() {
 			// Given
 			existingRuntime := &config.RuntimeHandler{
-				RuntimePath: "/usr/bin/runc",
+				RuntimePath: existingRuntimePath,
 			}
 			sut.Runtimes["existing"] = existingRuntime
 
 			newRuntime := &config.RuntimeHandler{
-				RuntimePath:                  "/usr/bin/runc",
+				RuntimePath:                  existingRuntimePath,
 				PrivilegedWithoutHostDevices: true,
 			}
 			newConfig := &config.Config{}
@@ -417,26 +498,268 @@ var _ = t.Describe("Config", func() {
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
-			Expect(sut.Runtimes).To(HaveKeyWithValue("existing", newRuntime))
+			Expect(sut.Runtimes).To(HaveKey("existing"))
 			Expect(sut.Runtimes["existing"].PrivilegedWithoutHostDevices).To(BeTrue())
+		})
+
+		It("should inherit runtime config", func() {
+			// Given
+			newRuntime := &config.RuntimeHandler{
+				RuntimePath:           invalidPath,
+				InheritDefaultRuntime: true,
+			}
+			defaultRuntime := &config.RuntimeHandler{
+				RuntimePath: existingRuntimePath,
+			}
+			newConfig := &config.Config{}
+			newConfig.DefaultRuntime = "default"
+			newConfig.Runtimes = make(config.Runtimes)
+			newConfig.Runtimes["default"] = defaultRuntime
+			newConfig.Runtimes["new"] = newRuntime
+
+			// When
+			err := sut.ReloadRuntimes(newConfig)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sut.Runtimes).To(HaveKey("new"))
+			Expect(sut.Runtimes["new"].RuntimePath).To(Equal(existingRuntimePath))
+		})
+
+		Context("with conmon-rs", func() {
+			var conmonrs string
+
+			// podRuntime returns a handler which lets conmon-rs serve the
+			// streams.
+			podRuntime := func() *config.RuntimeHandler {
+				return &config.RuntimeHandler{
+					RuntimePath:      existingRuntimePath,
+					RuntimeType:      config.RuntimeTypePod,
+					MonitorPath:      conmonrs,
+					StreamWebsockets: new(true),
+				}
+			}
+
+			// reportVersion lets the fake conmon-rs report the features of
+			// the version.
+			reportVersion := func(version string, features ...string) {
+				Expect(os.WriteFile(conmonrs, []byte(fmt.Sprintf(
+					"#!/bin/sh\necho '{ \"version\": %q, \"features\": [%s] }'\n",
+					version,
+					`"`+strings.Join(features, `", "`)+`"`,
+				)), 0o755)).To(Succeed())
+			}
+
+			BeforeEach(func() {
+				conmonrs = conmonrsFakeBinary("")
+				DeferCleanup(os.RemoveAll, conmonrs)
+
+				reportVersion(
+					"1.2.0",
+					conmonrsClient.FeatureStreamingProtocols,
+					conmonrsClient.FeaturePortForward,
+				)
+
+				sut.Runtimes["pod"] = podRuntime()
+				Expect(sut.Runtimes["pod"].Validate("pod")).To(Succeed())
+				Expect(sut.Runtimes["pod"].RuntimeStreamPortForward()).To(BeTrue())
+			})
+
+			It("should publish validated runtimes", func() {
+				// Given
+				reportVersion("1.1.1", "sdnotify")
+
+				newConfig := &config.Config{}
+				newConfig.Runtimes = config.Runtimes{
+					config.DefaultRuntime: sut.Runtimes[config.DefaultRuntime],
+					"pod":                 podRuntime(),
+				}
+
+				// When
+				err := sut.ReloadRuntimes(newConfig)
+
+				// Then
+				Expect(err).ToNot(HaveOccurred())
+				Expect(sut.Runtimes["pod"].RuntimeStreamWebsockets()).To(BeFalse())
+				Expect(sut.Runtimes["pod"].RuntimeStreamPortForward()).To(BeFalse())
+			})
+
+			It("should not modify the published runtimes while validating", func() {
+				// Given
+				reportVersion("1.1.1", "sdnotify")
+
+				// The handler a running CRI call holds.
+				published := sut.Runtimes["pod"]
+
+				newConfig := &config.Config{}
+				newConfig.Runtimes = sut.Runtimes
+				newConfig.DefaultRuntime = "pod"
+
+				done := make(chan struct{})
+				readerDone := make(chan struct{})
+
+				go func() {
+					defer GinkgoRecover()
+					defer close(readerDone)
+
+					for {
+						select {
+						case <-done:
+							return
+						default:
+							Expect(published.RuntimeStreamWebsockets()).To(BeTrue())
+							Expect(published.RuntimeStreamPortForward()).To(BeTrue())
+						}
+					}
+				}()
+
+				// When
+				err := sut.ReloadRuntimes(newConfig)
+
+				close(done)
+				<-readerDone
+
+				// Then
+				Expect(err).ToNot(HaveOccurred())
+				Expect(sut.DefaultRuntime).To(Equal("pod"))
+				Expect(sut.Runtimes["pod"]).NotTo(BeIdenticalTo(published))
+				Expect(sut.Runtimes["pod"].RuntimeStreamWebsockets()).To(BeFalse())
+				Expect(published.RuntimeStreamWebsockets()).To(BeTrue())
+				Expect(published.RuntimeStreamPortForward()).To(BeTrue())
+			})
+
+			It("should enable streaming websockets by default", func() {
+				// Given
+				handler := podRuntime()
+				handler.StreamWebsockets = nil
+
+				newConfig := &config.Config{}
+				newConfig.Runtimes = config.Runtimes{
+					config.DefaultRuntime: sut.Runtimes[config.DefaultRuntime],
+					"pod":                 handler,
+				}
+
+				// When
+				err := sut.ReloadRuntimes(newConfig)
+
+				// Then
+				Expect(err).ToNot(HaveOccurred())
+				Expect(sut.Runtimes["pod"].RuntimeStreamWebsockets()).To(BeTrue())
+				Expect(sut.Runtimes["pod"].RuntimeStreamPortForward()).To(BeTrue())
+			})
+
+			It("should keep the published runtimes if the reloaded config is unchanged", func() {
+				// Given
+				// A freshly parsed config leaves stream_websockets unset,
+				// which the validation of the running handlers resolved.
+				handler := podRuntime()
+				handler.StreamWebsockets = nil
+
+				newConfig := &config.Config{}
+				newConfig.Runtimes = config.Runtimes{
+					config.DefaultRuntime: sut.Runtimes[config.DefaultRuntime],
+					"pod":                 handler,
+				}
+				Expect(sut.ReloadRuntimes(newConfig)).To(Succeed())
+				Expect(sut.Runtimes["pod"].RuntimeStreamWebsockets()).To(BeTrue())
+
+				published := sut.Runtimes["pod"]
+
+				// When
+				err := sut.ReloadRuntimes(newConfig)
+
+				// Then
+				Expect(err).ToNot(HaveOccurred())
+				Expect(sut.Runtimes["pod"]).To(BeIdenticalTo(published))
+				Expect(handler.StreamWebsockets).To(BeNil())
+			})
+
+			It("should keep streaming websockets disabled explicitly", func() {
+				// Given
+				handler := podRuntime()
+				handler.StreamWebsockets = new(false)
+
+				newConfig := &config.Config{}
+				newConfig.Runtimes = config.Runtimes{
+					config.DefaultRuntime: sut.Runtimes[config.DefaultRuntime],
+					"pod":                 handler,
+				}
+
+				// When
+				err := sut.ReloadRuntimes(newConfig)
+
+				// Then
+				Expect(err).ToNot(HaveOccurred())
+				Expect(sut.Runtimes["pod"].RuntimeStreamWebsockets()).To(BeFalse())
+			})
+
+			It("should ignore the stream_enable_tls of the reloaded config", func() {
+				// Given
+				handler := podRuntime()
+				handler.StreamWebsockets = nil
+
+				newConfig := &config.Config{}
+				newConfig.StreamEnableTLS = true
+				newConfig.Runtimes = config.Runtimes{
+					config.DefaultRuntime: sut.Runtimes[config.DefaultRuntime],
+					"pod":                 handler,
+				}
+
+				// When
+				err := sut.ReloadRuntimes(newConfig)
+
+				// Then
+				Expect(err).ToNot(HaveOccurred())
+				Expect(sut.Runtimes["pod"].RuntimeStreamWebsockets()).To(BeTrue())
+				Expect(sut.Runtimes["pod"].RuntimeStreamPortForward()).To(BeTrue())
+			})
+
+			It("should not enable streaming websockets by default with stream_enable_tls", func() {
+				// Given
+				// Like Config.Validate on the start of the server.
+				sut.SetStreamEnableTLS(true)
+
+				handler := podRuntime()
+				handler.StreamWebsockets = nil
+
+				newConfig := &config.Config{}
+				newConfig.Runtimes = config.Runtimes{
+					config.DefaultRuntime: sut.Runtimes[config.DefaultRuntime],
+					"pod":                 handler,
+				}
+
+				// When
+				err := sut.ReloadRuntimes(newConfig)
+
+				// Then
+				Expect(err).ToNot(HaveOccurred())
+				Expect(sut.Runtimes["pod"].RuntimeStreamWebsockets()).To(BeFalse())
+				Expect(sut.Runtimes["pod"].RuntimeStreamPortForward()).To(BeFalse())
+			})
 		})
 	})
 
 	t.Describe("ReloadPinnedImages", func() {
-		It("should update PinnedImages with newConfig's PinnedImages if they are different", func() {
-			sut.PinnedImages = []string{"image1", "image4", "image3"}
-			newConfig := &config.Config{}
-			newConfig.PinnedImages = []string{"image5"}
-			sut.ReloadPinnedImages(newConfig)
-			Expect(sut.PinnedImages).To(Equal([]string{"image5"}))
-		})
+		It(
+			"should update PinnedImages with newConfig's PinnedImages if they are different",
+			func() {
+				sut.PinnedImages = []string{"image1", "image4", "image3"}
+				newConfig := &config.Config{}
+				newConfig.PinnedImages = []string{"image5"}
+				sut.ReloadPinnedImages(newConfig)
+				Expect(sut.PinnedImages).To(Equal([]string{"image5"}))
+			},
+		)
 
-		It("should not update PinnedImages if they are the same as newConfig's PinnedImages", func() {
-			sut.PinnedImages = []string{"image1", "image2", "image3"}
-			newConfig := &config.Config{}
-			newConfig.PinnedImages = []string{"image1", "image2", "image3"}
-			sut.ReloadPinnedImages(newConfig)
-			Expect(sut.PinnedImages).To(Equal([]string{"image1", "image2", "image3"}))
-		})
+		It(
+			"should not update PinnedImages if they are the same as newConfig's PinnedImages",
+			func() {
+				sut.PinnedImages = []string{"image1", "image2", "image3"}
+				newConfig := &config.Config{}
+				newConfig.PinnedImages = []string{"image1", "image2", "image3"}
+				sut.ReloadPinnedImages(newConfig)
+				Expect(sut.PinnedImages).To(Equal([]string{"image1", "image2", "image3"}))
+			},
+		)
 	})
 })

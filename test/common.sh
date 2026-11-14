@@ -25,14 +25,14 @@ CRIO_BINARY_PATH=${CRIO_BINARY_PATH:-${CRIO_ROOT}/bin/$CRIO_BINARY}
 PINNS_BINARY_PATH=${PINNS_BINARY_PATH:-${CRIO_ROOT}/bin/pinns}
 
 # Path of the crictl binary.
-CRICTL_PATH=$(command -v crictl || true)
-CRICTL_BINARY=${CRICTL_PATH:-/usr/bin/crictl}
+CRICTL_BINARY=${CRICTL_BINARY:-$(command -v crictl)}
+CRICTL_TIMEOUT=${CRICTL_TIMEOUT:-30s}
 # Path of the conmon binary set as a variable to allow overwriting.
 CONMON_BINARY=${CONMON_BINARY:-$(command -v conmon)}
 # Cgroup for the conmon process
 CONTAINER_CONMON_CGROUP=${CONTAINER_CONMON_CGROUP:-pod}
 # Path of the default seccomp profile.
-CONTAINER_SECCOMP_PROFILE=${CONTAINER_SECCOMP_PROFILE:-${CRIO_ROOT}/vendor/github.com/containers/common/pkg/seccomp/seccomp.json}
+CONTAINER_SECCOMP_PROFILE=${CONTAINER_SECCOMP_PROFILE:-${CRIO_ROOT}/vendor/go.podman.io/common/pkg/seccomp/seccomp.json}
 CONTAINER_UID_MAPPINGS=${CONTAINER_UID_MAPPINGS:-}
 CONTAINER_GID_MAPPINGS=${CONTAINER_GID_MAPPINGS:-}
 OVERRIDE_OPTIONS=${OVERRIDE_OPTIONS:-}
@@ -43,7 +43,7 @@ else
     CONTAINER_CNI_PLUGIN_DIR=${CONTAINER_CNI_PLUGIN_DIR:-/opt/cni/bin}
 fi
 # Runtime
-CONTAINER_DEFAULT_RUNTIME=${CONTAINER_DEFAULT_RUNTIME:-runc}
+CONTAINER_DEFAULT_RUNTIME=${CONTAINER_DEFAULT_RUNTIME:-crun}
 RUNTIME_BINARY_PATH=$(command -v "$CONTAINER_DEFAULT_RUNTIME")
 RUNTIME_TYPE=${RUNTIME_TYPE:-oci}
 PRIVILEGED_WITHOUT_HOST_DEVICES=${PRIVILEGED_WITHOUT_HOST_DEVICES:-}
@@ -70,6 +70,8 @@ ARTIFACTS_PATH=${ARTIFACTS_PATH:-${CRIO_ROOT}/.artifacts}
 CHECKSECCOMP_BINARY=${CHECKSECCOMP_BINARY:-${CRIO_ROOT}/test/checkseccomp/checkseccomp}
 # Path of the checkcriu binary.
 CHECKCRIU_BINARY=${CHECKCRIU_BINARY:-${CRIO_ROOT}/test/checkcriu/checkcriu}
+# Path of the updateunified binary.
+UPDATEUNIFIED_BINARY=${UPDATEUNIFIED_BINARY:-${CRIO_ROOT}/test/updateunified/updateunified}
 # The default log directory where all logs will go unless directly specified by the kubelet
 DEFAULT_LOG_PATH=${DEFAULT_LOG_PATH:-/var/log/crio/pods}
 # Cgroup manager to be used
@@ -108,7 +110,7 @@ ARCH=$(uname -m)
 ARCH_X86_64=x86_64
 
 IMAGES=(
-    registry.k8s.io/pause:3.9
+    registry.k8s.io/pause:3.10.2
     quay.io/crio/fedora-crio-ci:latest
     quay.io/crio/hello-wasm:latest
 )
@@ -128,7 +130,8 @@ function get_img() {
         if ! "$COPYIMG_BINARY" \
             --import-from="$img" \
             --export-to="dir:$dir" \
-            --signature-policy="$INTEGRATION_ROOT"/policy.json; then
+            --signature-policy="$INTEGRATION_ROOT"/policy.json \
+            --retry-attempts=3; then
             echo "Error pulling $img" >&2
             rm -fr "$dir"
             exit 1

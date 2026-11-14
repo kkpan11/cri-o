@@ -1,0 +1,697 @@
+package oci_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sync/atomic"
+	"time"
+
+	conmonClient "github.com/containers/conmon-rs/pkg/client"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/oci"
+	libconfig "github.com/cri-o/cri-o/pkg/config"
+)
+
+func setEnv(key, value string, set bool) {
+	oldValue, wasSet := os.LookupEnv(key)
+
+	if set {
+		Expect(os.Setenv(key, value)).To(Succeed())
+	} else {
+		Expect(os.Unsetenv(key)).To(Succeed())
+	}
+
+	DeferCleanup(func() {
+		if wasSet {
+			Expect(os.Setenv(key, oldValue)).To(Succeed())
+		} else {
+			Expect(os.Unsetenv(key)).To(Succeed())
+		}
+	})
+}
+
+// fakeConmonServer records how a conmon-rs server got stopped.
+type fakeConmonServer struct {
+	shutdownErr, killErr error
+	killed, closed       bool
+	// The errors of the contexts of the calls.
+	shutdownCtxErr, killCtxErr error
+	// The time left until the deadline of the context of the kill.
+	killTimeLeft time.Duration
+}
+
+func (f *fakeConmonServer) PID() uint32 {
+	return 1
+}
+
+func (f *fakeConmonServer) ShutdownContext(ctx context.Context) error {
+	if f.closed {
+		return conmonClient.ErrClientClosed
+	}
+
+	f.shutdownCtxErr = ctx.Err()
+
+	return f.shutdownErr
+}
+
+func (f *fakeConmonServer) KillContext(ctx context.Context) error {
+	if f.closed {
+		return conmonClient.ErrClientClosed
+	}
+
+	f.killed = true
+	f.killCtxErr = ctx.Err()
+
+	if deadline, ok := ctx.Deadline(); ok {
+		f.killTimeLeft = time.Until(deadline)
+	}
+
+	return f.killErr
+}
+
+func (f *fakeConmonServer) Close() error {
+	f.closed = true
+
+	return errors.New("close")
+}
+
+// fakeConmonFeatures reports the features of a conmon-rs server.
+type fakeConmonFeatures map[string]bool
+
+func (f fakeConmonFeatures) SupportsFeature(feature string) bool {
+	return f[feature]
+}
+
+// fakeRuntimeImpl counts the creates and deletes of the containers which use
+// it.
+type fakeRuntimeImpl struct {
+	oci.RuntimeImpl
+
+	created, deleted atomic.Int64
+}
+
+func (f *fakeRuntimeImpl) CreateContainer(context.Context, *oci.Container, string, bool) error {
+	f.created.Add(1)
+
+	return nil
+}
+
+func (f *fakeRuntimeImpl) DeleteContainer(context.Context, *oci.Container) error {
+	f.deleted.Add(1)
+
+	return nil
+}
+
+func newPodTestContainer(terminal, stdin, stdinOnce bool) *oci.Container {
+	c, err := oci.NewContainer("id", "name", "bundlePath", "logPath",
+		map[string]string{}, map[string]string{}, map[string]string{},
+		"image", nil, nil, "", &types.ContainerMetadata{}, "sandbox",
+		terminal, stdin, stdinOnce, "", "dir", time.Now(), "")
+	Expect(err).ToNot(HaveOccurred())
+
+	return c
+}
+
+var _ = t.Describe("RuntimePod", func() {
+	Context("MonitorEnv", func() {
+		It("should add the CRI-O values to the monitor env", func() {
+			// Given
+			setEnv("XDG_RUNTIME_DIR", "/run/user/1000", true)
+			setEnv("PATH", "/crio/bin", true)
+
+			handler := &libconfig.RuntimeHandler{MonitorEnv: []string{"FOO=bar"}}
+
+			// When
+			env := oci.MonitorEnv(handler)
+
+			// Then
+			Expect(env).To(Equal([]string{
+				"FOO=bar",
+				"CRI_O_EXTERNAL=1",
+				"XDG_RUNTIME_DIR=/run/user/1000",
+				"PATH=/crio/bin",
+			}))
+			Expect(handler.MonitorEnv).To(Equal([]string{"FOO=bar"}))
+		})
+
+		It("should not inherit the CRI-O env without a monitor env", func() {
+			// Given
+			setEnv("XDG_RUNTIME_DIR", "", false)
+			setEnv("PATH", "", false)
+
+			// When
+			env := oci.MonitorEnv(&libconfig.RuntimeHandler{})
+
+			// Then
+			Expect(env).To(Equal([]string{"CRI_O_EXTERNAL=1"}))
+		})
+
+		It("should not share the monitor env between calls", func() {
+			// Given
+			monitorEnv := make([]string, 1, 10)
+			monitorEnv[0] = "FOO=bar"
+			handler := &libconfig.RuntimeHandler{MonitorEnv: monitorEnv}
+
+			// When
+			first := oci.MonitorEnv(handler)
+			second := oci.MonitorEnv(handler)
+			second[1] = "CHANGED=1"
+
+			// Then
+			Expect(first[1]).To(Equal("CRI_O_EXTERNAL=1"))
+		})
+	})
+
+	Context("NewConmonServerConfig", func() {
+		var runtime *oci.Runtime
+
+		BeforeEach(func() {
+			cfg, err := libconfig.DefaultConfig()
+			Expect(err).ToNot(HaveOccurred())
+
+			cfg.ContainerAttachSocketDir = t.MustTempDir("attach-socket")
+			runtime, err = oci.New(cfg)
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should pass the monitor env to the server", func() {
+			// Given
+			setEnv("XDG_RUNTIME_DIR", "", false)
+			setEnv("PATH", "", false)
+
+			handler := &libconfig.RuntimeHandler{
+				RuntimePath: "/usr/bin/crun",
+				MonitorPath: "/usr/bin/conmonrs",
+				MonitorEnv: []string{
+					"PATH=/usr/bin",
+					"FOO=bar",
+					"LOG_DRIVER=systemd",
+					"HEAPTRACK_OUTPUT_PATH=/tmp",
+					"HEAPTRACK_BINARY_PATH=/usr/bin/heaptrack",
+				},
+			}
+
+			// When
+			cfg := oci.NewConmonServerConfig(
+				runtime, handler, newPodTestContainer(false, false, false),
+			)
+
+			// Then
+			Expect(cfg.Env).To(Equal([]string{
+				"PATH=/usr/bin",
+				"FOO=bar",
+				"CRI_O_EXTERNAL=1",
+			}))
+			Expect(cfg.LogDriver).To(Equal(conmonClient.LogDriverSystemd))
+			Expect(cfg.Heaptrack.Enabled).To(BeTrue())
+			Expect(cfg.Heaptrack.OutputPath).To(Equal("/tmp/cri-o.conmon-rs.id"))
+			Expect(cfg.Heaptrack.BinaryPath).To(Equal("/usr/bin/heaptrack"))
+			Expect(handler.MonitorEnv).To(HaveLen(5))
+		})
+
+		It("should not let the server inherit the CRI-O env", func() {
+			// Given
+			setEnv("CRIO_TEST_SENTINEL", "1", true)
+
+			// When
+			cfg := oci.NewConmonServerConfig(
+				runtime, &libconfig.RuntimeHandler{}, newPodTestContainer(false, false, false),
+			)
+
+			// Then
+			Expect(cfg.Env).NotTo(BeNil())
+			Expect(cfg.Env).To(ContainElement("CRI_O_EXTERNAL=1"))
+			Expect(cfg.Env).NotTo(ContainElement(HavePrefix("CRIO_TEST_SENTINEL=")))
+			Expect(cfg.LogDriver).To(Equal(conmonClient.LogDriverNone))
+			Expect(cfg.Heaptrack.Enabled).To(BeFalse())
+		})
+	})
+
+	Context("NewCreateContainerConfig", func() {
+		var cfg *libconfig.Config
+
+		BeforeEach(func() {
+			var err error
+
+			cfg, err = libconfig.DefaultConfig()
+			Expect(err).ToNot(HaveOccurred())
+
+			cfg.ContainerAttachSocketDir = t.MustTempDir("attach-socket")
+		})
+
+		It("should not pass command arguments by default", func() {
+			// Given
+			runtime, err := oci.New(cfg)
+			Expect(err).ToNot(HaveOccurred())
+
+			// When
+			createConfig := oci.NewCreateContainerConfig(
+				runtime, newPodTestContainer(false, false, false),
+			)
+
+			// Then
+			Expect(createConfig.ID).To(Equal("id"))
+			Expect(createConfig.CommandArgs).To(BeEmpty())
+		})
+
+		It("should pass --no-pivot to the runtime if no_pivot is set", func() {
+			// Given
+			cfg.NoPivot = true
+			runtime, err := oci.New(cfg)
+			Expect(err).ToNot(HaveOccurred())
+
+			// When
+			createConfig := oci.NewCreateContainerConfig(
+				runtime, newPodTestContainer(false, false, false),
+			)
+
+			// Then
+			Expect(createConfig.CommandArgs).To(Equal([]string{"--no-pivot"}))
+		})
+	})
+
+	Context("RequireStreamingProtocols", func() {
+		It("should succeed if the server speaks the streaming protocols", func() {
+			// Given
+			client := fakeConmonFeatures{conmonClient.FeatureStreamingProtocols: true}
+
+			// When
+			err := oci.RequireStreamingProtocols(client)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should fail with ErrUnsupported if the server is older", func() {
+			// Given
+			client := fakeConmonFeatures{conmonClient.FeatureSdNotify: true}
+
+			// When
+			err := oci.RequireStreamingProtocols(client)
+
+			// Then
+			Expect(err).To(MatchError(conmonClient.ErrUnsupported))
+			Expect(err).To(MatchError(errors.ErrUnsupported))
+		})
+	})
+
+	Context("ExecSyncResponse", func() {
+		It("should pass the exit code and output of a finished command", func() {
+			// Given
+			res := &conmonClient.ExecContainerResult{
+				ExitCode: 137,
+				Stdout:   []byte("out"),
+				Stderr:   []byte("err"),
+			}
+
+			// When
+			resp, err := oci.ExecSyncResponse(res)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(resp.GetExitCode()).To(BeEquivalentTo(137))
+			Expect(resp.GetStdout()).To(Equal([]byte("out")))
+			Expect(resp.GetStderr()).To(Equal([]byte("err")))
+		})
+
+		It("should report a timeout as a failed command like conmon", func() {
+			// Given
+			res := &conmonClient.ExecContainerResult{
+				ExitCode: conmonClient.ExecExitCodeTimedOut,
+				TimedOut: true,
+			}
+
+			// When
+			resp, err := oci.ExecSyncResponse(res)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(resp.GetExitCode()).To(BeEquivalentTo(-1))
+			Expect(string(resp.GetStderr())).To(ContainSubstring("timed out"))
+		})
+
+		DescribeTable(
+			"should fail without an exit status",
+			func(exitCode int32, message string) {
+				// Given
+				res := &conmonClient.ExecContainerResult{
+					ExitCode: exitCode,
+					Stderr:   []byte("runtime failed"),
+				}
+
+				// When
+				resp, err := oci.ExecSyncResponse(res)
+
+				// Then
+				Expect(resp).To(BeNil())
+
+				syncErr, ok := errors.AsType[*oci.ExecSyncError](err)
+				Expect(ok).To(BeTrue())
+				Expect(syncErr.ExitCode).To(BeEquivalentTo(-1))
+				Expect(syncErr.Err).To(MatchError(message))
+				Expect(syncErr.Stderr.String()).To(Equal("runtime failed"))
+			},
+			Entry("not started", conmonClient.ExecExitCodeNotStarted, "exec did not start"),
+			Entry(
+				"timed out without a timeout",
+				conmonClient.ExecExitCodeTimedOut,
+				"exit status of exec unknown",
+			),
+			Entry("unknown", int32(-1), "exit status of exec unknown"),
+		)
+	})
+
+	Context("UnsupportedError", func() {
+		It("should add the error of the standard library", func() {
+			// Given
+			rpcErr := fmt.Errorf(
+				"call ServePortForwardContainer RPC: %w",
+				conmonClient.ErrUnsupported,
+			)
+
+			// When
+			err := oci.UnsupportedError(rpcErr)
+
+			// Then
+			Expect(err).To(MatchError(conmonClient.ErrUnsupported))
+			Expect(err).To(MatchError(errors.ErrUnsupported))
+		})
+
+		It("should keep other errors", func() {
+			// Given
+			rpcErr := fmt.Errorf(
+				"call ServePortForwardContainer RPC: %w",
+				conmonClient.ErrTooManyRequests,
+			)
+
+			// When
+			err := oci.UnsupportedError(rpcErr)
+
+			// Then
+			Expect(err).To(BeIdenticalTo(rpcErr))
+			Expect(err).NotTo(MatchError(errors.ErrUnsupported))
+		})
+	})
+
+	Context("ShutdownConmonServer", func() {
+		It("should not kill a server which shut down", func() {
+			// Given
+			server := &fakeConmonServer{}
+
+			// When
+			err := oci.ShutdownConmonServer(context.Background(), server)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(server.killed).To(BeFalse())
+			Expect(server.closed).To(BeTrue())
+		})
+
+		It("should kill a server which did not exit in time", func() {
+			// Given
+			server := &fakeConmonServer{
+				shutdownErr: fmt.Errorf("stop: %w", conmonClient.ErrShutdownTimeout),
+			}
+
+			// When
+			err := oci.ShutdownConmonServer(context.Background(), server)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(server.killed).To(BeTrue())
+			Expect(server.killTimeLeft).To(BeNumerically(">", 0))
+			Expect(server.killTimeLeft).To(BeNumerically("<=", 3*time.Second))
+			Expect(server.closed).To(BeTrue())
+		})
+
+		It("should stop the server of a canceled request", func() {
+			// Given
+			server := &fakeConmonServer{shutdownErr: conmonClient.ErrShutdownTimeout}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			// When
+			err := oci.ShutdownConmonServer(ctx, server)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(server.shutdownCtxErr).ToNot(HaveOccurred())
+			Expect(server.killed).To(BeTrue())
+			Expect(server.killCtxErr).ToNot(HaveOccurred())
+		})
+
+		It("should fail if killing the server fails", func() {
+			// Given
+			killErr := errors.New("kill")
+			server := &fakeConmonServer{
+				shutdownErr: conmonClient.ErrShutdownTimeout,
+				killErr:     killErr,
+			}
+
+			// When
+			err := oci.ShutdownConmonServer(context.Background(), server)
+
+			// Then
+			Expect(err).To(MatchError(killErr))
+			Expect(server.killed).To(BeTrue())
+			Expect(server.closed).To(BeFalse())
+		})
+
+		It("should close the client of a server with an unknown PID", func() {
+			// Given
+			server := &fakeConmonServer{
+				shutdownErr: fmt.Errorf("stop: %w", conmonClient.ErrServerPIDUnknown),
+			}
+
+			// When
+			err := oci.ShutdownConmonServer(context.Background(), server)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(server.killed).To(BeFalse())
+			Expect(server.closed).To(BeTrue())
+		})
+
+		It("should not kill the server on other failures", func() {
+			// Given
+			shutdownErr := errors.New("shutdown")
+			server := &fakeConmonServer{shutdownErr: shutdownErr}
+
+			// When
+			err := oci.ShutdownConmonServer(context.Background(), server)
+
+			// Then
+			Expect(err).To(MatchError(shutdownErr))
+			Expect(server.killed).To(BeFalse())
+			Expect(server.closed).To(BeFalse())
+		})
+
+		It("should keep the client usable for a retry after a failure", func() {
+			// Given
+			server := &fakeConmonServer{
+				shutdownErr: conmonClient.ErrShutdownTimeout,
+				killErr:     errors.New("kill"),
+			}
+			Expect(oci.ShutdownConmonServer(context.Background(), server)).NotTo(Succeed())
+			server.killErr = nil
+
+			// When
+			err := oci.ShutdownConmonServer(context.Background(), server)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(server.killed).To(BeTrue())
+			Expect(server.closed).To(BeTrue())
+		})
+	})
+
+	Context("sandbox runtime implementation", func() {
+		var (
+			sut *oci.Runtime
+			// The arguments of the calls of the runtime, one per line.
+			runtimeCalls string
+		)
+
+		BeforeEach(func() {
+			dir := t.MustTempDir("runtime")
+			runtimeCalls = filepath.Join(dir, "calls")
+
+			// A runtime which reports every container as running.
+			runtimePath := filepath.Join(dir, "runtime")
+			Expect(os.WriteFile(runtimePath, fmt.Appendf(nil, `#!/bin/sh
+echo "$@" >> %s
+for arg; do
+	if [ "$arg" = state ]; then
+		echo '{"status": "running"}'
+	fi
+done
+`, runtimeCalls), 0o700)).To(Succeed())
+
+			cfg, err := libconfig.DefaultConfig()
+			Expect(err).ToNot(HaveOccurred())
+
+			cfg.DefaultRuntime = "pod"
+			cfg.Runtimes = libconfig.Runtimes{
+				"pod": &libconfig.RuntimeHandler{
+					RuntimePath: runtimePath,
+					RuntimeType: libconfig.RuntimeTypePod,
+				},
+			}
+			cfg.ContainerAttachSocketDir = t.MustTempDir("crio")
+
+			sut, err = oci.New(cfg)
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should create a container with the implementation of its pod", func() {
+			// Given
+			impl := &fakeRuntimeImpl{}
+			sut.SetRuntimeImpl("sandbox", impl)
+
+			c := newPodTestContainer(false, false, false)
+
+			// When
+			err := sut.CreateContainer(context.Background(), c, "", false)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(impl.created.Load()).To(BeEquivalentTo(1))
+			Expect(sut.HasRuntimeImpl(c.ID())).To(BeTrue())
+		})
+
+		It("should fail to create a container whose pod is gone", func() {
+			// Given
+			c := newPodTestContainer(false, false, false)
+
+			// When
+			err := sut.CreateContainer(context.Background(), c, "", false)
+
+			// Then
+			Expect(err).To(MatchError(ContainSubstring("of container id is gone")))
+			Expect(sut.HasRuntimeImpl(c.ID())).To(BeFalse())
+			Expect(runtimeCalls).ToNot(BeAnExistingFile())
+		})
+
+		It("should delete a container whose pod is gone", func() {
+			// Given
+			c := newPodTestContainer(false, false, false)
+
+			// When
+			err := sut.DeleteContainer(context.Background(), c)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(os.ReadFile(runtimeCalls)).To(ContainSubstring("delete --force id"))
+			Expect(sut.HasRuntimeImpl(c.ID())).To(BeFalse())
+		})
+
+		It("should update the status of a container whose pod is gone", func() {
+			// Given
+			c := newPodTestContainer(false, false, false)
+
+			// When
+			err := sut.UpdateContainerStatus(context.Background(), c)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(c.State().Status).To(BeEquivalentTo(oci.ContainerStateRunning))
+			Expect(sut.HasRuntimeImpl(c.ID())).To(BeFalse())
+		})
+
+		It("should fail the requests for the server of a pod which is gone", func() {
+			// Given
+			c := newPodTestContainer(false, false, false)
+
+			// When
+			_, execErr := sut.ExecSyncContainer(context.Background(), c, []string{"true"}, 0)
+			reopenErr := sut.ReopenContainerLog(context.Background(), c)
+
+			// Then
+			Expect(execErr).To(MatchError(ContainSubstring("of container id is gone")))
+			Expect(reopenErr).To(MatchError(ContainSubstring("of container id is gone")))
+			Expect(sut.HasRuntimeImpl(c.ID())).To(BeFalse())
+			Expect(runtimeCalls).ToNot(BeAnExistingFile())
+		})
+
+		It("should look up the sandbox implementation while others get written", func() {
+			// Given
+			impl := &fakeRuntimeImpl{}
+			sut.SetRuntimeImpl("sandbox", impl)
+
+			c := newPodTestContainer(false, false, false)
+
+			const n = 1000
+
+			var writes atomic.Int64
+
+			done := make(chan struct{})
+			stopped := make(chan struct{})
+			written := make(chan struct{})
+
+			// Stop the writer however the spec ends.
+			DeferCleanup(func() {
+				close(done)
+				<-stopped
+			})
+
+			// Keep writing the map during all of the lookups, always to the
+			// same few keys.
+			go func() {
+				defer close(stopped)
+
+				for i := 0; ; i++ {
+					select {
+					case <-done:
+						return
+					default:
+					}
+
+					sut.SetRuntimeImpl(fmt.Sprintf("other%d", i%4), impl)
+
+					if writes.Add(1) == 1 {
+						close(written)
+					}
+
+					runtime.Gosched()
+				}
+			}()
+
+			<-written
+
+			before := writes.Load()
+
+			// When
+			for range n {
+				Expect(sut.DeleteContainer(context.Background(), c)).To(Succeed())
+				// Take turns with the writer with a single CPU as well.
+				runtime.Gosched()
+			}
+
+			// Then
+			Expect(impl.deleted.Load()).To(BeEquivalentTo(n))
+			// The map got written during the lookups.
+			Expect(writes.Load()).To(BeNumerically(">", before))
+		})
+	})
+
+	// The value only depends on the container config, the tty of an attach
+	// request does not change it, so that all attaches of a container agree.
+	DescribeTable("StopAfterStdinEOF",
+		func(terminal, stdin, stdinOnce, expected bool) {
+			c := newPodTestContainer(terminal, stdin, stdinOnce)
+			Expect(oci.StopAfterStdinEOF(c)).To(Equal(expected))
+		},
+		Entry("stdin once without terminal", false, true, true, true),
+		Entry("stdin without stdin once", false, true, false, false),
+		Entry("stdin once with terminal", true, true, true, false),
+		Entry("stdin with terminal", true, true, false, false),
+		Entry("no stdin", false, false, true, false),
+	)
+})

@@ -3,22 +3,24 @@ package storage_test
 import (
 	"context"
 
-	istorage "github.com/containers/image/v5/storage"
-	"github.com/containers/image/v5/types"
-	cs "github.com/containers/storage"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	"go.podman.io/image/v5/types"
+	cs "go.podman.io/storage"
+	"go.uber.org/mock/gomock"
+
 	"github.com/cri-o/cri-o/internal/mockutils"
 	"github.com/cri-o/cri-o/internal/storage"
 	"github.com/cri-o/cri-o/internal/storage/references"
 	containerstoragemock "github.com/cri-o/cri-o/test/mocks/containerstorage"
 	criostoragemock "github.com/cri-o/cri-o/test/mocks/criostorage"
-	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Runtime", func() {
-	imageID, err := storage.ParseStorageImageIDFromOutOfProcessData("8a788232037eaf17794408ff3df6b922a1aedf9ef8de36afdae3ed0b0381907b")
+	imageID, err := storage.ParseStorageImageIDFromOutOfProcessData(
+		"8a788232037eaf17794408ff3df6b922a1aedf9ef8de36afdae3ed0b0381907b",
+	)
 	Expect(err).ToNot(HaveOccurred())
 
 	var (
@@ -31,7 +33,7 @@ var _ = t.Describe("Runtime", func() {
 	// The system under test
 	var sut storage.RuntimeServer
 
-	var ctx context.Context
+	ctx := context.TODO()
 
 	// Prepare the system under test and register a test name and key before
 	// each test
@@ -44,8 +46,6 @@ var _ = t.Describe("Runtime", func() {
 
 		sut = storage.GetRuntimeService(context.Background(), imageServerMock, storageTransportMock)
 		Expect(sut).NotTo(BeNil())
-
-		ctx = context.TODO()
 	})
 	AfterEach(func() {
 		mockCtrl.Finish()
@@ -55,7 +55,12 @@ var _ = t.Describe("Runtime", func() {
 	mockCreateContainerImageExists := func() mockutils.MockSequence {
 		return mockutils.InOrder(
 			imageServerMock.EXPECT().GetStore().Return(storeMock),
-			mockNewImage(storeMock, "", imageID.IDStringForOutOfProcessConsumptionOnly(), imageID.IDStringForOutOfProcessConsumptionOnly()),
+			mockNewImage(
+				storeMock,
+				"",
+				imageID.IDStringForOutOfProcessConsumptionOnly(),
+				imageID.IDStringForOutOfProcessConsumptionOnly(),
+			),
 			imageServerMock.EXPECT().GetStore().Return(storeMock),
 		)
 	}
@@ -68,12 +73,17 @@ var _ = t.Describe("Runtime", func() {
 				"docker.io/library/imagename:latest", "",
 				imageID.IDStringForOutOfProcessConsumptionOnly()),
 			imageServerMock.EXPECT().GetStore().Return(storeMock),
-			mockNewImage(storeMock, "", imageID.IDStringForOutOfProcessConsumptionOnly(), imageID.IDStringForOutOfProcessConsumptionOnly()),
+			mockNewImage(
+				storeMock,
+				"",
+				imageID.IDStringForOutOfProcessConsumptionOnly(),
+				imageID.IDStringForOutOfProcessConsumptionOnly(),
+			),
 			imageServerMock.EXPECT().GetStore().Return(storeMock),
 		)
 	}
 
-	// nolint: dupl
+	//nolint:dupl // intentionally similar test structure for different directories
 	t.Describe("GetRunDir", func() {
 		It("should succeed to retrieve the run dir", func() {
 			// Given
@@ -128,7 +138,7 @@ var _ = t.Describe("Runtime", func() {
 		})
 	})
 
-	// nolint: dupl
+	//nolint:dupl // intentionally similar test structure for different directories
 	t.Describe("GetWorkDir", func() {
 		It("should succeed to retrieve the work dir", func() {
 			// Given
@@ -407,6 +417,7 @@ var _ = t.Describe("Runtime", func() {
 		It("should fail to set the container on store error", func() {
 			// Given
 			metadata := &storage.RuntimeContainerMetadata{Pod: true}
+
 			gomock.InOrder(
 				imageServerMock.EXPECT().GetStore().Return(storeMock),
 				storeMock.EXPECT().SetMetadata(gomock.Any(), gomock.Any()).
@@ -528,7 +539,9 @@ var _ = t.Describe("Runtime", func() {
 
 			It("should succeed to create a pod sandbox", func() {
 				// Given
-				pauseImage, err2 := references.ParseRegistryImageReferenceFromOutOfProcessData("imagename:latest")
+				pauseImage, err2 := references.ParseRegistryImageReferenceFromOutOfProcessData(
+					"imagename:latest",
+				)
 				Expect(err2).ToNot(HaveOccurred())
 				mockutils.InOrder(
 					mockCreatePodSandboxImageExists(),
@@ -657,7 +670,9 @@ var _ = t.Describe("Runtime", func() {
 
 		It("should fail to create a pod sandbox on set names error", func() {
 			// Given
-			pauseImage, err := references.ParseRegistryImageReferenceFromOutOfProcessData("imagename:latest")
+			pauseImage, err := references.ParseRegistryImageReferenceFromOutOfProcessData(
+				"imagename:latest",
+			)
 			Expect(err).ToNot(HaveOccurred())
 			mockutils.InOrder(
 				mockCreatePodSandboxImageExists(),
@@ -684,7 +699,9 @@ var _ = t.Describe("Runtime", func() {
 
 		It("should fail to create a pod sandbox on main creation error", func() {
 			// Given
-			pauseImage, err := references.ParseRegistryImageReferenceFromOutOfProcessData("imagename:latest")
+			pauseImage, err := references.ParseRegistryImageReferenceFromOutOfProcessData(
+				"imagename:latest",
+			)
 			Expect(err).ToNot(HaveOccurred())
 			mockutils.InOrder(
 				mockCreatePodSandboxImageExists(),
@@ -729,7 +746,12 @@ var _ = t.Describe("Runtime", func() {
 			mockutils.InOrder(
 				imageServerMock.EXPECT().GetStore().Return(storeMock),
 				// storageReference.newImage:
-				mockResolveImage(storeMock, "", imageID.IDStringForOutOfProcessConsumptionOnly(), imageID.IDStringForOutOfProcessConsumptionOnly()),
+				mockResolveImage(
+					storeMock,
+					"",
+					imageID.IDStringForOutOfProcessConsumptionOnly(),
+					imageID.IDStringForOutOfProcessConsumptionOnly(),
+				),
 				storeMock.EXPECT().ImageBigData(gomock.Any(), gomock.Any()).
 					Return(testManifest, nil),
 				storeMock.EXPECT().ListImageBigData(gomock.Any()).
@@ -751,29 +773,44 @@ var _ = t.Describe("Runtime", func() {
 	})
 
 	t.Describe("pauseImage", func() {
-		pauseImage, err := references.ParseRegistryImageReferenceFromOutOfProcessData("pauseimagename:latest")
+		pauseImage, err := references.ParseRegistryImageReferenceFromOutOfProcessData(
+			"pauseimagename:latest",
+		)
 		Expect(err).ToNot(HaveOccurred())
 
 		var info storage.ContainerInfo
 
 		mockCreatePodSandboxExpectingCopyOptions := func(expectedCopyOptions *storage.ImageCopyOptions) {
-			pauseImageRef, err := references.ParseRegistryImageReferenceFromOutOfProcessData("docker.io/library/pauseimagename:latest")
-			Expect(err).ToNot(HaveOccurred())
-			pulledRef, err := istorage.Transport.NewStoreReference(storeMock, pauseImageRef.Raw(), "")
+			pauseImageCanonical, err := references.ParseRegistryImageReferenceFromOutOfProcessData(
+				"pauseimagename@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			)
 			Expect(err).ToNot(HaveOccurred())
 			mockutils.InOrder(
 				imageServerMock.EXPECT().GetStore().Return(storeMock),
 				mockResolveReference(storeMock, storageTransportMock,
 					"docker.io/library/pauseimagename:latest", "", ""),
-				imageServerMock.EXPECT().PullImage(gomock.Any(), pauseImageRef, expectedCopyOptions).Return(pulledRef, nil),
-				mockResolveReference(storeMock, storageTransportMock,
-					"docker.io/library/pauseimagename:latest", "", imageID.IDStringForOutOfProcessConsumptionOnly()),
+				imageServerMock.EXPECT().
+					PullImage(gomock.Any(), pauseImage, expectedCopyOptions).
+					Return(pauseImageCanonical, nil),
 				imageServerMock.EXPECT().GetStore().Return(storeMock),
-				mockNewImage(storeMock, "", imageID.IDStringForOutOfProcessConsumptionOnly(), imageID.IDStringForOutOfProcessConsumptionOnly()),
-
+				mockResolveReference(
+					storeMock,
+					storageTransportMock,
+					"pauseimagename@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					"",
+					imageID.IDStringForOutOfProcessConsumptionOnly(),
+				),
+				imageServerMock.EXPECT().GetStore().Return(storeMock),
+				mockNewImage(
+					storeMock,
+					"",
+					imageID.IDStringForOutOfProcessConsumptionOnly(),
+					imageID.IDStringForOutOfProcessConsumptionOnly(),
+				),
 				imageServerMock.EXPECT().GetStore().Return(storeMock),
 				storeMock.EXPECT().CreateContainer(gomock.Any(), gomock.Any(),
-					imageID.IDStringForOutOfProcessConsumptionOnly(), gomock.Any(), gomock.Any(), gomock.Any()).
+					imageID.IDStringForOutOfProcessConsumptionOnly(),
+					gomock.Any(), gomock.Any(), gomock.Any()).
 					Return(&cs.Container{ID: "id"}, nil),
 				imageServerMock.EXPECT().GetStore().Return(storeMock),
 				storeMock.EXPECT().AddNames(gomock.Any(), gomock.Any()).Return(nil),
@@ -788,7 +825,11 @@ var _ = t.Describe("Runtime", func() {
 
 		It("should pull pauseImage if not available locally, using default credentials", func() {
 			// The system under test
-			sut := storage.GetRuntimeService(context.Background(), imageServerMock, storageTransportMock)
+			sut := storage.GetRuntimeService(
+				context.Background(),
+				imageServerMock,
+				storageTransportMock,
+			)
 			Expect(sut).NotTo(BeNil())
 
 			// Given
@@ -805,24 +846,33 @@ var _ = t.Describe("Runtime", func() {
 			)
 		})
 
-		It("should pull pauseImage if not available locally, using provided credential file", func() {
-			// The system under test
-			sut := storage.GetRuntimeService(context.Background(), imageServerMock, storageTransportMock)
-			Expect(sut).NotTo(BeNil())
+		It(
+			"should pull pauseImage if not available locally, using provided credential file",
+			func() {
+				// The system under test
+				sut := storage.GetRuntimeService(
+					context.Background(),
+					imageServerMock,
+					storageTransportMock,
+				)
+				Expect(sut).NotTo(BeNil())
 
-			// Given
-			mockCreatePodSandboxExpectingCopyOptions(&storage.ImageCopyOptions{
-				SourceCtx:      &types.SystemContext{AuthFilePath: "/var/non-default/credentials.json"},
-				DestinationCtx: &types.SystemContext{},
-			})
+				// Given
+				mockCreatePodSandboxExpectingCopyOptions(&storage.ImageCopyOptions{
+					SourceCtx: &types.SystemContext{
+						AuthFilePath: "/var/non-default/credentials.json",
+					},
+					DestinationCtx: &types.SystemContext{},
+				})
 
-			// When
-			info, err = sut.CreatePodSandbox(&types.SystemContext{},
-				"podName", "podID", pauseImage, "/var/non-default/credentials.json",
-				"containerName", "metadataName",
-				"uid", "namespace", 0, nil, []string{"mountLabel"}, false,
-			)
-		})
+				// When
+				info, err = sut.CreatePodSandbox(&types.SystemContext{},
+					"podName", "podID", pauseImage, "/var/non-default/credentials.json",
+					"containerName", "metadataName",
+					"uid", "namespace", 0, nil, []string{"mountLabel"}, false,
+				)
+			},
+		)
 
 		AfterEach(func() {
 			// Then

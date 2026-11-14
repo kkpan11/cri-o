@@ -53,23 +53,29 @@ func (dec *decoder) align(n int) {
 }
 
 // Calls binary.Read(dec.in, dec.order, v) and panics on read errors.
-func (dec *decoder) binread(v interface{}) {
+func (dec *decoder) binread(v any) {
 	if err := binary.Read(dec.in, dec.order, v); err != nil {
 		panic(err)
 	}
 }
 
-func (dec *decoder) Decode(sig Signature) (vs []interface{}, err error) {
+func (dec *decoder) Decode(sig Signature) (vs []any, err error) {
 	defer func() {
-		var ok bool
 		v := recover()
-		if err, ok = v.(error); ok {
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				err = FormatError("unexpected EOF")
-			}
+		if v == nil {
+			return
 		}
+		e, ok := v.(error)
+		if !ok {
+			// Not ours; re-panic.
+			panic(v)
+		}
+		if e == io.EOF || e == io.ErrUnexpectedEOF {
+			e = FormatError("unexpected EOF")
+		}
+		err = e
 	}()
-	vs = make([]interface{}, 0)
+	vs = make([]any, 0)
 	s := sig.str
 	for s != "" {
 		err, rem := validSingle(s, &depthCounter{})
@@ -87,14 +93,58 @@ func (dec *decoder) Decode(sig Signature) (vs []interface{}, err error) {
 // to reduce memory allocs.
 // The buffer grows automatically.
 func (dec *decoder) read2buf(n int) {
-	if cap(dec.buf) < n {
-		dec.buf = make([]byte, n)
-	} else {
-		dec.buf = dec.buf[:n]
-	}
-	if _, err := io.ReadFull(dec.in, dec.buf); err != nil {
+	var err error
+	dec.buf, err = readFull(dec.in, dec.buf, n)
+	if err != nil {
 		panic(err)
 	}
+}
+
+// maxArrayLen is the maximum array length in bytes, as defined by the D-Bus spec.
+const maxArrayLen = 1 << 26
+
+// readChunk is the size of the chunks readFull reads large inputs in.
+const readChunk = 64 << 10
+
+// readFull is like io.ReadFull, but it reads exactly n bytes from r into
+// buf (reusing its capacity), and returns the resulting slice. If n is large
+// and buf has insufficient capacity, buf is grown gradually as data arrives,
+// so a bogus length coming from the input can't cause a huge allocation.
+func readFull(r io.Reader, buf []byte, n int) ([]byte, error) {
+	if n <= cap(buf) || n <= readChunk {
+		if n > cap(buf) {
+			buf = make([]byte, n)
+		}
+		buf = buf[:n]
+		_, err := io.ReadFull(r, buf)
+		return buf, err
+	}
+	buf = buf[:0]
+	for len(buf) < n {
+		// Read at most as much as we already have (but at least
+		// readChunk), so the buffer grows geometrically.
+		m := n - len(buf)
+		if m > len(buf) && m > readChunk {
+			m = len(buf)
+			if m < readChunk {
+				m = readChunk
+			}
+		}
+		if cap(buf)-len(buf) < m {
+			nb := make([]byte, len(buf), len(buf)+m)
+			copy(nb, buf)
+			buf = nb
+		}
+		k, err := io.ReadFull(r, buf[len(buf):len(buf)+m])
+		buf = buf[:len(buf)+k]
+		if err != nil {
+			if err == io.EOF && len(buf) > 0 {
+				err = io.ErrUnexpectedEOF
+			}
+			return buf, err
+		}
+	}
+	return buf, nil
 }
 
 // decodeU decodes uint32 obtained from the reader dec.in.
@@ -106,7 +156,7 @@ func (dec *decoder) decodeU() uint32 {
 	return dec.order.Uint32(dec.buf)
 }
 
-func (dec *decoder) decode(s string, depth int) interface{} {
+func (dec *decoder) decode(s string, depth int) any {
 	dec.align(alignment(typeFor(s)))
 	switch s[0] {
 	case 'y':
@@ -204,6 +254,9 @@ func (dec *decoder) decode(s string, depth int) interface{} {
 				panic(FormatError("input exceeds container depth limit"))
 			}
 			length := dec.decodeU()
+			if length > maxArrayLen {
+				panic(FormatError("input exceeds array size limitation"))
+			}
 			// Even for empty maps, the correct padding must be included
 			dec.align(8)
 			spos := dec.pos
@@ -223,10 +276,19 @@ func (dec *decoder) decode(s string, depth int) interface{} {
 		}
 		sig := s[1:]
 		length := dec.decodeU()
+		if length > maxArrayLen {
+			panic(FormatError("input exceeds array size limitation"))
+		}
 		// capacity can be determined only for fixed-size element types
 		var capacity int
 		if s := sigByteSize(sig); s != 0 {
-			capacity = int(length) / s
+			// Do not trust the length too much, as the input
+			// might be shorter; append will grow the slice.
+			capacity = int(length)
+			if capacity > readChunk {
+				capacity = readChunk
+			}
+			capacity /= s
 		}
 		v := reflect.MakeSlice(reflect.SliceOf(typeFor(sig)), 0, capacity)
 		// Even for empty arrays, the correct padding must be included
@@ -249,7 +311,7 @@ func (dec *decoder) decode(s string, depth int) interface{} {
 			panic(FormatError("input exceeds container depth limit"))
 		}
 		dec.align(8)
-		v := make([]interface{}, 0)
+		v := make([]any, 0)
 		s = s[1 : len(s)-1]
 		for s != "" {
 			err, rem := validSingle(s, &depthCounter{})
@@ -291,9 +353,10 @@ func sigByteSize(sig string) int {
 			i := 1
 			depth := 1
 			for i < len(sig[offset:]) && depth != 0 {
-				if sig[offset+i] == '(' {
+				switch sig[offset+i] {
+				case '(':
 					depth++
-				} else if sig[offset+i] == ')' {
+				case ')':
 					depth--
 				}
 				i++
@@ -370,12 +433,6 @@ func (c *stringConverter) String(b []byte) string {
 }
 
 // toString converts a byte slice to a string without allocating.
-// Starting from Go 1.20 you should use unsafe.String.
 func toString(b []byte) string {
-	var s string
-	h := (*reflect.StringHeader)(unsafe.Pointer(&s))
-	h.Data = uintptr(unsafe.Pointer(&b[0]))
-	h.Len = len(b)
-
-	return s
+	return unsafe.String(&b[0], len(b))
 }

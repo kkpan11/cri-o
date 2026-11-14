@@ -59,3 +59,14 @@ function teardown() {
 @test "should fail to retrieve the container with invalid socket" {
 	run -1 "${CRIO_BINARY_PATH}" status --socket wrong.sock s
 }
+
+@test "status should succeed to retrieve the goroutines" {
+	run -0 "${CRIO_BINARY_PATH}" status --socket="${CRIO_SOCKET}" goroutines
+	[[ "$output" == *"goroutine"* ]]
+}
+
+@test "status should succeed to retrieve a heap dump" {
+	run -0 "${CRIO_BINARY_PATH}" status --socket="${CRIO_SOCKET}" heap -f "$TESTDIR/heap.out"
+	[[ "$output" == *"Wrote heap dump to: $TESTDIR/heap.out"* ]]
+	[ -f "$TESTDIR/heap.out" ]
+}
