@@ -11,6 +11,19 @@ function teardown() {
 	cleanup_test
 }
 
+function setup_runtime_with_min_memory() {
+	local mem="$1"
+	cat << EOF > "$CRIO_CONFIG_DIR/99-mem.conf"
+[crio.runtime]
+default_runtime = "mem"
+[crio.runtime.runtimes.mem]
+runtime_path = "$RUNTIME_BINARY_PATH"
+container_min_memory = "$mem"
+EOF
+	unset CONTAINER_DEFAULT_RUNTIME
+	unset CONTAINER_RUNTIMES
+}
+
 # PR#59
 @test "pod release name on remove" {
 	start_crio
@@ -27,6 +40,16 @@ function teardown() {
 	crictl start "$ctr_id"
 	crictl stopp "$pod_id"
 	crictl rmp "$pod_id"
+}
+
+@test "pod remove with timeout from context" {
+	start_crio
+	pod_id=$(crictl runp "$TESTDATA"/sandbox_config.json)
+	# the sleep command in the container needs to be killed within the deadline
+	# of the context passed down from crictl
+	ctr_id=$(crictl create "$pod_id" "$TESTDATA"/container_sleep.json "$TESTDATA"/sandbox_config.json)
+	crictl start "$ctr_id"
+	CRICTL_TIMEOUT=5s crictl rmp -f "$pod_id"
 }
 
 @test "pod stop ignores not found sandboxes" {
@@ -155,6 +178,59 @@ function teardown() {
 
 	output=$(crictl exec --sync "$ctr_id" sysctl net.ipv4.ip_forward)
 	[[ "$output" == *"net.ipv4.ip_forward = 1"* ]]
+}
+
+@test "pass pod sysctls to runtime when in userns" {
+	if test -n "$CONTAINER_UID_MAPPINGS"; then
+		skip "userNS enabled"
+	fi
+	CONTAINER_DEFAULT_SYSCTLS="net.ipv4.ip_forward=1" start_crio
+
+	# TODO: kernel* ones fail with permission denied.
+	jq '	  .linux.sysctls = {
+			"net.ipv4.ip_local_port_range": "1024 65000",
+		} |
+		.linux.security_context.namespace_options.userns_options = {
+			"mode": 0,
+			"uids": [{
+				"host_id": 100000,
+				"container_id": 0,
+				"length": 65355
+			}],
+			"gids": [{
+				"host_id": 100000,
+				"container_id": 0,
+				"length": 65355
+			}]
+		}' "$TESTDATA"/sandbox_config.json > "$TESTDIR"/sandbox.json
+
+	pod_id=$(crictl runp "$TESTDIR"/sandbox.json)
+	ctr_id=$(crictl create "$pod_id" "$TESTDATA"/container_redis.json "$TESTDIR"/sandbox.json)
+	crictl start "$ctr_id"
+
+	output=$(crictl exec --sync "$ctr_id" sysctl net.ipv4.ip_local_port_range)
+	[[ "$output" == *"net.ipv4.ip_local_port_range = 1024	65000"* ]]
+
+	output=$(crictl exec --sync "$ctr_id" sysctl net.ipv4.ip_forward)
+	[[ "$output" == *"net.ipv4.ip_forward = 1"* ]]
+}
+
+@test "disable crypto.fips_enabled when FIPS_DISABLE is set" {
+	# Check if /proc/sys/crypto exists and skip the test if it does not.
+	if [ ! -d "/proc/sys/crypto" ]; then
+		skip "The directory /proc/sys/crypto does not exist on this host."
+	fi
+	setup_crio
+	create_runtime_with_allowed_annotation logs disable-fips.crio.io
+	start_crio_no_setup
+
+	jq '   .labels["FIPS_DISABLE"] = "true"' \
+		"$TESTDATA"/sandbox_config.json > "$TESTDIR"/sboxconfig.json
+
+	ctr_id=$(crictl run "$TESTDATA"/container_sleep.json "$TESTDIR"/sboxconfig.json)
+
+	output=$(crictl exec --sync "$ctr_id" cat /proc/sys/crypto/fips_enabled)
+	[[ "$output" == "0" ]]
 }
 
 @test "fail to pass pod sysctls to runtime if invalid spaces" {
@@ -336,4 +412,150 @@ function teardown() {
 	ctr_id=$(crictl create "$pod_id" "$etc_perm_config" "$TESTDATA"/sandbox_config.json)
 	output=$(crictl exec --sync "$ctr_id" ls -ld /etc)
 	[[ "$output" == *"test test"* ]]
+}
+
+@test "verify RunAsGroup in container" {
+	start_crio
+
+	jq '
+    .linux.security_context.run_as_user = { value: 1000 }
+    | .linux.security_context.run_as_group = { value: 1001 }
+  ' "$TESTDATA"/sandbox_config.json > "$TESTDIR/modified_sandbox_config.json"
+
+	jq '
+    .linux.security_context.run_as_user = { value: 1000 }
+    | .linux.security_context.run_as_group = { value: 1002 }
+  ' "$TESTDATA"/container_sleep.json > "$TESTDIR/modified_container_sleep_config"
+
+	# Create a new pod using the modified sandbox configuration
+	pod_id=$(crictl runp "$TESTDIR/modified_sandbox_config.json")
+
+	# Create a new container within the pod using the modified container configuration
+	ctr_id=$(crictl create "$pod_id" "$TESTDIR/modified_container_sleep_config" "$TESTDIR/modified_sandbox_config.json")
+	crictl start "$ctr_id"
+
+	# Verify that the gid is present in the /etc/group file
+	exec_output=$(crictl exec "$ctr_id" cat /etc/group)
+	echo "$exec_output" | grep "x:1002" || fail "RunAsGroup ID 1002 not found in /etc/group"
+
+	# Clean up the pod and container
+	crictl stop "$ctr_id"
+	crictl stopp "$pod_id"
+}
+
+@test "run container with memory_limit_in_bytes -1" {
+	setup_crio
+	setup_runtime_with_min_memory ""
+	start_crio_no_setup
+
+	jq --arg image "$IMAGE" '.metadata.name = "memory"
+		| .command = ["/bin/sh", "-c", "sleep 600"]
+		| .linux.resources.memory_limit_in_bytes = -1' \
+		"$TESTDATA"/container_config.json > "$TESTDIR"/memory.json
+
+	run ! crictl run "$TESTDIR"/memory.json "$TESTDATA"/sandbox_config.json
+}
+
+@test "run container with memory_limit_in_bytes 12.5MiB" {
+	setup_crio
+	setup_runtime_with_min_memory "7.5MiB"
+	start_crio_no_setup
+
+	jq --arg image "$IMAGE" '.metadata.name = "memory"
+		| .command = ["/bin/sh", "-c", "sleep 600"]
+		| .linux.resources.memory_limit_in_bytes = 12582912' \
+		"$TESTDATA"/container_config.json > "$TESTDIR"/memory.json
+
+	crictl run "$TESTDIR"/memory.json "$TESTDATA"/sandbox_config.json
+}
+
+@test "run container with container_min_memory 17.5MiB" {
+	setup_crio
+	setup_runtime_with_min_memory "17.5MiB"
+	start_crio_no_setup
+
+	jq --arg image "$IMAGE" '.metadata.name = "memory"
+		| .command = ["/bin/sh", "-c", "sleep 600"]
+		| .linux.resources.memory_limit_in_bytes = 12582912' \
+		"$TESTDATA"/container_config.json > "$TESTDIR"/memory.json
+
+	run ! crictl run "$TESTDIR"/memory.json "$TESTDATA"/sandbox_config.json
+}
+
+@test "run container with container_min_memory 5.5MiB" {
+	setup_crio
+	setup_runtime_with_min_memory "5.5MiB"
+	start_crio_no_setup
+
+	jq --arg image "$IMAGE" '.metadata.name = "memory"
+		| .command = ["/bin/sh", "-c", "sleep 600"]' \
+		"$TESTDATA"/container_config.json > "$TESTDIR"/memory.json
+
+	crictl run "$TESTDIR"/memory.json "$TESTDATA"/sandbox_config.json
+}
+
+@test "run container with empty container_min_memory" {
+	setup_crio
+	setup_runtime_with_min_memory ""
+	start_crio_no_setup
+
+	jq --arg image "$IMAGE" '.metadata.name = "memory"
+		| .command = ["/bin/sh", "-c", "sleep 600"]' \
+		"$TESTDATA"/container_config.json > "$TESTDIR"/memory.json
+
+	wait_for_log 'Runtime handler \\"mem\\" container minimum memory set to 12582912 bytes'
+	crictl run "$TESTDIR"/memory.json "$TESTDATA"/sandbox_config.json
+}
+
+@test "run container with default crun memory_limit_in_bytes" {
+	if [[ "$CONTAINER_DEFAULT_RUNTIME" != "crun" ]]; then
+		skip "must use crun"
+	fi
+	setup_crio
+
+	# make sure the crun entry is defaulted so we can verify the one crio makes has the correct limit
+	sed -i '/\[crio.runtime.runtimes.crun\]/,/monitor_exec_cgroup = \"\"/d' "$CRIO_CUSTOM_CONFIG"
+	cat << EOF > "$CRIO_CONFIG_DIR/99-mem.conf"
+[crio.runtime]
+default_runtime = ""
+EOF
+	unset CONTAINER_RUNTIMES
+	unset CONTAINER_DEFAULT_RUNTIME
+
+	start_crio_no_setup
+
+	jq --arg image "$IMAGE" '.metadata.name = "memory"
+		| .command = ["/bin/sh", "-c", "sleep 600"]
+		| .linux.resources.memory_limit_in_bytes = 512000' \
+		"$TESTDATA"/container_config.json > "$TESTDIR"/memory.json
+
+	wait_for_log 'Runtime handler \\"crun\\" container minimum memory set to 512000 bytes'
+
+	crictl run "$TESTDIR"/memory.json "$TESTDATA"/sandbox_config.json
+}
+
+@test "run container with default annotations" {
+	setup_crio
+
+	cat << EOF > "$CRIO_CONFIG_DIR/99-ann.conf"
+[crio.runtime]
+default_runtime = "ann"
+[crio.runtime.runtimes.ann]
+runtime_path = "$RUNTIME_BINARY_PATH"
+default_annotations = { "hello" = "1234", "pod" = "5678" }
+EOF
+	unset CONTAINER_DEFAULT_RUNTIME
+	unset CONTAINER_RUNTIMES
+
+	start_crio_no_setup
+
+	ctr_id=$(crictl run "$TESTDATA"/container_sleep.json "$TESTDATA"/sandbox_config.json)
+	annotations=$(crictl inspect "$ctr_id" | jq .info.runtimeSpec.annotations)
+	grep hello <<< "$annotations"
+	# pod spec should override default annotations
+	grep -v "5678" <<< "$annotations"
+
+	# verify the internal crio configuration is unchanged
+	CONFIG=$(crio status -s "$CRIO_SOCKET" config)
+	jq '.annotations | keys[]' < "$TESTDATA"/sandbox_config.json | while read -r key; do ! echo "$CONFIG" | grep "$key"; done
 }

@@ -1,31 +1,29 @@
-//go:build !(linux && cgo)
-// +build !linux !cgo
+//go:build !(seccomp && linux && cgo)
 
 package seccomp
 
 import (
 	"context"
+	"errors"
 
-	"github.com/containers/common/pkg/seccomp"
-	imagetypes "github.com/containers/image/v5/types"
 	"github.com/opencontainers/runtime-tools/generate"
+	"go.podman.io/common/pkg/seccomp"
+	imagetypes "go.podman.io/image/v5/types"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
-// Config is the global seccomp configuration type
+// Config is the global seccomp configuration type.
 type Config struct {
 	enabled bool
 }
 
 // Notifier wraps a seccomp notifier instance for a container.
-type Notifier struct {
-}
+type Notifier struct{}
 
 // Notification is a seccomp notification which gets sent to the CRI-O server.
-type Notification struct {
-}
+type Notification struct{}
 
-// New creates a new default seccomp configuration instance
+// New creates a new default seccomp configuration instance.
 func New() *Config {
 	return &Config{
 		enabled: false,
@@ -41,7 +39,13 @@ func (c *Config) Setup(
 	sandboxAnnotations, imageAnnotations map[string]string,
 	specGenerator *generate.Generator,
 	profileField *types.SecurityProfile,
+	graphRoot string,
+	ociProfiles OCIProfiles,
 ) (*Notifier, string, error) {
+	if profileField.GetProfileType() == types.SecurityProfile_OCI {
+		return nil, "", errors.New("seccomp is not supported, cannot run with OCI profile")
+	}
+
 	return nil, "", nil
 }
 
@@ -62,6 +66,41 @@ func (c *Config) LoadProfile(profilePath string) error {
 
 // LoadDefaultProfile sets the internal default profile.
 func (c *Config) LoadDefaultProfile() error {
+	return nil
+}
+
+// LoadBaselineProfile loads the baseline profile for OCI artifact profiles.
+func (c *Config) LoadBaselineProfile(profilePath string, withProfile bool) error {
+	return nil
+}
+
+// WithBaselineProfile returns a configuration with the loaded profile of this
+// one and the baseline of the provided path.
+func (c *Config) WithBaselineProfile(profilePath string, withProfile bool) (*Config, error) {
+	return c, nil
+}
+
+// Replace replaces the profiles with the ones of another configuration.
+func (c *Config) Replace(other *Config) {
+}
+
+// Equal returns true if both configurations are the same.
+func (c *Config) Equal(other *Config) bool {
+	if c == nil || other == nil {
+		return c == other
+	}
+
+	return *c == *other
+}
+
+// OCIProfilesSupported returns true if OCI artifact profiles can be merged
+// with the baseline.
+func (c *Config) OCIProfilesSupported() bool {
+	return false
+}
+
+// BaselineProfile returns the profile OCI artifact profiles are intersected with.
+func (c *Config) BaselineProfile() *seccomp.Seccomp {
 	return nil
 }
 
@@ -110,10 +149,11 @@ func (c *Config) IsDisabled() bool {
 	return true
 }
 
-// Profile returns the currently loaded seccomp profile
+// Profile returns the currently loaded seccomp profile.
 func (c *Config) Profile() *seccomp.Seccomp {
 	return nil
 }
+
 func DefaultProfile() *seccomp.Seccomp {
 	return nil
 }

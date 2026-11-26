@@ -1,21 +1,29 @@
 package client
 
-import "github.com/containers/conmon-rs/internal/proto"
+import (
+	"strconv"
 
-// LogLevel is the enum for all available server log levels.
+	"github.com/containers/conmon-rs/internal/proto"
+)
+
+// LogLevel is the enum for all available server log levels. Each level
+// includes the messages of the levels after it, trace logs everything.
 type LogLevel string
 
 const (
-	// LogLevelTrace is the log level printing only "trace" messages.
+	// LogLevelTrace is the log level printing all messages, including the
+	// "trace" ones.
 	LogLevelTrace LogLevel = "trace"
 
-	// LogLevelDebug is the log level printing only "debug" messages.
+	// LogLevelDebug is the log level printing "debug", "info", "warn" and
+	// "error" messages.
 	LogLevelDebug LogLevel = "debug"
 
-	// LogLevelInfo is the log level printing only "info" messages.
+	// LogLevelInfo is the log level printing "info", "warn" and "error"
+	// messages.
 	LogLevelInfo LogLevel = "info"
 
-	// LogLevelWarn is the log level printing only "warn" messages.
+	// LogLevelWarn is the log level printing "warn" and "error" messages.
 	LogLevelWarn LogLevel = "warn"
 
 	// LogLevelError is the log level printing only "error" messages.
@@ -29,6 +37,10 @@ const (
 type LogDriver string
 
 const (
+	// LogDriverNone disables logging. Since v1.2.2, the message of a
+	// panic still goes to the journal.
+	LogDriverNone LogDriver = "none"
+
 	// LogDriverStdout is the log driver printing to stdio.
 	LogDriverStdout LogDriver = "stdout"
 
@@ -36,41 +48,29 @@ const (
 	LogDriverSystemd LogDriver = "systemd"
 )
 
-// CgroupManager is the enum for all available cgroup managers.
-type CgroupManager proto.Conmon_CgroupManager
+// CgroupManager is the enum for all available cgroup managers. The zero value
+// is CgroupManagerSystemd.
+type CgroupManager uint16
 
 const (
 	// CgroupManagerSystemd specifies to use systemd to create and manage
-	// cgroups.
+	// cgroups. It is the zero value, which an unset field selects.
 	CgroupManagerSystemd CgroupManager = CgroupManager(proto.Conmon_CgroupManager_systemd)
 
 	// CgroupManagerCgroupfs specifies to use the cgroup filesystem to create
 	// and manage cgroups.
 	CgroupManagerCgroupfs CgroupManager = CgroupManager(proto.Conmon_CgroupManager_cgroupfs)
-
-	// CgroupManagerPerCommand opts-in to the new CgroupManager option specified at the command level.
-	//
-	// Set `ConmonServerConfig.CgroupManager` to `CgroupManagerPerCommand` to use
-	// the CgroupManager specified in the command config (e.g. CreateContainerConfig).
-	CgroupManagerPerCommand CgroupManager = CgroupManager(0xffff)
 )
 
-// Namespace is the enum for all available namespaces.
-type Namespace int
-
-const (
-	// NamespaceIPC is the reference to the IPC namespace.
-	NamespaceIPC Namespace = iota
-
-	// NamespacePID is the reference to the PID namespace.
-	NamespacePID
-
-	// NamespaceNet is the reference to the network namespace.
-	NamespaceNet
-
-	// NamespaceUser is the reference to the user namespace.
-	NamespaceUser
-
-	// NamespaceUTS is the reference to the UTS namespace.
-	NamespaceUTS
-)
+// String returns the name of the cgroup manager, "systemd" or "cgroupfs", and
+// CgroupManager(<number>) for an unknown value.
+func (m CgroupManager) String() string {
+	switch m {
+	case CgroupManagerSystemd:
+		return "systemd"
+	case CgroupManagerCgroupfs:
+		return "cgroupfs"
+	default:
+		return "CgroupManager(" + strconv.FormatUint(uint64(m), 10) + ")"
+	}
+}

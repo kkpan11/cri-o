@@ -3,19 +3,20 @@ package registrar_test
 import (
 	"testing"
 
-	"github.com/cri-o/cri-o/internal/registrar"
-	. "github.com/cri-o/cri-o/test/framework"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/cri-o/cri-o/internal/registrar"
+	. "github.com/cri-o/cri-o/test/framework"
 )
 
-// TestRegistrar runs the created specs
+// TestRegistrar runs the created specs.
 func TestRegistrar(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Registrar")
 }
 
-// nolint: gochecknoglobals
+//nolint:gochecknoglobals // test framework requires global state
 var t *TestFramework
 
 var _ = BeforeSuite(func() {
@@ -27,7 +28,7 @@ var _ = AfterSuite(func() {
 	t.Teardown()
 })
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Registrar", func() {
 	// Constant test data needed by some tests
 	const (
@@ -148,6 +149,7 @@ var _ = t.Describe("Registrar", func() {
 		It("should succeed to retrieve all names for a registrar", func() {
 			// Given
 			anotherKey := "anotherKey"
+
 			testNames := []string{"test1", "test2"}
 			for _, name := range testNames {
 				Expect(sut.Reserve(name, anotherKey)).To(Succeed())

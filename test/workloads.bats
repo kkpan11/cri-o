@@ -15,6 +15,18 @@ function teardown() {
 	cleanup_test
 }
 
+# TODO: remove skip once CRI-O sets CPUWeight instead of CPUShares on cgroup v2
+function skip_if_systemd_ignores_cpushares() {
+	if [[ "$CONTAINER_CGROUP_MANAGER" != "systemd" ]]; then
+		return
+	fi
+	local ver
+	ver=$(systemctl --version | head -1 | awk '{print $2}')
+	if [ "$ver" -ge 258 ]; then
+		skip "systemd >= 258 ignores CPUShares on cgroup v2 (needs CRI-O fix to use CPUWeight)"
+	fi
+}
+
 function create_workload() {
 	local cpushares="$1"
 	local cpuset="$2"
@@ -26,6 +38,28 @@ annotation_prefix = "$prefix"
 cpushares =  $cpushares
 cpuset = "$cpuset"
 EOF
+}
+
+function create_workload_with_cpulimit() {
+	local cpulimit="$1"
+	cat << EOF > "$CRIO_CONFIG_DIR/01-workload.conf"
+[crio.runtime.workloads.management]
+activation_annotation = "$activation"
+annotation_prefix = "$prefix"
+[crio.runtime.workloads.management.resources]
+cpulimit = $cpulimit
+EOF
+}
+
+function check_cpu_quota() {
+	local ctr_id="$1"
+	local cpuquota="$2"
+	local cpuperiod="$3"
+
+	config=$(runtime state "$ctr_id" | jq -r .bundle)/config.json
+
+	[[ $(jq .linux.resources.cpu.quota < "$config") == "$cpuquota" ]]
+	[[ $(jq .linux.resources.cpu.period < "$config") == "$cpuperiod" ]]
 }
 
 function check_cpu_fields() {
@@ -100,6 +134,41 @@ function check_conmon_fields() {
 	check_cpu_fields "$ctr_id" "$shares" "$set"
 }
 
+@test "test workload gets the default cpulimit as a quota of the container period" {
+	create_workload_with_cpulimit "35"
+
+	start_crio
+
+	jq --arg act "$activation" ' .annotations[$act] = "true"' \
+		"$TESTDATA"/sandbox_config.json > "$sboxconfig"
+
+	# The kubelet can set another period than the default 100ms.
+	# 35 millicores of a period of 50ms are a quota of 1750us.
+	jq --arg act "$activation" ' .annotations[$act] = "true"
+		|   .linux.resources.cpu_period = 50000' \
+		"$TESTDATA"/container_sleep.json > "$ctrconfig"
+
+	ctr_id=$(crictl run "$ctrconfig" "$sboxconfig")
+
+	check_cpu_quota "$ctr_id" "1750" "50000"
+
+	# conmon is not yet moved to its own cgroup by conmonrs.
+	if [[ $RUNTIME_TYPE == pod ]]; then
+		return
+	fi
+
+	# conmon gets no period from the CRI, so its 35 millicores are a quota of
+	# 3500us of the default 100ms period.
+	if [[ "$CONTAINER_CGROUP_MANAGER" == "systemd" ]]; then
+		[[ "$(systemctl show -p CPUQuotaPerSecUSec crio-conmon-"$ctr_id".scope)" == "CPUQuotaPerSecUSec=35ms" ]]
+	elif is_cgroup_v2; then
+		[[ "$(cat /sys/fs/cgroup/pod_123-456/crio-conmon-"$ctr_id"/cpu.max)" == "3500 100000" ]]
+	else
+		[[ "$(cat /sys/fs/cgroup/cpu/pod_123-456/crio-conmon-"$ctr_id"/cpu.cfs_quota_us)" == "3500" ]]
+		[[ "$(cat /sys/fs/cgroup/cpu/pod_123-456/crio-conmon-"$ctr_id"/cpu.cfs_period_us)" == "100000" ]]
+	fi
+}
+
 @test "test workload can override defaults" {
 	shares="200"
 	set="0-1"
@@ -172,6 +241,7 @@ function check_conmon_fields() {
 	if [[ $RUNTIME_TYPE == pod ]]; then
 		skip "not yet supported by conmonrs"
 	fi
+	skip_if_systemd_ignores_cpushares
 
 	shares="200"
 	set="0-1"
@@ -194,6 +264,7 @@ function check_conmon_fields() {
 	if [[ $RUNTIME_TYPE == pod ]]; then
 		skip "not yet supported by conmonrs"
 	fi
+	skip_if_systemd_ignores_cpushares
 
 	shares="200"
 	set="0-1"
@@ -220,6 +291,7 @@ function check_conmon_fields() {
 	if [[ $RUNTIME_TYPE == pod ]]; then
 		skip "not yet supported by conmonrs"
 	fi
+	skip_if_systemd_ignores_cpushares
 
 	shares="200"
 	set=""
@@ -243,6 +315,7 @@ function check_conmon_fields() {
 }
 
 @test "test workload pod should not be set if annotation not specified" {
+	skip_if_systemd_ignores_cpushares
 	shares=""
 	set=""
 	name=POD
@@ -267,6 +340,7 @@ function check_conmon_fields() {
 	if [[ $RUNTIME_TYPE == pod ]]; then
 		skip "not yet supported by conmonrs"
 	fi
+	skip_if_systemd_ignores_cpushares
 
 	shares="200"
 	set="0-1"
@@ -290,11 +364,11 @@ function check_conmon_fields() {
 }
 
 @test "test workload allowed annotation should not work if not configured" {
-	create_workload_with_allowed_annotation "io.kubernetes.cri-o.ShmSize" "$activation"
+	create_workload_with_allowed_annotation "shm-size.crio.io" "$activation"
 
 	start_crio
 
-	jq '.annotations."io.kubernetes.cri-o.ShmSize" = "16Mi"' \
+	jq '.annotations."shm-size.crio.io" = "16Mi"' \
 		"$TESTDATA"/sandbox_config.json > "$sboxconfig"
 
 	ctr_id=$(crictl run "$TESTDATA"/container_sleep.json "$sboxconfig")
@@ -307,14 +381,14 @@ function check_conmon_fields() {
 	if test -n "$CONTAINER_UID_MAPPINGS"; then
 		skip "userNS enabled"
 	fi
-	create_workload_with_allowed_annotation "io.kubernetes.cri-o.Devices"
-	create_runtime_with_allowed_annotation "shmsize" "io.kubernetes.cri-o.ShmSize"
-
-	CONTAINER_ALLOWED_DEVICES="/dev/null" start_crio
+	setup_crio
+	create_workload_with_allowed_annotation "devices.crio.io"
+	create_runtime_with_allowed_annotation "shmsize" "shm-size.crio.io"
+	CONTAINER_ALLOWED_DEVICES="/dev/null" start_crio_no_setup
 
 	jq --arg act "$activation" \
-		'   .annotations."io.kubernetes.cri-o.ShmSize" = "16Mi"
-	    |   .annotations."io.kubernetes.cri-o.Devices" = "/dev/null:/dev/peterfoo:rwm"' \
+		'   .annotations."shm-size.crio.io" = "16Mi"
+	    |   .annotations."devices.crio.io" = "/dev/null:/dev/peterfoo:rwm"' \
 		"$TESTDATA"/sandbox_config.json > "$sboxconfig"
 
 	ctr_id=$(crictl run "$TESTDATA"/container_sleep.json "$sboxconfig")
@@ -327,13 +401,13 @@ function check_conmon_fields() {
 }
 
 @test "test workload allowed annotation works for pod" {
-	create_workload_with_allowed_annotation "io.kubernetes.cri-o.ShmSize"
+	create_workload_with_allowed_annotation "shm-size.crio.io"
 
 	name=POD
 	start_crio
 
 	jq --arg act "$activation" \
-		' .annotations."io.kubernetes.cri-o.ShmSize" = "16Mi"' \
+		' .annotations."shm-size.crio.io" = "16Mi"' \
 		"$TESTDATA"/sandbox_config.json > "$sboxconfig"
 
 	ctr_id=$(crictl run "$TESTDATA"/container_sleep.json "$sboxconfig")
@@ -380,14 +454,54 @@ function check_conmon_fields() {
 @test "test workload pod should not be set if annotation not specified even if prefix" {
 	start_crio
 
-	jq '   .annotations["io.kubernetes.cri-o.UnifiedCgroup.podsandbox-sleep"] = "memory.max=4294967296" |
+	jq '   .annotations["unified-cgroup.crio.io/podsandbox-sleep"] = "memory.max=4294967296" |
 	  .labels["io.kubernetes.container.name"] = "podsandbox-sleep"' \
 		"$TESTDATA"/sandbox_config.json > "$sboxconfig"
 
-	jq '   .annotations["io.kubernetes.cri-o.UnifiedCgroup.podsandbox-sleep"] = "memory.max=4294967296" |
+	jq '   .annotations["unified-cgroup.crio.io/podsandbox-sleep"] = "memory.max=4294967296" |
 	  .labels["io.kubernetes.container.name"] = "podsandbox-sleep"' \
 		"$TESTDATA"/container_sleep.json > "$ctrconfig"
 
 	ctr_id=$(crictl run "$ctrconfig" "$sboxconfig")
 	[[ $(crictl exec "$ctr_id" cat /sys/fs/cgroup/memory.max) != 4294967296 ]]
+}
+
+@test "test special runtime annotations not allowed" {
+	if [[ "$TEST_USERNS" == "1" ]]; then
+		skip "test fails in a user namespace"
+	fi
+	if [[ "$CONTAINER_CGROUP_MANAGER" == "cgroupfs" ]]; then
+		skip "need systemd cgroup manager"
+	fi
+	start_crio
+
+	jq --arg val "'inactive-or-failed'" '   .annotations["org.systemd.property.CollectMode"] = $val' \
+		"$TESTDATA"/sandbox_config.json > "$sboxconfig"
+
+	jq --arg val "'inactive-or-failed'" '   .annotations["org.systemd.property.CollectMode"] = $val' \
+		"$TESTDATA"/container_sleep.json > "$ctrconfig"
+
+	ctr_id=$(crictl run "$ctrconfig" "$sboxconfig")
+	[[ $(systemctl show --property CollectMode crio-"$ctr_id".scope) != "CollectMode=inactive-or-failed" ]]
+}
+
+@test "test special runtime annotations allowed" {
+	if [[ "$TEST_USERNS" == "1" ]]; then
+		skip "test fails in a user namespace"
+	fi
+	if [[ "$CONTAINER_CGROUP_MANAGER" == "cgroupfs" ]]; then
+		skip "need systemd cgroup manager"
+	fi
+	create_workload_with_allowed_annotation "org.systemd.property." "org.systemd.property.CollectMode"
+
+	start_crio
+
+	jq --arg val "'inactive-or-failed'" '   .annotations["org.systemd.property.CollectMode"] = $val' \
+		"$TESTDATA"/sandbox_config.json > "$sboxconfig"
+
+	jq --arg val "'inactive-or-failed'" '   .annotations["org.systemd.property.CollectMode"] = $val' \
+		"$TESTDATA"/container_sleep.json > "$ctrconfig"
+
+	ctr_id=$(crictl run "$ctrconfig" "$sboxconfig")
+	[[ $(systemctl show --property CollectMode crio-"$ctr_id".scope) == "CollectMode=inactive-or-failed" ]]
 }

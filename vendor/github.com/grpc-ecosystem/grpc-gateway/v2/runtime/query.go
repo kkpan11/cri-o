@@ -16,6 +16,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/emptypb"
 	field_mask "google.golang.org/protobuf/types/known/fieldmaskpb"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -46,16 +47,29 @@ type DefaultQueryParser struct{}
 // Parse populates "values" into "msg".
 // A value is ignored if its key starts with one of the elements in "filter".
 func (*DefaultQueryParser) Parse(msg proto.Message, values url.Values, filter *utilities.DoubleArray) error {
+	// A field is addressable by both its proto name and its JSON name, so two
+	// keys can set the same one. Record which fields have been set and refuse a
+	// second key for a field, the way protojson refuses a duplicate field in a
+	// body, instead of letting map iteration order pick the value that survives.
+	seen := make(map[string]struct{}, len(values))
 	for key, values := range values {
+		fieldKey, mapKey := key, ""
 		if match := valuesKeyRegexp.FindStringSubmatch(key); len(match) == 3 {
-			key = match[1]
+			fieldKey, mapKey = match[1], "["+match[2]+"]"
 			values = append([]string{match[2]}, values...)
 		}
-		fieldPath := strings.Split(key, ".")
+
+		msgValue := msg.ProtoReflect()
+		fieldPath := normalizeFieldPath(msgValue, strings.Split(fieldKey, "."))
 		if filter.HasCommonPrefix(fieldPath) {
 			continue
 		}
-		if err := populateFieldValueFromPath(msg.ProtoReflect(), fieldPath, values); err != nil {
+		field := strings.Join(fieldPath, ".") + mapKey
+		if _, ok := seen[field]; ok {
+			return fmt.Errorf("duplicate field %q", field)
+		}
+		seen[field] = struct{}{}
+		if err := populateFieldValueFromPath(msgValue, fieldPath, values); err != nil {
 			return err
 		}
 	}
@@ -66,6 +80,38 @@ func (*DefaultQueryParser) Parse(msg proto.Message, values url.Values, filter *u
 func PopulateFieldFromPath(msg proto.Message, fieldPathString string, value string) error {
 	fieldPath := strings.Split(fieldPathString, ".")
 	return populateFieldValueFromPath(msg.ProtoReflect(), fieldPath, []string{value})
+}
+
+func normalizeFieldPath(msgValue protoreflect.Message, fieldPath []string) []string {
+	newFieldPath := make([]string, 0, len(fieldPath))
+	for i, fieldName := range fieldPath {
+		fields := msgValue.Descriptor().Fields()
+		fieldDesc := fields.ByTextName(fieldName)
+		if fieldDesc == nil {
+			fieldDesc = fields.ByJSONName(fieldName)
+		}
+		if fieldDesc == nil {
+			// return initial field path values if no matching  message field was found
+			return fieldPath
+		}
+
+		newFieldPath = append(newFieldPath, string(fieldDesc.Name()))
+
+		// If this is the last element, we're done
+		if i == len(fieldPath)-1 {
+			break
+		}
+
+		// Only singular message fields are allowed
+		if fieldDesc.Message() == nil || fieldDesc.Cardinality() == protoreflect.Repeated {
+			return fieldPath
+		}
+
+		// Get the nested message
+		msgValue = msgValue.Get(fieldDesc).Message()
+	}
+
+	return newFieldPath
 }
 
 func populateFieldValueFromPath(msgValue protoreflect.Message, fieldPath []string, values []string) error {
@@ -92,6 +138,15 @@ func populateFieldValueFromPath(msgValue protoreflect.Message, fieldPath []strin
 			}
 		}
 
+		// Check if oneof already set
+		if of := fieldDescriptor.ContainingOneof(); of != nil && !of.IsSynthetic() {
+			if f := msgValue.WhichOneof(of); f != nil {
+				if fieldDescriptor.Message() == nil || fieldDescriptor.FullName() != f.FullName() {
+					return fmt.Errorf("field already set for oneof %q", of.FullName().Name())
+				}
+			}
+		}
+
 		// If this is the last element, we're done
 		if i == len(fieldPath)-1 {
 			break
@@ -104,13 +159,6 @@ func populateFieldValueFromPath(msgValue protoreflect.Message, fieldPath []strin
 
 		// Get the nested message
 		msgValue = msgValue.Mutable(fieldDescriptor).Message()
-	}
-
-	// Check if oneof already set
-	if of := fieldDescriptor.ContainingOneof(); of != nil {
-		if f := msgValue.WhichOneof(of); f != nil {
-			return fmt.Errorf("field already set for oneof %q", of.FullName().Name())
-		}
 	}
 
 	switch {
@@ -188,7 +236,7 @@ func parseField(fieldDescriptor protoreflect.FieldDescriptor, value string) (pro
 		// Look for enum by name
 		v := enum.Descriptor().Values().ByName(protoreflect.Name(value))
 		if v == nil {
-			i, err := strconv.Atoi(value)
+			i, err := strconv.ParseInt(value, 10, 32)
 			if err != nil {
 				return protoreflect.Value{}, fmt.Errorf("%q is not a valid value", value)
 			}
@@ -257,7 +305,11 @@ func parseMessage(msgDescriptor protoreflect.MessageDescriptor, value string) (p
 		if err != nil {
 			return protoreflect.Value{}, err
 		}
-		msg = timestamppb.New(t)
+		timestamp := timestamppb.New(t)
+		if ok := timestamp.IsValid(); !ok {
+			return protoreflect.Value{}, fmt.Errorf("%s before 0001-01-01", value)
+		}
+		msg = timestamp
 	case "google.protobuf.Duration":
 		d, err := time.ParseDuration(value)
 		if err != nil {
@@ -330,6 +382,14 @@ func parseMessage(msgDescriptor protoreflect.MessageDescriptor, value string) (p
 			return protoreflect.Value{}, err
 		}
 		msg = &v
+	case "google.protobuf.Empty":
+		// An Empty carries nothing, so the only thing the value can say is that the
+		// field is present. Accept the two spellings of "no content" and reject
+		// anything else, rather than silently ignoring it.
+		if value != "" && value != "{}" {
+			return protoreflect.Value{}, fmt.Errorf("expected an empty value or %q, got %q", "{}", value)
+		}
+		msg = &emptypb.Empty{}
 	default:
 		return protoreflect.Value{}, fmt.Errorf("unsupported message type: %q", string(msgDescriptor.FullName()))
 	}

@@ -3,9 +3,10 @@ package criocli
 import (
 	"fmt"
 
-	"github.com/cri-o/cri-o/internal/version"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
+
+	"github.com/cri-o/cri-o/internal/version"
 )
 
 const (
@@ -30,20 +31,24 @@ var VersionCommand = &cli.Command{
 	},
 	Action: func(c *cli.Context) error {
 		verbose := c.Bool(verboseFlag)
+
 		v, err := version.Get(verbose)
 		if err != nil {
 			logrus.Fatal(err)
 		}
+
 		res := v.String()
 		if c.Bool(jsonFlag) {
 			j, err := v.JSONString()
 			if err != nil {
 				return fmt.Errorf("unable to generate JSON from version info: %w", err)
 			}
-			res = j
 
+			res = j
 		}
-		fmt.Println(res)
+
+		fmt.Print(res)
+
 		return nil
 	},
 }

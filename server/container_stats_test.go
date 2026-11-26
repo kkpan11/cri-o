@@ -3,14 +3,15 @@ package server_test
 import (
 	"context"
 
-	"github.com/cri-o/cri-o/internal/oci"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/oci"
 )
 
-// The actual test suite
-var _ = t.Describe("ContainerStats", func() {
+// The actual test suite.
+var _ = t.Describe("CgroupStats", func() {
 	// Prepare the sut
 	BeforeEach(func() {
 		beforeEach()
@@ -19,7 +20,7 @@ var _ = t.Describe("ContainerStats", func() {
 
 	AfterEach(afterEach)
 
-	t.Describe("ContainerStats", func() {
+	t.Describe("CgroupStats", func() {
 		It("should fail on invalid container", func() {
 			// Given
 			// When
@@ -54,7 +55,7 @@ var _ = t.Describe("ContainerStatsList", func() {
 			// Then
 			Expect(err).ToNot(HaveOccurred())
 			Expect(response).NotTo(BeNil())
-			Expect(response.Stats).To(BeEmpty())
+			Expect(response.GetStats()).To(BeEmpty())
 		})
 		It("should filter stopped container", func() {
 			// Given
@@ -71,7 +72,7 @@ var _ = t.Describe("ContainerStatsList", func() {
 			// Then
 			Expect(err).ToNot(HaveOccurred())
 			Expect(response).NotTo(BeNil())
-			Expect(response.Stats).To(BeEmpty())
+			Expect(response.GetStats()).To(BeEmpty())
 		})
 		It("should filter by id", func() {
 			// Given
@@ -89,7 +90,7 @@ var _ = t.Describe("ContainerStatsList", func() {
 			// Then
 			Expect(err).ToNot(HaveOccurred())
 			Expect(response).NotTo(BeNil())
-			Expect(response.Stats).To(BeEmpty())
+			Expect(response.GetStats()).To(BeEmpty())
 		})
 	})
 })

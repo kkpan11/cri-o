@@ -21,8 +21,8 @@ var (
 	signatureType   = reflect.TypeOf(Signature{""})
 	objectPathType  = reflect.TypeOf(ObjectPath(""))
 	variantType     = reflect.TypeOf(Variant{Signature{""}, nil})
-	interfacesType  = reflect.TypeOf([]interface{}{})
-	interfaceType   = reflect.TypeOf((*interface{})(nil)).Elem()
+	interfacesType  = reflect.TypeOf([]any{})
+	interfaceType   = reflect.TypeOf((*any)(nil)).Elem()
 	unixFDType      = reflect.TypeOf(UnixFD(0))
 	unixFDIndexType = reflect.TypeOf(UnixFDIndex(0))
 	errType         = reflect.TypeOf((*error)(nil)).Elem()
@@ -42,7 +42,7 @@ func (e InvalidTypeError) Error() string {
 // pointers. It converts slices of interfaces from src to corresponding structs
 // in dest. An error is returned if the lengths of src and dest or the types of
 // their elements don't match.
-func Store(src []interface{}, dest ...interface{}) error {
+func Store(src []any, dest ...any) error {
 	if len(src) != len(dest) {
 		return errors.New("dbus.Store: length mismatch")
 	}
@@ -55,12 +55,12 @@ func Store(src []interface{}, dest ...interface{}) error {
 	return nil
 }
 
-func storeInterfaces(src, dest interface{}) error {
+func storeInterfaces(src, dest any) error {
 	return store(reflect.ValueOf(dest), reflect.ValueOf(src))
 }
 
 func store(dest, src reflect.Value) error {
-	if dest.Kind() == reflect.Ptr {
+	if dest.Kind() == reflect.Pointer {
 		if dest.IsNil() {
 			dest.Set(reflect.New(dest.Type().Elem()))
 		}
@@ -119,7 +119,7 @@ func isConvertibleTo(dest, src reflect.Type) bool {
 	case dest.Kind() == reflect.Slice:
 		return src.Kind() == reflect.Slice &&
 			isConvertibleTo(dest.Elem(), src.Elem())
-	case dest.Kind() == reflect.Ptr:
+	case dest.Kind() == reflect.Pointer:
 		dest = dest.Elem()
 		return isConvertibleTo(dest, src)
 	case dest.Kind() == reflect.Struct:
@@ -222,7 +222,7 @@ func storeStruct(dest, src reflect.Value) error {
 	if isVariant(dest.Type()) {
 		return storeBase(dest, src)
 	}
-	dval := make([]interface{}, 0, dest.NumField())
+	dval := make([]any, 0, dest.NumField())
 	dtype := dest.Type()
 	for i := 0; i < dest.NumField(); i++ {
 		field := dest.Field(i)
@@ -242,7 +242,7 @@ func storeStruct(dest, src reflect.Value) error {
 				"enough fields need: %d have: %d",
 			src.Len(), len(dval))
 	}
-	return Store(src.Interface().([]interface{}), dval...)
+	return Store(src.Interface().([]any), dval...)
 }
 
 func storeSliceIntoVariant(dest, src reflect.Value) error {
@@ -358,7 +358,7 @@ func alignment(t reflect.Type) int {
 		return 4
 	case reflect.Uint64, reflect.Int64, reflect.Float64, reflect.Struct:
 		return 8
-	case reflect.Ptr:
+	case reflect.Pointer:
 		return alignment(t.Elem())
 	}
 	return 1

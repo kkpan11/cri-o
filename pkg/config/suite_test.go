@@ -2,16 +2,18 @@ package config_test
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"testing"
 
-	"github.com/cri-o/cri-o/pkg/config"
-	. "github.com/cri-o/cri-o/test/framework"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/cri-o/cri-o/pkg/config"
+	. "github.com/cri-o/cri-o/test/framework"
 )
 
-// TestLib runs the created specs
+// TestLib runs the created specs.
 func TestLibConfig(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunFrameworkSpecs(t, "LibConfig")
@@ -33,8 +35,28 @@ func validConmonPath() string {
 	if errors.Is(err, exec.ErrNotFound) {
 		Skip("conmon not found in $PATH")
 	}
+
 	Expect(err).ToNot(HaveOccurred())
+
 	return conmonPath
+}
+
+// conmonrsFakeBinary returns the path of a fake conmon-rs binary which runs
+// the shell command.
+func conmonrsFakeBinary(command string) (name string) {
+	file, err := os.CreateTemp("", "conmonrs-fake-*")
+	Expect(err).NotTo(HaveOccurred())
+
+	err = file.Chmod(0o755)
+	Expect(err).NotTo(HaveOccurred())
+
+	_, err = file.WriteString("#!/bin/sh\n" + command)
+	Expect(err).NotTo(HaveOccurred())
+
+	err = file.Close()
+	Expect(err).NotTo(HaveOccurred())
+
+	return file.Name()
 }
 
 var _ = BeforeSuite(func() {
@@ -56,5 +78,12 @@ func defaultConfig() *config.Config {
 	c, err := config.DefaultConfig()
 	Expect(err).ToNot(HaveOccurred())
 	Expect(c).NotTo(BeNil())
+	t.EnsureRuntimeDeps()
+
+	// Use a hermetic, empty registries configuration so tests do not depend on
+	// the host's /etc/containers/registries.conf, which may be in the legacy v1
+	// format that is no longer accepted.
+	c.SystemContext.SystemRegistriesConfPath = t.MustTempFile("registries")
+
 	return c
 }

@@ -41,7 +41,7 @@ func FieldMaskFromRequestBody(r io.Reader, msg proto.Message) (*field_mask.Field
 
 		m, ok := item.node.(map[string]interface{})
 		switch {
-		case ok:
+		case ok && len(m) > 0:
 			// if the item is an object, then enqueue all of its children
 			for k, v := range m {
 				if item.msg == nil {
@@ -65,14 +65,16 @@ func FieldMaskFromRequestBody(r io.Reader, msg proto.Message) (*field_mask.Field
 				}
 
 				if isProtobufAnyMessage(fd.Message()) && !fd.IsList() {
-					_, hasTypeField := v.(map[string]interface{})["@type"]
-					if hasTypeField {
-						queue = append(queue, fieldMaskPathItem{path: k})
-						continue
-					} else {
+					vm, _ := v.(map[string]interface{})
+					if _, hasTypeField := vm["@type"]; !hasTypeField {
 						return nil, fmt.Errorf("could not find field @type in %q in message %q", k, item.msg.Descriptor().FullName())
 					}
-
+					newPath := string(fd.FullName().Name())
+					if item.path != "" {
+						newPath = item.path + "." + newPath
+					}
+					queue = append(queue, fieldMaskPathItem{path: newPath})
+					continue
 				}
 
 				child := fieldMaskPathItem{
@@ -96,6 +98,8 @@ func FieldMaskFromRequestBody(r io.Reader, msg proto.Message) (*field_mask.Field
 					queue = append(queue, child)
 				}
 			}
+		case ok && len(m) == 0:
+			fallthrough
 		case len(item.path) > 0:
 			// otherwise, it's a leaf node so print its path
 			fm.Paths = append(fm.Paths, item.path)
@@ -124,7 +128,7 @@ func isDynamicProtoMessage(md protoreflect.MessageDescriptor) bool {
 // passed in name and json value.
 func buildPathsBlindly(name string, in interface{}) []string {
 	m, ok := in.(map[string]interface{})
-	if !ok {
+	if !ok || len(m) == 0 {
 		return []string{name}
 	}
 
@@ -141,10 +145,10 @@ func buildPathsBlindly(name string, in interface{}) []string {
 			continue
 		}
 		for k, v := range m {
-			if mi, ok := v.(map[string]interface{}); ok {
+			if mi, ok := v.(map[string]interface{}); ok && len(mi) > 0 {
 				queue = append(queue, fieldMaskPathItem{path: cur.path + "." + k, node: mi})
 			} else {
-				// This is not a struct, so there are no more levels to descend.
+				// No populated object remains, so there are no more levels to descend.
 				curPath := cur.path + "." + k
 				paths = append(paths, curPath)
 			}
@@ -153,7 +157,7 @@ func buildPathsBlindly(name string, in interface{}) []string {
 	return paths
 }
 
-// fieldMaskPathItem stores a in-progress deconstruction of a path for a fieldmask
+// fieldMaskPathItem stores an in-progress deconstruction of a path for a fieldmask
 type fieldMaskPathItem struct {
 	// the list of prior fields leading up to node connected by dots
 	path string

@@ -6,8 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cri-o/cri-o/internal/log"
 	"github.com/sirupsen/logrus"
+
+	"github.com/cri-o/cri-o/internal/log"
 )
 
 const (
@@ -57,7 +58,7 @@ type IdentifiableCreatable interface {
 	SetCreated()
 }
 
-// New creates a new ResourceStore, with a default timeout, and starts the cleanup function
+// New creates a new ResourceStore, with a default timeout, and starts the cleanup function.
 func New() *ResourceStore {
 	return NewWithTimeout(sleepTimeBeforeCleanup)
 }
@@ -71,15 +72,18 @@ func NewWithTimeout(timeout time.Duration) *ResourceStore {
 		timeout:   timeout,
 	}
 	go rc.cleanupStaleResources()
+
 	return rc
 }
 
 func (rc *ResourceStore) Close() {
 	rc.mutex.Lock()
 	defer rc.mutex.Unlock()
+
 	if rc.closed {
 		return
 	}
+
 	close(rc.closeChan)
 	rc.closed = true
 }
@@ -97,8 +101,11 @@ func (rc *ResourceStore) cleanupStaleResources() {
 			return
 		case <-time.After(rc.timeout):
 		}
+
 		resourcesToReap := []*Resource{}
+
 		rc.mutex.Lock()
+
 		for name, r := range rc.resources {
 			// this resource shouldn't be marked as stale if it
 			// hasn't yet been added to the store.
@@ -109,10 +116,13 @@ func (rc *ResourceStore) cleanupStaleResources() {
 			if !r.wasPut() {
 				continue
 			}
+
 			if r.stale {
 				resourcesToReap = append(resourcesToReap, r)
+
 				delete(rc.resources, name)
 			}
+
 			r.stale = true
 		}
 		// no need to hold the lock when running the cleanup functions
@@ -120,6 +130,7 @@ func (rc *ResourceStore) cleanupStaleResources() {
 
 		for _, r := range resourcesToReap {
 			logrus.Infof("Cleaning up stale resource %s", r.name)
+
 			if err := r.cleaner.Cleanup(); err != nil {
 				logrus.Errorf("Unable to cleanup: %v", err)
 			}
@@ -144,8 +155,10 @@ func (rc *ResourceStore) Get(name string) string {
 	if !r.wasPut() {
 		return ""
 	}
+
 	delete(rc.resources, name)
 	r.resource.SetCreated()
+
 	return r.resource.ID()
 }
 
@@ -153,7 +166,11 @@ func (rc *ResourceStore) Get(name string) string {
 // a newly created resource, and functions to clean up that newly created resource.
 // It adds the Resource to the ResourceStore. It expects name to be unique, and
 // returns an error if a duplicate name is detected.
-func (rc *ResourceStore) Put(name string, resource IdentifiableCreatable, cleaner *ResourceCleaner) error {
+func (rc *ResourceStore) Put(
+	name string,
+	resource IdentifiableCreatable,
+	cleaner *ResourceCleaner,
+) error {
 	rc.mutex.Lock()
 	defer rc.mutex.Unlock()
 
@@ -176,6 +193,7 @@ func (rc *ResourceStore) Put(name string, resource IdentifiableCreatable, cleane
 	for _, w := range r.watchers {
 		w <- struct{}{}
 	}
+
 	return nil
 }
 
@@ -198,22 +216,28 @@ func (rc *ResourceStore) Delete(name string) {
 func (rc *ResourceStore) WatcherForResource(name string) (watcher chan struct{}, stage string) {
 	rc.mutex.Lock()
 	defer rc.mutex.Unlock()
+
 	watcher = make(chan struct{}, 1)
 	r, ok := rc.resources[name]
+
 	if !ok {
 		rc.resources[name] = &Resource{
 			watchers: []chan struct{}{watcher},
 			name:     name,
 		}
+
 		return watcher, StageUnknown
 	}
+
 	r.watchers = append(r.watchers, watcher)
+
 	return watcher, r.stage
 }
 
 func (rc *ResourceStore) SetStageForResource(ctx context.Context, name, stage string) {
 	rc.mutex.Lock()
 	defer rc.mutex.Unlock()
+
 	r, ok := rc.resources[name]
 	if !ok {
 		log.Debugf(ctx, "Initializing stage for resource %s to %s", name, stage)
@@ -222,8 +246,10 @@ func (rc *ResourceStore) SetStageForResource(ctx context.Context, name, stage st
 			name:     name,
 			stage:    stage,
 		}
+
 		return
 	}
+
 	log.Debugf(ctx, "Setting stage for resource %s from %s to %s", name, r.stage, stage)
 	r.stage = stage
 }

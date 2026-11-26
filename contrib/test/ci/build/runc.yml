@@ -1,28 +1,21 @@
 ---
+- name: set runc checksum
+  set_fact:
+    runc_checksums:
+      amd64: "sha256:50dcc0b257d724fe07f3852c2dda52340223f038227c7572644eec870741223e"
+      arm64: "sha256:07b52aee923cc432c38fe4fb6809a08fc6471994efed650af3635350588a20be"
 
-- name: clone runc source repo
-  git:
-    repo: "https://github.com/opencontainers/runc.git"
-    dest: "{{ ansible_env.GOPATH }}/src/github.com/opencontainers/runc"
-    version: "{{ runc_git_version }}"
-
-- name: clean runc build directory
-  command: make clean
-  args:
-    chdir: "{{ ansible_env.GOPATH }}/src/github.com/opencontainers/runc"
-
-- name: build runc
-  make:
-    chdir: "{{ ansible_env.GOPATH }}/src/github.com/opencontainers/runc"
-
-- name: install runc
-  make:
-    target: "install"
-    chdir: "{{ ansible_env.GOPATH }}/src/github.com/opencontainers/runc"
+- name: download prebuilt runc binary
+  get_url:
+    url: "https://github.com/opencontainers/runc/releases/download/{{ runc_git_version }}/runc.{{ ansible_architecture | replace('x86_64', 'amd64') | replace('aarch64', 'arm64') }}"
+    dest: /usr/sbin/runc
+    mode: "0755"
+    force: yes
+    checksum: "{{ runc_checksums[ansible_architecture | replace('x86_64', 'amd64') | replace('aarch64', 'arm64')] }}"
 
 - name: link runc
   file:
-    src: /usr/local/sbin/runc
+    src: /usr/sbin/runc
     dest: /usr/bin/runc
     state: link
     force: yes

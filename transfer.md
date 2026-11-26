@@ -46,11 +46,13 @@ Podman is a daemonless container engine that provides a command-line interface
 similar to Docker. It can run containers, manage container images, and perform
 various container-related operations.
 
-While Podman and CRI-O are separate projects with different purposes, Podman offers
-a more comprehensive set of commands that can facilitate debugging and
+While Podman and CRI-O are separate projects with different purposes,
+Podman offers a more comprehensive set of commands that can facilitate
+debugging and
 troubleshooting tasks within a containerized environment. You can use Podman
-commands to perform actions like executing commands within a container (`podman exec`),
-inspecting container metadata (`podman inspect`),
+commands to perform actions like executing commands within a
+container (`podman exec`), inspecting container
+metadata (`podman inspect`),
 viewing container logs (`podman logs`), and many others.
 
 It's important to note that Podman and CRI-O are not interchangeable. Podman is
@@ -64,13 +66,13 @@ For many troubleshooting and information collection steps, there may be an
 existing pattern. Following provides equivalent with CRI-O tools for gathering
 information or jumping into containers, for operational use.
 
-| Existing Step    | CRI-O (and friends)                          |
-|:----------------:|:--------------------------------------------:|
-| `docker exec`    | [`crictl exec`][crictl]                      |
-| `docker inspect` | `podman inspect`                             |
-| `docker logs`    | `podman logs`                                |
-| `docker ps`      | [`crictl ps`][crictl] or [`runc list`][runc] |
-| `docker stats`   | `podman stats`                               |
+|  Existing Step   |             CRI-O (and friends)              |
+| :--------------: | :------------------------------------------: |
+|  `docker exec`   |           [`crictl exec`][crictl]            |
+| `docker inspect` |               `podman inspect`               |
+|  `docker logs`   |                `podman logs`                 |
+|   `docker ps`    | [`crictl ps`][crictl] or [`runc list`][runc] |
+|  `docker stats`  |                `podman stats`                |
 
 [crictl]: https://github.com/kubernetes-sigs/cri-tools/blob/master/docs/crictl.md
 [runc]: https://github.com/opencontainers/runc/blob/main/man/runc-list.8.md

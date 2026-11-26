@@ -122,6 +122,7 @@ func (p *Profile) preEncode() {
 	}
 
 	p.defaultSampleTypeX = addString(strings, p.DefaultSampleType)
+	p.docURLX = addString(strings, p.DocURL)
 
 	p.stringTable = make([]string, len(strings))
 	for s, i := range strings {
@@ -156,6 +157,7 @@ func (p *Profile) encode(b *buffer) {
 	encodeInt64Opt(b, 12, p.Period)
 	encodeInt64s(b, 13, p.commentX)
 	encodeInt64(b, 14, p.defaultSampleTypeX)
+	encodeInt64Opt(b, 15, p.docURLX)
 }
 
 var profileDecoder = []decoder{
@@ -237,6 +239,8 @@ var profileDecoder = []decoder{
 	func(b *buffer, m message) error { return decodeInt64s(b, &m.(*Profile).commentX) },
 	// int64 defaultSampleType = 14
 	func(b *buffer, m message) error { return decodeInt64(b, &m.(*Profile).defaultSampleTypeX) },
+	// string doc_link = 15;
+	func(b *buffer, m message) error { return decodeInt64(b, &m.(*Profile).docURLX) },
 }
 
 // postDecode takes the unexported fields populated by decode (with
@@ -317,9 +321,29 @@ func (p *Profile) postDecode() error {
 
 	for _, s := range p.Sample {
 		if len(s.labelX) > 0 {
-			labels := make(map[string][]string, len(s.labelX))
-			numLabels := make(map[string][]int64, len(s.labelX))
-			numUnits := make(map[string][]string, len(s.labelX))
+			var numStr, numNum, numUnit int
+			for _, l := range s.labelX {
+				if l.strX != 0 {
+					numStr++
+				} else if l.numX != 0 || l.unitX != 0 {
+					numNum++
+					if l.unitX != 0 {
+						numUnit++
+					}
+				}
+			}
+			var labels map[string][]string
+			if numStr > 0 {
+				labels = make(map[string][]string, numStr)
+			}
+			var numLabels map[string][]int64
+			if numNum > 0 {
+				numLabels = make(map[string][]int64, numNum)
+			}
+			var numUnits map[string][]string
+			if numUnit > 0 {
+				numUnits = make(map[string][]string, numUnit)
+			}
 			for _, l := range s.labelX {
 				var key, value string
 				key, err = getString(p.stringTable, &l.keyX, err)
@@ -328,10 +352,10 @@ func (p *Profile) postDecode() error {
 					labels[key] = append(labels[key], value)
 				} else if l.numX != 0 || l.unitX != 0 {
 					numValues := numLabels[key]
-					units := numUnits[key]
 					if l.unitX != 0 {
 						var unit string
 						unit, err = getString(p.stringTable, &l.unitX, err)
+						units := numUnits[key]
 						units = padStringArray(units, len(numValues))
 						numUnits[key] = append(units, unit)
 					}
@@ -343,14 +367,17 @@ func (p *Profile) postDecode() error {
 			}
 			if len(numLabels) > 0 {
 				s.NumLabel = numLabels
-				for key, units := range numUnits {
-					if len(units) > 0 {
-						numUnits[key] = padStringArray(units, len(numLabels[key]))
+				if len(numUnits) > 0 {
+					for key, units := range numUnits {
+						if len(units) > 0 {
+							numUnits[key] = padStringArray(units, len(numLabels[key]))
+						}
 					}
+					s.NumUnit = numUnits
 				}
-				s.NumUnit = numUnits
 			}
 		}
+		s.labelX = nil
 
 		s.Location = locBuffer[:len(s.locationIDX)]
 		locBuffer = locBuffer[len(s.locationIDX):]
@@ -384,6 +411,7 @@ func (p *Profile) postDecode() error {
 
 	p.commentX = nil
 	p.DefaultSampleType, err = getString(p.stringTable, &p.defaultSampleTypeX, err)
+	p.DocURL, err = getString(p.stringTable, &p.docURLX, err)
 	p.stringTable = nil
 	return err
 }
@@ -530,6 +558,7 @@ func (p *Line) decoder() []decoder {
 func (p *Line) encode(b *buffer) {
 	encodeUint64Opt(b, 1, p.functionIDX)
 	encodeInt64Opt(b, 2, p.Line)
+	encodeInt64Opt(b, 3, p.Column)
 }
 
 var lineDecoder = []decoder{
@@ -538,6 +567,8 @@ var lineDecoder = []decoder{
 	func(b *buffer, m message) error { return decodeUint64(b, &m.(*Line).functionIDX) },
 	// optional int64 line = 2
 	func(b *buffer, m message) error { return decodeInt64(b, &m.(*Line).Line) },
+	// optional int64 column = 3
+	func(b *buffer, m message) error { return decodeInt64(b, &m.(*Line).Column) },
 }
 
 func (p *Function) decoder() []decoder {

@@ -25,8 +25,8 @@ import (
 	"strings"
 
 	oci "github.com/opencontainers/runtime-spec/specs-go"
-	ocigen "github.com/opencontainers/runtime-tools/generate"
-	"tags.cncf.io/container-device-interface/specs-go"
+	"tags.cncf.io/container-device-interface/internal/ociedit"
+	cdi "tags.cncf.io/container-device-interface/specs-go"
 )
 
 const (
@@ -42,6 +42,9 @@ const (
 	PoststartHook = "poststart"
 	// PoststopHook is the name of the OCI "poststop" hook.
 	PoststopHook = "poststop"
+
+	// NoPermissions requests empty cgroup permissions for a device.
+	NoPermissions = "none"
 )
 
 var (
@@ -64,7 +67,7 @@ var (
 // to all OCI Specs where at least one devices from the CDI Spec
 // is injected.
 type ContainerEdits struct {
-	*specs.ContainerEdits
+	*cdi.ContainerEdits
 }
 
 // Apply edits to the given OCI Spec. Updates the OCI Spec in place.
@@ -76,20 +79,31 @@ func (e *ContainerEdits) Apply(spec *oci.Spec) error {
 	if e == nil || e.ContainerEdits == nil {
 		return nil
 	}
+	if err := e.Validate(); err != nil {
+		return err
+	}
 
-	specgen := ocigen.NewFromSpec(spec)
+	editor, err := ociedit.NewSpecEditor(spec)
+	if err != nil {
+		return fmt.Errorf("error creating spec editor: %w", err)
+	}
 	if len(e.Env) > 0 {
-		specgen.AddMultipleProcessEnv(e.Env)
+		editor.AddMultipleProcessEnv(e.Env)
 	}
 
 	for _, d := range e.DeviceNodes {
-		dn := DeviceNode{d}
+		// Work on a copy of the device node. e.DeviceNodes may point into a
+		// cached Spec (see Cache.InjectDevices), and fillMissingInfo() must
+		// not write host-derived information back into the cache: that would
+		// make later injections skip the host check and reuse stale values,
+		// and it races with concurrent injections of the same device.
+		dn := (&DeviceNode{d}).DeepCopy()
 
 		err := dn.fillMissingInfo()
 		if err != nil {
 			return err
 		}
-		dev := d.ToOCI()
+		dev := dn.toOCI()
 		if dev.UID == nil && spec.Process != nil {
 			if uid := spec.Process.User.UID; uid > 0 {
 				dev.UID = &uid
@@ -101,47 +115,71 @@ func (e *ContainerEdits) Apply(spec *oci.Spec) error {
 			}
 		}
 
-		specgen.RemoveDevice(dev.Path)
-		specgen.AddDevice(dev)
+		editor.RemoveDevice(dev.Path)
+		editor.AddDevice(dev)
 
 		if dev.Type == "b" || dev.Type == "c" {
 			access := d.Permissions
-			if access == "" {
+			switch access {
+			case "":
 				access = "rwm"
+			case NoPermissions:
+				access = ""
 			}
-			specgen.AddLinuxResourcesDevice(true, dev.Type, &dev.Major, &dev.Minor, access)
+			editor.AddLinuxResourcesDevice(true, dev.Type, &dev.Major, &dev.Minor, access)
+		}
+	}
+
+	if len(e.NetDevices) > 0 {
+		for _, dev := range e.NetDevices {
+			editor.SetLinuxNetDevice(dev.HostInterfaceName, (&LinuxNetDevice{dev}).toOCI())
 		}
 	}
 
 	if len(e.Mounts) > 0 {
 		for _, m := range e.Mounts {
-			specgen.RemoveMount(m.ContainerPath)
-			specgen.AddMount(m.ToOCI())
+			mnt := &Mount{m}
+
+			editor.RemoveMount(m.ContainerPath)
+
+			if !specHasIDMappingNamespace(spec) {
+				editor.AddMount(mnt.toOCI())
+			} else {
+				editor.AddMount(mnt.toOCI(withIDMapForBindMount()))
+			}
 		}
-		sortMounts(&specgen)
+		sortMounts(editor)
 	}
 
 	for _, h := range e.Hooks {
+		ociHook := (&Hook{h}).toOCI()
 		switch h.HookName {
 		case PrestartHook:
-			specgen.AddPreStartHook(h.ToOCI())
+			editor.AddPreStartHook(ociHook)
 		case PoststartHook:
-			specgen.AddPostStartHook(h.ToOCI())
+			editor.AddPostStartHook(ociHook)
 		case PoststopHook:
-			specgen.AddPostStopHook(h.ToOCI())
-			// TODO: Maybe runtime-tools/generate should be updated with these...
+			editor.AddPostStopHook(ociHook)
 		case CreateRuntimeHook:
-			ensureOCIHooks(spec)
-			spec.Hooks.CreateRuntime = append(spec.Hooks.CreateRuntime, h.ToOCI())
+			editor.AddCreateRuntimeHook(ociHook)
 		case CreateContainerHook:
-			ensureOCIHooks(spec)
-			spec.Hooks.CreateContainer = append(spec.Hooks.CreateContainer, h.ToOCI())
+			editor.AddCreateContainerHook(ociHook)
 		case StartContainerHook:
-			ensureOCIHooks(spec)
-			spec.Hooks.StartContainer = append(spec.Hooks.StartContainer, h.ToOCI())
+			editor.AddStartContainerHook(ociHook)
 		default:
 			return fmt.Errorf("unknown hook name %q", h.HookName)
 		}
+	}
+
+	if e.IntelRdt != nil {
+		editor.SetLinuxIntelRdt((&IntelRdt{e.IntelRdt}).toOCI())
+	}
+
+	for _, additionalGID := range e.AdditionalGIDs {
+		if additionalGID == 0 {
+			continue
+		}
+		editor.AddProcessAdditionalGID(additionalGID)
 	}
 
 	return nil
@@ -171,6 +209,14 @@ func (e *ContainerEdits) Validate() error {
 			return err
 		}
 	}
+	if e.IntelRdt != nil {
+		if err := (&IntelRdt{e.IntelRdt}).Validate(); err != nil {
+			return err
+		}
+	}
+	if err := ValidateNetDevices(e.NetDevices); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -185,13 +231,18 @@ func (e *ContainerEdits) Append(o *ContainerEdits) *ContainerEdits {
 		e = &ContainerEdits{}
 	}
 	if e.ContainerEdits == nil {
-		e.ContainerEdits = &specs.ContainerEdits{}
+		e.ContainerEdits = &cdi.ContainerEdits{}
 	}
 
 	e.Env = append(e.Env, o.Env...)
 	e.DeviceNodes = append(e.DeviceNodes, o.DeviceNodes...)
+	e.NetDevices = append(e.NetDevices, o.NetDevices...)
 	e.Hooks = append(e.Hooks, o.Hooks...)
 	e.Mounts = append(e.Mounts, o.Mounts...)
+	if o.IntelRdt != nil {
+		e.IntelRdt = o.IntelRdt
+	}
+	e.AdditionalGIDs = append(e.AdditionalGIDs, o.AdditionalGIDs...)
 
 	return e
 }
@@ -202,7 +253,28 @@ func (e *ContainerEdits) isEmpty() bool {
 	if e == nil {
 		return false
 	}
-	return len(e.Env)+len(e.DeviceNodes)+len(e.Hooks)+len(e.Mounts) == 0
+	if len(e.Env) > 0 {
+		return false
+	}
+	if len(e.DeviceNodes) > 0 {
+		return false
+	}
+	if len(e.Hooks) > 0 {
+		return false
+	}
+	if len(e.Mounts) > 0 {
+		return false
+	}
+	if len(e.AdditionalGIDs) > 0 {
+		return false
+	}
+	if e.IntelRdt != nil {
+		return false
+	}
+	if len(e.NetDevices) > 0 {
+		return false
+	}
+	return true
 }
 
 // ValidateEnv validates the given environment variables.
@@ -215,9 +287,55 @@ func ValidateEnv(env []string) error {
 	return nil
 }
 
+// ValidateNetDevices validates the given net devices.
+func ValidateNetDevices(devices []*cdi.LinuxNetDevice) error {
+	var (
+		hostSeen = map[string]string{}
+		nameSeen = map[string]string{}
+	)
+
+	for _, dev := range devices {
+		if err := (&LinuxNetDevice{dev}).Validate(); err != nil {
+			return err
+		}
+		if other, ok := hostSeen[dev.HostInterfaceName]; ok {
+			return fmt.Errorf("invalid linux net device, duplicate HostInterfaceName %q with names %q and %q",
+				dev.HostInterfaceName, dev.Name, other)
+		}
+		hostSeen[dev.HostInterfaceName] = dev.Name
+
+		if other, ok := nameSeen[dev.Name]; ok {
+			return fmt.Errorf("invalid linux net device, duplicate Name %q with HostInterfaceName %q and %q",
+				dev.Name, dev.HostInterfaceName, other)
+		}
+		nameSeen[dev.Name] = dev.HostInterfaceName
+	}
+
+	return nil
+}
+
+// LinuxNetDevice is a CDI Spec LinuxNetDevice wrapper, used for OCI conversion and validating.
+type LinuxNetDevice struct {
+	*cdi.LinuxNetDevice
+}
+
+// Validate LinuxNetDevice.
+func (d *LinuxNetDevice) Validate() error {
+	if d.LinuxNetDevice == nil {
+		return errors.New("invalid (nil) linux net device")
+	}
+	if d.HostInterfaceName == "" {
+		return errors.New("invalid linux net device, empty HostInterfaceName")
+	}
+	if d.Name == "" {
+		return errors.New("invalid linux net device, empty Name")
+	}
+	return nil
+}
+
 // DeviceNode is a CDI Spec DeviceNode wrapper, used for validating DeviceNodes.
 type DeviceNode struct {
-	*specs.DeviceNode
+	*cdi.DeviceNode
 }
 
 // Validate a CDI Spec DeviceNode.
@@ -230,28 +348,69 @@ func (d *DeviceNode) Validate() error {
 		"p": {},
 	}
 
+	if d.DeviceNode == nil {
+		return errors.New("invalid (nil) device node")
+	}
 	if d.Path == "" {
 		return errors.New("invalid (empty) device path")
 	}
 	if _, ok := validTypes[d.Type]; !ok {
 		return fmt.Errorf("device %q: invalid type %q", d.Path, d.Type)
 	}
-	for _, bit := range d.Permissions {
-		if bit != 'r' && bit != 'w' && bit != 'm' {
-			return fmt.Errorf("device %q: invalid permissions %q",
-				d.Path, d.Permissions)
-		}
+	// NOTE: negative numbers are rejected as -1 is interpreted as a wildcard
+	if d.Major < 0 || d.Minor < 0 {
+		return fmt.Errorf("device %q: invalid (negative) device number %d:%d", d.Path, d.Major, d.Minor)
 	}
+	switch {
+	case d.Permissions == "":
+	case d.Permissions == NoPermissions:
+	case strings.Trim(d.Permissions, "rwm") != "":
+		return fmt.Errorf("device %q: invalid permissions %q",
+			d.Path, d.Permissions)
+	}
+
 	return nil
+}
+
+// DeepCopy a DeviceNode. It returns a copy of the given device node that
+// shares no pointers with it, so that filling in or exporting the copy
+// cannot modify the original (for instance a device node of a cached Spec).
+func (d *DeviceNode) DeepCopy() *DeviceNode {
+	if d == nil {
+		return nil
+	}
+	if d.DeviceNode == nil {
+		return &DeviceNode{}
+	}
+
+	ccdi := *(d.DeviceNode)
+	c := &DeviceNode{&ccdi}
+
+	if d.FileMode != nil {
+		mode := *d.FileMode
+		c.FileMode = &mode
+	}
+	if d.UID != nil {
+		uid := *d.UID
+		c.UID = &uid
+	}
+	if d.GID != nil {
+		gid := *d.GID
+		c.GID = &gid
+	}
+	return c
 }
 
 // Hook is a CDI Spec Hook wrapper, used for validating hooks.
 type Hook struct {
-	*specs.Hook
+	*cdi.Hook
 }
 
 // Validate a hook.
 func (h *Hook) Validate() error {
+	if h.Hook == nil {
+		return errors.New("invalid (nil) hook")
+	}
 	if _, ok := validHookNames[h.HookName]; !ok {
 		return fmt.Errorf("invalid hook name %q", h.HookName)
 	}
@@ -266,11 +425,14 @@ func (h *Hook) Validate() error {
 
 // Mount is a CDI Mount wrapper, used for validating mounts.
 type Mount struct {
-	*specs.Mount
+	*cdi.Mount
 }
 
 // Validate a mount.
 func (m *Mount) Validate() error {
+	if m.Mount == nil {
+		return errors.New("invalid (nil) mount")
+	}
 	if m.HostPath == "" {
 		return errors.New("invalid mount, empty host path")
 	}
@@ -280,19 +442,40 @@ func (m *Mount) Validate() error {
 	return nil
 }
 
-// Ensure OCI Spec hooks are not nil so we can add hooks.
-func ensureOCIHooks(spec *oci.Spec) {
-	if spec.Hooks == nil {
-		spec.Hooks = &oci.Hooks{}
+// IntelRdt is a CDI IntelRdt wrapper.
+// This is used for validation and conversion to OCI specifications.
+type IntelRdt struct {
+	*cdi.IntelRdt
+}
+
+// ValidateIntelRdt validates the IntelRdt configuration.
+//
+// Deprecated: use [*IntelRdt.Validate] instead.
+//
+//go:fix inline
+func ValidateIntelRdt(i *cdi.IntelRdt) error {
+	return (&IntelRdt{i}).Validate()
+}
+
+// Validate validates the IntelRdt configuration.
+func (i *IntelRdt) Validate() error {
+	if i.IntelRdt == nil {
+		return nil
 	}
+	// ClosID must be a valid Linux filename. Exception: "/" refers to the root CLOS.
+	switch c := i.ClosID; {
+	case c == "/":
+	case len(c) >= 4096, c == ".", c == "..", strings.ContainsAny(c, "/\n"):
+		return errors.New("invalid ClosID")
+	}
+	return nil
 }
 
 // sortMounts sorts the mounts in the given OCI Spec.
-func sortMounts(specgen *ocigen.Generator) {
-	mounts := specgen.Mounts()
-	specgen.ClearMounts()
-	sort.Sort(orderedMounts(mounts))
-	specgen.Config.Mounts = mounts
+func sortMounts(editor ociedit.SpecEditor) {
+	mounts := editor.Mounts()
+	sort.Stable(orderedMounts(mounts))
+	editor.SetMounts(mounts)
 }
 
 // orderedMounts defines how to sort an OCI Spec Mount slice.
@@ -311,14 +494,7 @@ func (m orderedMounts) Len() int {
 // mount indexed by parameter 1 is less than that of the mount indexed by
 // parameter 2. Used in sorting.
 func (m orderedMounts) Less(i, j int) bool {
-	ip, jp := m.parts(i), m.parts(j)
-	if ip < jp {
-		return true
-	}
-	if jp < ip {
-		return false
-	}
-	return m[i].Destination < m[j].Destination
+	return m.parts(i) < m.parts(j)
 }
 
 // Swap swaps two items in an array of mounts. Used in sorting
@@ -329,4 +505,24 @@ func (m orderedMounts) Swap(i, j int) {
 // parts returns the number of parts in the destination of a mount. Used in sorting.
 func (m orderedMounts) parts(i int) int {
 	return strings.Count(filepath.Clean(m[i].Destination), string(os.PathSeparator))
+}
+
+// specHasIDMappingNamespace returns true if the OCI Spec has a Linux UserNamespace
+// together with both UID and GID mappings. A user namespace lacking either
+// mapping (for instance one set up for a pod sharing its process namespace)
+// can't reliably be used for idmapped mounts: runc rejects idmapped mounts
+// unless both mappings are present.
+func specHasIDMappingNamespace(spec *oci.Spec) bool {
+	if spec == nil || spec.Linux == nil {
+		return false
+	}
+	if len(spec.Linux.UIDMappings) == 0 || len(spec.Linux.GIDMappings) == 0 {
+		return false
+	}
+	for _, ns := range spec.Linux.Namespaces {
+		if ns.Type == oci.UserNamespace {
+			return true
+		}
+	}
+	return false
 }

@@ -1,9 +1,9 @@
 //go:build linux
-// +build linux
 
 package ocicni
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -14,7 +14,12 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-const defaultNamespaceEnterCommandName = "nsenter"
+const (
+	defaultNamespaceEnterCommandName = "nsenter"
+	minIPAddrFields                  = 4
+	minLinkOutputLines               = 2
+	minLinkFields                    = 4
+)
 
 type nsManager struct {
 	nsenterPath string
@@ -22,13 +27,15 @@ type nsManager struct {
 
 func (nsm *nsManager) init() error {
 	var err error
+
 	nsm.nsenterPath, err = exec.LookPath(defaultNamespaceEnterCommandName)
+
 	return err
 }
 
-func getContainerDetails(nsm *nsManager, netnsPath, interfaceName, addrType string) (*net.IPNet, *net.HardwareAddr, error) {
+func getContainerDetails(ctx context.Context, nsm *nsManager, netnsPath, interfaceName, addrType string) (*net.IPNet, *net.HardwareAddr, error) {
 	// Try to retrieve ip inside container network namespace
-	output, err := exec.Command(nsm.nsenterPath, "--net="+netnsPath, "-F", "--",
+	output, err := exec.CommandContext(ctx, nsm.nsenterPath, "--net="+netnsPath, "-F", "--",
 		"ip", "-o", addrType, "addr", "show", "dev", interfaceName, "scope", "global").CombinedOutput()
 	if err != nil {
 		return nil, nil, fmt.Errorf("unexpected command output %s with error: %w", output, err)
@@ -38,14 +45,17 @@ func getContainerDetails(nsm *nsManager, netnsPath, interfaceName, addrType stri
 	if len(lines) < 1 {
 		return nil, nil, fmt.Errorf("unexpected command output %s", output)
 	}
+
 	fields := strings.Fields(lines[0])
-	if len(fields) < 4 {
+	if len(fields) < minIPAddrFields {
 		return nil, nil, fmt.Errorf("unexpected address output %s ", lines[0])
 	}
+
 	ip, ipNet, err := net.ParseCIDR(fields[3])
 	if err != nil {
 		return nil, nil, fmt.Errorf("CNI failed to parse ip from output %s due to %w", output, err)
 	}
+
 	if ip.To4() == nil {
 		ipNet.IP = ip
 	} else {
@@ -53,20 +63,22 @@ func getContainerDetails(nsm *nsManager, netnsPath, interfaceName, addrType stri
 	}
 
 	// Try to retrieve MAC inside container network namespace
-	output, err = exec.Command(nsm.nsenterPath, "--net="+netnsPath, "-F", "--",
+	output, err = exec.CommandContext(ctx, nsm.nsenterPath, "--net="+netnsPath, "-F", "--",
 		"ip", "link", "show", "dev", interfaceName).CombinedOutput()
 	if err != nil {
 		return nil, nil, fmt.Errorf("unexpected 'ip link' command output %s with error: %w", output, err)
 	}
 
 	lines = strings.Split(string(output), "\n")
-	if len(lines) < 2 {
+	if len(lines) < minLinkOutputLines {
 		return nil, nil, fmt.Errorf("unexpected 'ip link' command output %s", output)
 	}
+
 	fields = strings.Fields(lines[1])
-	if len(fields) < 4 {
-		return nil, nil, fmt.Errorf("unexpected link output %s ", lines[0])
+	if len(fields) < minLinkFields {
+		return nil, nil, fmt.Errorf("unexpected link output %s ", lines[1])
 	}
+
 	mac, err := net.ParseMAC(fields[1])
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse MAC from output %s due to %w", output, err)
@@ -81,6 +93,7 @@ func bringUpLoopback(netns string) error {
 		if err == nil {
 			err = netlink.LinkSetUp(link)
 		}
+
 		if err != nil {
 			return err
 		}
@@ -89,6 +102,7 @@ func bringUpLoopback(netns string) error {
 		if err != nil {
 			return err
 		}
+
 		if len(v4Addrs) != 0 {
 			// sanity check that this is a loopback address
 			for _, addr := range v4Addrs {
@@ -102,6 +116,7 @@ func bringUpLoopback(netns string) error {
 		if err != nil {
 			return err
 		}
+
 		if len(v6Addrs) != 0 {
 			// sanity check that this is a loopback address
 			for _, addr := range v6Addrs {
@@ -115,6 +130,7 @@ func bringUpLoopback(netns string) error {
 	}); err != nil {
 		return fmt.Errorf("error adding loopback interface: %w", err)
 	}
+
 	return nil
 }
 
@@ -134,5 +150,6 @@ func checkLoopback(netns string) error {
 	}); err != nil {
 		return fmt.Errorf("error checking loopback interface: %w", err)
 	}
+
 	return nil
 }

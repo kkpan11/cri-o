@@ -8,18 +8,21 @@ import (
 	"path/filepath"
 	"strings"
 
-	devicecfg "github.com/cri-o/cri-o/internal/config/device"
-	"tags.cncf.io/container-device-interface/pkg/cdi"
-
-	"github.com/cri-o/cri-o/internal/log"
-	"github.com/cri-o/cri-o/utils"
 	securejoin "github.com/cyphar/filepath-securejoin"
-	"github.com/opencontainers/runc/libcontainer/devices"
+	"github.com/moby/sys/devices"
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"tags.cncf.io/container-device-interface/pkg/cdi"
+
+	devicecfg "github.com/cri-o/cri-o/internal/config/device"
+	"github.com/cri-o/cri-o/internal/log"
+	"github.com/cri-o/cri-o/utils"
 )
 
-func (c *container) SpecAddDevices(configuredDevices, annotationDevices []devicecfg.Device, privilegedWithoutHostDevices, enableDeviceOwnershipFromSecurityContext bool) error {
+func (c *container) SpecAddDevices(
+	configuredDevices, annotationDevices []devicecfg.Device,
+	privilegedWithoutHostDevices, enableDeviceOwnershipFromSecurityContext bool,
+) error {
 	// First, clear the existing devices from the spec
 	c.Spec().Config.Linux.Devices = []rspec.LinuxDevice{}
 
@@ -28,7 +31,8 @@ func (c *container) SpecAddDevices(configuredDevices, annotationDevices []device
 		d := &configuredDevices[i]
 
 		c.Spec().AddDevice(d.Device)
-		c.Spec().AddLinuxResourcesDevice(d.Resource.Allow, d.Resource.Type, d.Resource.Major, d.Resource.Minor, d.Resource.Access)
+		c.Spec().
+			AddLinuxResourcesDevice(d.Resource.Allow, d.Resource.Type, d.Resource.Major, d.Resource.Minor, d.Resource.Access)
 	}
 
 	// Next, verify and add the devices from annotations
@@ -36,7 +40,8 @@ func (c *container) SpecAddDevices(configuredDevices, annotationDevices []device
 		d := &annotationDevices[i]
 
 		c.Spec().AddDevice(d.Device)
-		c.Spec().AddLinuxResourcesDevice(d.Resource.Allow, d.Resource.Type, d.Resource.Major, d.Resource.Minor, d.Resource.Access)
+		c.Spec().
+			AddLinuxResourcesDevice(d.Resource.Allow, d.Resource.Type, d.Resource.Major, d.Resource.Minor, d.Resource.Access)
 	}
 
 	// Then, add host devices if privileged
@@ -45,22 +50,25 @@ func (c *container) SpecAddDevices(configuredDevices, annotationDevices []device
 	}
 
 	// Then, add container config devices
-	if err := c.specAddContainerConfigDevices(enableDeviceOwnershipFromSecurityContext); err != nil {
+	if err := c.specAddContainerConfigDevices(
+		enableDeviceOwnershipFromSecurityContext,
+	); err != nil {
 		return err
 	}
 
-	// Finally, inject CDI devices
-	return c.specInjectCDIDevices()
+	return nil
 }
 
 func (c *container) specAddHostDevicesIfPrivileged(privilegedWithoutHostDevices bool) error {
 	if !c.Privileged() || privilegedWithoutHostDevices {
 		return nil
 	}
+
 	hostDevices, err := devices.HostDevices()
 	if err != nil {
 		return err
 	}
+
 	for _, hostDevice := range hostDevices {
 		rd := rspec.LinuxDevice{
 			Path:  hostDevice.Path,
@@ -70,59 +78,74 @@ func (c *container) specAddHostDevicesIfPrivileged(privilegedWithoutHostDevices 
 			UID:   &hostDevice.Uid,
 			GID:   &hostDevice.Gid,
 		}
+
 		if hostDevice.Major == 0 && hostDevice.Minor == 0 {
 			// Invalid device, most likely a symbolic link, skip it.
 			continue
 		}
+
 		c.Spec().AddDevice(rd)
 	}
+
 	c.Spec().Config.Linux.Resources.Devices = []rspec.LinuxDeviceCgroup{
 		{
 			Allow:  true,
 			Access: "rwm",
 		},
 	}
+
 	return nil
 }
 
-func (c *container) specAddContainerConfigDevices(enableDeviceOwnershipFromSecurityContext bool) error {
+func (c *container) specAddContainerConfigDevices(
+	enableDeviceOwnershipFromSecurityContext bool,
+) error {
 	sp := c.Spec().Config
 
-	for _, device := range c.Config().Devices {
-		// pin the device to avoid using `device` within the range scope as
-		// wrong function literal
-		device := device
-
+	for _, device := range c.Config().GetDevices() {
 		// If we are privileged, we have access to devices on the host.
 		// If the requested container path already exists on the host, the container won't see the expected host path.
 		// Therefore, we must error out if the container path already exists
-		if c.Privileged() && device.ContainerPath != device.HostPath {
+		if c.Privileged() && device.GetContainerPath() != device.GetHostPath() {
 			// we expect this to not exist
-			_, err := os.Stat(device.ContainerPath)
+			_, err := os.Stat(device.GetContainerPath())
 			if err == nil {
-				return errors.New("privileged container was configured with a device container path that already exists on the host")
+				return errors.New(
+					"privileged container was configured with a device container path that already exists on the host",
+				)
 			}
+
 			if !os.IsNotExist(err) {
 				return fmt.Errorf("error checking if container path exists on host: %w", err)
 			}
 		}
 
-		path, err := securejoin.SecureJoin("/", device.HostPath)
+		path, err := securejoin.SecureJoin("/", device.GetHostPath())
 		if err != nil {
 			return err
 		}
-		dev, err := devices.DeviceFromPath(path, device.Permissions)
+
+		dev, err := devices.DeviceFromPath(path, device.GetPermissions())
 		// if there was no error, return the device
 		if err == nil {
 			rd := rspec.LinuxDevice{
-				Path:  device.ContainerPath,
+				Path:  device.GetContainerPath(),
 				Type:  string(dev.Type),
 				Major: dev.Major,
 				Minor: dev.Minor,
-				UID:   getDeviceUserGroupID(c.Config().Linux.SecurityContext.RunAsUser, dev.Uid, enableDeviceOwnershipFromSecurityContext),
-				GID:   getDeviceUserGroupID(c.Config().Linux.SecurityContext.RunAsGroup, dev.Gid, enableDeviceOwnershipFromSecurityContext),
+				UID: getDeviceUserGroupID(
+					c.Config().GetLinux().GetSecurityContext().GetRunAsUser(),
+					dev.Uid,
+					enableDeviceOwnershipFromSecurityContext,
+				),
+				GID: getDeviceUserGroupID(
+					c.Config().GetLinux().GetSecurityContext().GetRunAsGroup(),
+					dev.Gid,
+					enableDeviceOwnershipFromSecurityContext,
+				),
 			}
 			c.Spec().AddDevice(rd)
+
 			sp.Linux.Resources.Devices = append(sp.Linux.Resources.Devices, rspec.LinuxDeviceCgroup{
 				Allow:  true,
 				Type:   string(dev.Type),
@@ -130,26 +153,29 @@ func (c *container) specAddContainerConfigDevices(enableDeviceOwnershipFromSecur
 				Minor:  &dev.Minor,
 				Access: string(dev.Permissions),
 			})
+
 			continue
 		}
 		// if the device is not a device node
 		// try to see if it's a directory holding many devices
-		if err == devices.ErrNotADevice {
+		if errors.Is(err, devices.ErrNotADevice) {
 			// check if it is a directory
 			if e := utils.IsDirectory(path); e == nil {
 				// mount the internal devices recursively
-				// nolint: errcheck
+				//nolint:errcheck // walk errors are handled within the callback
 				filepath.Walk(path, func(dpath string, f os.FileInfo, e error) error {
 					// filepath.Walk failed, skip
 					if e != nil {
 						return nil
 					}
-					childDevice, e := devices.DeviceFromPath(dpath, device.Permissions)
+
+					childDevice, e := devices.DeviceFromPath(dpath, device.GetPermissions())
 					if e != nil {
 						// ignore the device
 						return nil
 					}
-					cPath := strings.Replace(dpath, path, device.ContainerPath, 1)
+
+					cPath := strings.Replace(dpath, path, device.GetContainerPath(), 1)
 					rd := rspec.LinuxDevice{
 						Path:  cPath,
 						Type:  string(childDevice.Type),
@@ -159,25 +185,30 @@ func (c *container) specAddContainerConfigDevices(enableDeviceOwnershipFromSecur
 						GID:   &childDevice.Gid,
 					}
 					c.Spec().AddDevice(rd)
-					sp.Linux.Resources.Devices = append(sp.Linux.Resources.Devices, rspec.LinuxDeviceCgroup{
-						Allow:  true,
-						Type:   string(childDevice.Type),
-						Major:  &childDevice.Major,
-						Minor:  &childDevice.Minor,
-						Access: string(childDevice.Permissions),
-					})
+
+					sp.Linux.Resources.Devices = append(
+						sp.Linux.Resources.Devices,
+						rspec.LinuxDeviceCgroup{
+							Allow:  true,
+							Type:   string(childDevice.Type),
+							Major:  &childDevice.Major,
+							Minor:  &childDevice.Minor,
+							Access: string(childDevice.Permissions),
+						},
+					)
 
 					return nil
 				})
 			}
 		}
 	}
+
 	return nil
 }
 
-func (c *container) specInjectCDIDevices() error {
+func (c *container) SpecInjectCDIDevices() error {
 	var (
-		cdiDevices = c.Config().CDIDevices
+		cdiDevices = c.Config().GetCDIDevices()
 		fromCRI    = map[string]struct{}{}
 		requested  = make([]string, 0, len(cdiDevices))
 		annotated  []string
@@ -186,8 +217,8 @@ func (c *container) specInjectCDIDevices() error {
 
 	// Take CDI devices from the dedicated CDIDevices CRI field.
 	for _, dev := range cdiDevices {
-		requested = append(requested, dev.Name)
-		fromCRI[dev.Name] = struct{}{}
+		requested = append(requested, dev.GetName())
+		fromCRI[dev.GetName()] = struct{}{}
 	}
 
 	// Extract CDI devices from annotations which is still supported as a means
@@ -212,8 +243,10 @@ func (c *container) specInjectCDIDevices() error {
 				// TODO(klihub): change to a warning once annotations are deprecated
 				log.Infof(context.TODO(),
 					"Skipping duplicate annotated CDI device %s", name)
+
 				continue
 			}
+
 			requested = append(requested, name)
 		}
 		// TODO(klihub): change to a warning once annotations are deprecated
@@ -226,18 +259,16 @@ func (c *container) specInjectCDIDevices() error {
 		return nil
 	}
 
-	registry := cdi.GetRegistry()
-	if err := registry.Refresh(); err != nil {
-		// We don't consider registry refresh failure a fatal error.
+	if err := cdi.Refresh(); err != nil {
+		// We don't consider a refresh failure a fatal error.
 		// For instance, a dynamically generated invalid CDI Spec file for
 		// any particular vendor shouldn't prevent injection of devices of
 		// different vendors. CDI itself knows better and it will fail the
 		// injection if necessary.
-
 		log.Warnf(context.TODO(), "CDI registry has errors: %v", err)
 	}
 
-	if _, err := registry.InjectDevices(c.Spec().Config, requested...); err != nil {
+	if _, err := cdi.InjectDevices(c.Spec().Config, requested...); err != nil {
 		return fmt.Errorf("CDI device injection failed: %w", err)
 	}
 
@@ -266,12 +297,17 @@ func (c *container) specInjectCDIDevices() error {
 // is set for the pod.
 //
 // Ref: https://github.com/kubernetes/kubernetes/issues/92211
-func getDeviceUserGroupID(runAsVal *types.Int64Value, hostVal uint32, enableDeviceOwnershipFromSecurityContext bool) *uint32 {
+func getDeviceUserGroupID(
+	runAsVal *types.Int64Value,
+	hostVal uint32,
+	enableDeviceOwnershipFromSecurityContext bool,
+) *uint32 {
 	if runAsVal != nil {
-		id := uint32(runAsVal.Value)
+		id := uint32(runAsVal.GetValue())
 		if id > 0 && enableDeviceOwnershipFromSecurityContext {
 			return &id
 		}
 	}
+
 	return &hostVal
 }
